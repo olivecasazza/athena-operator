@@ -1,204 +1,202 @@
 # n-autoresearch
 
-Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch). Same idea — agent modifies train.py, trains for 5 minutes, keeps or discards, repeats — but with structured experiment state, multi-GPU parallelism, adaptive search, and crash recovery via [iii-engine](https://github.com/iii-hq/iii-engine) (Worker/Function/Trigger).
+![progress](progress.png)
 
-The agent is still external. Claude, Codex, whatever you want. This repo is the infrastructure that replaces the bash loop, git-as-state, and flat TSV with queryable experiment tracking across N GPUs.
+*1 hour, 17 experiments, 3 kept improvements, 1.48% better. Dual RTX 4090, batch_size=4, depth=8, 50.3M params. The agent modifies train.py, trains for 5 minutes, keeps or discards, repeats. You come back to a better model.*
+
+Same idea as [karpathy/autoresearch](https://github.com/karpathy/autoresearch) — but with structured experiment state, multi-GPU parallelism, adaptive search, and crash recovery via [iii-engine](https://github.com/iii-hq/iii-engine) (Worker/Function/Trigger). The agent is still external. Claude, Codex, whatever you want. This repo is the infrastructure that replaces the bash loop, git-as-state, and flat TSV with queryable experiment tracking across N GPUs.
 
 ## How it works
 
-Two workers talk to iii-engine:
+The repo has three files that matter, same as autoresearch:
 
-    Orchestrator (Python) — 21 functions for experiment tracking, search strategy, GPU pool, reporting
-    GPU Worker (Rust) — one per GPU, executes uv run train.py, parses metrics, handles timeouts
+- **`prepare.py`** — data prep, tokenizer, eval. Not modified.
+- **`train.py`** — model, optimizer, training loop. The agent edits this.
+- **`program.md`** — agent instructions. The human edits this.
 
-The external agent calls the same uv run train.py but wraps it with REST API calls:
+Two workers talk to iii-engine to provide the infrastructure:
 
-    POST /api/experiment/register   — record hypothesis before training
-    POST /api/experiment/complete   — record metrics after, auto-decides keep/discard
-    POST /api/search/suggest        — get guidance on what to try next
-    POST /api/report/summary        — full stats for a run tag
+- **Orchestrator** (Python) — 22 functions for experiment tracking, search strategy, GPU pool, reporting.
+- **GPU Worker** (Rust) — one per GPU, executes `uv run train.py`, parses metrics, handles timeouts.
 
-Everything else stays the same. train.py is the only file agents modify. prepare.py is read-only. 5-minute fixed time budget. val_bpb is the metric.
+The agent calls the same `uv run train.py` but wraps it with REST API calls:
+
+```
+POST /api/experiment/setup      — init run tag
+POST /api/experiment/register   — record hypothesis before training
+POST /api/experiment/complete   — record metrics, auto keep/discard
+POST /api/search/suggest        — get guidance on what to try next
+POST /api/report/summary        — full stats for a run tag
+```
+
+Training runs for a **fixed 5-minute time budget** (wall clock). The metric is **val_bpb** (validation bits per byte) — lower is better, vocab-size-independent so architectural changes are fairly compared.
 
 ## Quick start
 
-Requirements: NVIDIA GPU(s), Python 3.10+, uv, Rust 1.82+.
+**Requirements:** NVIDIA GPU(s), Python 3.10+, [uv](https://docs.astral.sh/uv/), Rust 1.82+.
 
-    # 1. Install iii-engine
-    curl -fsSL https://install.iii.dev | sh
+```bash
+# 1. Install iii-engine
+curl -fsSL https://install.iii.dev | sh
 
-    # 2. Clone
-    git clone https://github.com/iii-hq/n-autoresearch.git
-    cd n-autoresearch
+# 2. Clone and install
+git clone https://github.com/iii-hq/n-autoresearch.git
+cd n-autoresearch
+uv sync
 
-    # 3. Install Python dependencies
-    uv sync
+# 3. Download data and train tokenizer (one-time)
+uv run prepare.py
 
-    # 4. Start iii-engine
-    iii --config iii-config.yaml
+# 4. Start iii-engine
+iii --config iii-config.yaml
 
-    # 5. Start orchestrator (new terminal)
-    uv run python workers/orchestrator/orchestrator.py
+# 5. Start orchestrator (new terminal)
+uv run python workers/orchestrator/orchestrator.py
 
-    # 6. Start GPU worker (new terminal, one per GPU)
-    cd workers/gpu
-    GPU_INDEX=0 REPO_DIR=/path/to/n-autoresearch cargo run --release
+# 6. Start GPU worker (new terminal, one per GPU)
+cd workers/gpu
+GPU_INDEX=0 REPO_DIR=/path/to/n-autoresearch cargo run --release
 
-    # For multiple GPUs:
-    GPU_INDEX=1 REPO_DIR=/path/to/n-autoresearch cargo run --release
+# For multiple GPUs:
+GPU_INDEX=1 REPO_DIR=/path/to/n-autoresearch cargo run --release
 
-    # 7. Download data and train tokenizer (one-time)
-    uv run prepare.py
+# 7. Point your agent at program.md and go
+```
 
-    # 8. Point your agent at program.md and go
-    # e.g. in Claude Code: "read program.md and kick off a new experiment"
+## Running the agent
 
-## What the agent does
+Point Claude Code, Codex, or any agent at this repo and prompt:
 
-Same loop as autoresearch, but with API calls for tracking:
+```
+Read program.md and kick off a new experiment.
+```
 
-    1. curl POST /api/experiment/setup          — init run tag
-    2. curl POST /api/search/suggest            — get search guidance
-    3. edit train.py                            — the experiment
-    4. git commit
-    5. curl POST /api/experiment/register       — record hypothesis
-    6. uv run train.py > run.log 2>&1           — train (5 min)
-    7. curl POST /api/experiment/complete       — record results
-       response: { improved: true, action: "keep_commit" }
-       or:       { improved: false, action: "git_reset" }
-    8. repeat from 2
+The agent loop:
 
-If training crashes:
+```
+1. POST /api/experiment/setup          — init run tag
+2. POST /api/search/suggest            — get search guidance
+3. edit train.py                       — the experiment
+4. git commit
+5. POST /api/experiment/register       — record hypothesis
+6. uv run train.py > run.log 2>&1     — train (5 min)
+7. POST /api/experiment/complete       — record results
+   { improved: true,  action: "keep_commit" }
+   { improved: false, action: "git_reset" }
+8. repeat from 2
+```
 
-    curl POST /api/experiment/crash             — tracks consecutive crashes
-    response: { consecutive_crashes: 2, should_abort: false }
+If training crashes, `POST /api/experiment/crash` tracks consecutive failures and aborts after 3.
 
-## Functions (23)
+## Multi-GPU
 
-    experiment::setup           init tag + branch + strategy
-    experiment::register        record hypothesis before training
-    experiment::complete        record metrics, auto keep/discard, detect near-misses
-    experiment::crash           track consecutive crashes, abort after 3
-    experiment::history         query by tag/status/limit
-    experiment::best            current best for a tag
-    experiment::near_misses     experiments within 0.002 BPB of best
+N GPU workers = N parallel experiments. Each agent acquires a GPU, trains, records, releases. Search strategy adapts globally across all GPUs.
 
-    search::strategy            get current mode (explore/exploit/combine/ablation)
-    search::set_strategy        manual override
-    search::adapt               auto-adapt from experiment history
-    search::suggest_direction   category stats, underexplored areas, concrete suggestions
+```bash
+curl localhost:3111/api/pool/list
+# { "total": 2, "idle": 0, "training": 2 }
+```
 
-    pool::register_gpu          GPU worker self-registers on startup
-    pool::heartbeat             30s heartbeat, offline after 60s stale
-    pool::list                  all GPUs with status
-    pool::acquire               atomic claim of idle GPU
-    pool::release               return GPU to pool
-    pool::deregister            remove on shutdown
+GPU workers on different machines can point to the same orchestrator:
 
-    report::summary             full stats, BPB progression, category breakdown
-    report::tsv                 export in original autoresearch TSV format
-    report::diff                compare two experiments
-    report::tags                list all run tags
+```bash
+# CPU machine (orchestrator)
+iii --config iii-config.yaml
+uv run python workers/orchestrator/orchestrator.py
 
-    gpu::train                  execute training, parse metrics, enforce timeout
-    gpu::health                 nvidia-smi temperature/memory/utilization
+# Each GPU machine
+III_WS_URL=ws://<orchestrator-ip>:49134 GPU_INDEX=0 cargo run --release
+```
 
-## State (KV)
-
-    experiments:{id}    full experiment object (hypothesis, metrics, status, diff)
-    lineage:{tag}       ordered array of experiment IDs
-    best:{tag}          current best val_bpb + commit + experiment_id
-    near_misses:{id}    experiments that almost improved (delta < 0.002)
-    gpu_pool:{gpu_id}   GPU worker status (idle/training/offline)
-    strategy:{tag}      search mode + temperature + reason
-    tags:{name}         run metadata (total/kept experiments, best BPB)
-    crashes:{tag}       consecutive crash count
+Ports 49134 (WebSocket) and 3111 (REST) must be reachable from GPU machines.
 
 ## Search adaptation
 
 Strategy auto-adapts after each experiment based on recent history:
 
-    explore     (default) broad random changes, try underexplored categories
-    exploit     refine around best config, small incremental tweaks
-    combine     merge two near-miss experiments that improved different aspects
-    ablation    systematically remove components to find what matters
+```
+explore     (default) broad random changes, try underexplored categories
+exploit     refine around best config, small incremental tweaks
+combine     merge two near-miss experiments that improved different aspects
+ablation    systematically remove components to find what matters
+```
 
 Transitions:
-    crash rate > 50%                    -> exploit (conservative)
-    plateau + near-misses available     -> combine
-    plateau + no near-misses            -> ablation
-    keep rate > 30%                     -> exploit
-    default                             -> explore
 
-## Multi-GPU
-
-N GPU workers = N parallel experiments on the same tag. Each agent acquires a GPU, trains, records results, releases. Search strategy adapts globally.
-
-    curl localhost:3111/api/pool/list
-    { "total": 8, "idle": 5, "training": 3 }
-
-    curl -X POST localhost:3111/api/pool/acquire -d '{"experiment_id":"exp-xxx"}'
-    { "acquired": true, "gpu_id": "gpu-3", "gpu_index": 3 }
-
-    CUDA_VISIBLE_DEVICES=3 uv run train.py > run.log 2>&1
-
-    curl -X POST localhost:3111/api/pool/release -d '{"gpu_id":"gpu-3"}'
-
-### Cross-machine GPU workers
-
-GPU workers on different machines can point to the same orchestrator running on a CPU-only machine. The orchestrator and iii-engine share state via KV, and GPU workers communicate over WebSocket.
-
-On the CPU machine (orchestrator):
-
-    iii --config iii-config.yaml
-    uv run python workers/orchestrator/orchestrator.py
-
-On each GPU machine:
-
-    cd workers/gpu
-    III_WS_URL=ws://<orchestrator-ip>:49134 GPU_INDEX=0 REPO_DIR=/path/to/n-autoresearch cargo run --release
-
-Requirements:
-- Port 49134 (WebSocket) and 3111 (REST API) must be reachable from GPU machines
-- Each GPU machine needs a local clone of the repo with `prepare.py` already run (data files present)
-- The `REPO_DIR` env var must point to the local clone on each GPU machine
+```
+crash rate > 50%                    -> exploit (conservative)
+plateau + near-misses available     -> combine
+plateau + no near-misses            -> ablation
+keep rate > 30%                     -> exploit
+default                             -> explore
+```
 
 ## Project structure
 
-    iii-config.yaml                         iii-engine runtime config
-    program.md                              agent instructions
-    prepare.py                              data prep + eval (read-only)
-    train.py                                model + optimizer + loop (agent modifies)
-    workers/
-      orchestrator/
-        orchestrator.py                     Python worker — 21 functions, 23 triggers
-      gpu/                                  Rust worker (one per GPU)
-        src/
-          main.rs                           init, GPU detection, pool registration
-          config.rs                         env config
-          state.rs                          StateKV wrapper
-          functions/train.rs                gpu::train + gpu::health
-          triggers/mod.rs                   HTTP + cron triggers
+```
+prepare.py                              data prep + eval (do not modify)
+train.py                                model + optimizer + loop (agent modifies)
+program.md                              agent instructions
+iii-config.yaml                         iii-engine runtime config
+workers/
+  orchestrator/
+    orchestrator.py                     Python worker — 22 functions, 22 triggers
+  gpu/                                  Rust worker (one per GPU)
+    src/
+      main.rs                           init, GPU detection, pool registration
+      config.rs                         env config
+      state.rs                          StateKV wrapper
+      functions/train.rs                gpu::train + gpu::health
+      triggers/mod.rs                   HTTP + cron triggers
+```
 
-## What stays the same vs autoresearch
+## Functions (22)
 
-Same:
-    - train.py is the only file agents modify
-    - prepare.py is read-only
-    - 5-minute fixed time budget
-    - val_bpb as the single metric
-    - git branches (autoresearch/<tag>)
-    - external agents drive the loop
-    - program.md as agent instructions
+```
+experiment::setup           init tag + branch + strategy
+experiment::register        record hypothesis before training
+experiment::complete        record metrics, auto keep/discard, detect near-misses
+experiment::crash           track consecutive crashes, abort after 3
+experiment::history         query by tag/status/limit
+experiment::best            current best for a tag
+experiment::near_misses     experiments within 0.002 BPB of best
 
-Different:
-    - structured KV state instead of results.tsv
-    - multi-GPU parallel experiments
-    - adaptive search strategy
-    - crash recovery with consecutive tracking
-    - near-miss detection for combination strategies
-    - queryable experiment history with category analysis
-    - TSV export for backwards compatibility
+search::strategy            get current mode (explore/exploit/combine/ablation)
+search::set_strategy        manual override
+search::adapt               auto-adapt from experiment history
+search::suggest_direction   category stats, underexplored areas, concrete suggestions
+
+pool::register_gpu          GPU worker self-registers on startup
+pool::heartbeat             30s heartbeat, offline after 60s stale
+pool::list                  all GPUs with status
+pool::acquire               atomic claim of idle GPU
+pool::release               return GPU to pool
+pool::deregister            remove on shutdown
+
+report::summary             full stats, BPB progression, category breakdown
+report::tsv                 export in original autoresearch TSV format
+report::diff                compare two experiments
+report::tags                list all run tags
+```
+
+## Design choices
+
+- **Single file to modify.** The agent only touches `train.py`. Diffs are reviewable, scope is manageable.
+- **Fixed time budget.** Training always runs for exactly 5 minutes. Experiments are directly comparable regardless of what the agent changes. Autoresearch finds the most optimal model for your platform in that time budget.
+- **Structured state.** Experiments, lineage, GPU pool, search strategy all live in iii-engine KV. Queryable, exportable, survives crashes.
+- **Multi-GPU native.** N GPUs = N parallel experiments. Atomic GPU acquisition prevents conflicts. Strategy adapts globally.
+- **TSV compatibility.** `report::tsv` exports in the original autoresearch format for backwards compatibility.
+
+## Platform notes
+
+Tested on dual RTX 4090 (24GB each). For smaller GPUs:
+
+- Lower `DEPTH` from 8 to 4
+- Set `DEVICE_BATCH_SIZE` to 4 (RTX 4090) or 2 (smaller)
+- Disable `torch.compile` if compilation OOMs
+- Use `WINDOW_PATTERN = "L"` instead of `"SSSL"` if attention is slow
+
+For H100 (80GB), the defaults work as-is.
 
 ## License
 
