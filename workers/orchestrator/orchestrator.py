@@ -46,13 +46,13 @@ def _reg_trigger(sdk, trigger_type, function_id, config=None):
     sdk.register_trigger({"type": trigger_type, "function_id": function_id, "config": config or {}})
 
 
-def _trigger(sdk, function_id, payload=None):
-    return sdk.trigger({"function_id": function_id, "payload": payload or {}})
+async def _trigger(sdk, function_id, payload=None):
+    return await sdk._async_trigger({"function_id": function_id, "payload": payload or {}})
 
 
 def _trigger_void(sdk, function_id, payload=None):
     from iii import TriggerActionVoid
-    return sdk.trigger({"function_id": function_id, "payload": payload or {}, "action": TriggerActionVoid()})
+    asyncio.ensure_future(sdk._async_trigger({"function_id": function_id, "payload": payload or {}, "action": TriggerActionVoid()}))
 
 
 class StateKV:
