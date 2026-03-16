@@ -4,7 +4,7 @@ import time
 import asyncio
 import signal
 from datetime import datetime, timezone
-from iii import InitOptions, OtelConfig, Logger, register_worker
+from iii import InitOptions, OtelConfig, Logger, TriggerAction, register_worker
 
 logger = Logger("orchestrator")
 
@@ -50,9 +50,8 @@ async def _trigger(sdk, function_id, payload=None):
     return await sdk._async_trigger({"function_id": function_id, "payload": payload or {}})
 
 
-def _trigger_void(sdk, function_id, payload=None):
-    from iii import TriggerActionVoid
-    asyncio.ensure_future(sdk._async_trigger({"function_id": function_id, "payload": payload or {}, "action": TriggerActionVoid()}))
+async def _trigger_void(sdk, function_id, payload=None):
+    await sdk._async_trigger({"function_id": function_id, "payload": payload or {}, "action": TriggerAction.Void()})
 
 
 class StateKV:
@@ -225,7 +224,7 @@ def register_experiment_functions(sdk, kv):
 
             await kv.delete(SCOPES["crashes"], exp["tag"])
 
-        _trigger_void(sdk, "search::adapt", {"tag": exp["tag"]})
+        await _trigger_void(sdk, "search::adapt", {"tag": exp["tag"]})
 
         return _ok({
             "experiment_id": exp["id"],
@@ -258,7 +257,7 @@ def register_experiment_functions(sdk, kv):
                 tag["total_experiments"] += 1
                 await kv.set(SCOPES["tags"], exp["tag"], tag)
 
-        _trigger_void(sdk, "search::adapt", {"tag": exp["tag"]})
+        await _trigger_void(sdk, "search::adapt", {"tag": exp["tag"]})
 
         return _ok({
             "experiment_id": exp["id"],
