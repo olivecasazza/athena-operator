@@ -4,7 +4,7 @@
 
 *1 hour, 17 experiments, 3 kept improvements, 1.48% better. Dual RTX 4090, batch_size=4, depth=8, 50.3M params. The agent modifies train.py, trains for 5 minutes, keeps or discards, repeats. You come back to a better model.*
 
-Same idea as [karpathy/autoresearch](https://github.com/karpathy/autoresearch) — but with structured experiment state, multi-GPU parallelism, adaptive search, and crash recovery via [iii-engine](https://github.com/iii-hq/iii-engine) (Worker/Function/Trigger). The agent is still external. Claude, Codex, whatever you want. This repo is the infrastructure that replaces the bash loop, git-as-state, and flat TSV with queryable experiment tracking across N GPUs.
+Same idea as [karpathy/autoresearch](https://github.com/karpathy/autoresearch) — but with structured experiment state, multi-GPU parallelism, adaptive search, and crash recovery via [iii](https://github.com/iii-hq/iii) (Worker/Function/Trigger). The agent is still external. Claude, Codex, whatever you want. This repo is the infrastructure that replaces the bash loop, git-as-state, and flat TSV with queryable experiment tracking across N GPUs.
 
 ## How it works
 
@@ -14,7 +14,7 @@ The repo has three files that matter, same as autoresearch:
 - **`train.py`** — model, optimizer, training loop. The agent edits this.
 - **`program.md`** — agent instructions. The human edits this.
 
-Two workers talk to iii-engine to provide the infrastructure:
+Two workers talk to iii to provide the infrastructure:
 
 - **Orchestrator** (Python) — 22 functions for experiment tracking, search strategy, GPU pool, reporting.
 - **GPU Worker** (Rust) — one per GPU, executes `uv run train.py`, parses metrics, handles timeouts.
@@ -36,8 +36,8 @@ Training runs for a **fixed 5-minute time budget** (wall clock). The metric is *
 **Requirements:** NVIDIA GPU(s), Python 3.10+, [uv](https://docs.astral.sh/uv/), Rust 1.82+.
 
 ```bash
-# 1. Install iii-engine
-curl -fsSL https://install.iii.dev | sh
+# 1. Install iii
+curl -fsSL https://install.iii.dev/iii/main/install.sh | sh
 
 # 2. Clone and install
 git clone https://github.com/iii-hq/n-autoresearch.git
@@ -47,7 +47,7 @@ uv sync
 # 3. Download data and train tokenizer (one-time)
 uv run prepare.py
 
-# 4. Start iii-engine
+# 4. Start iii
 iii --config iii-config.yaml
 
 # 5. Start orchestrator (new terminal)
@@ -137,7 +137,7 @@ default                             -> explore
 prepare.py                              data prep + eval (do not modify)
 train.py                                model + optimizer + loop (agent modifies)
 program.md                              agent instructions
-iii-config.yaml                         iii-engine runtime config
+iii-config.yaml                         iii runtime config
 workers/
   orchestrator/
     orchestrator.py                     Python worker — 22 functions, 22 triggers
@@ -183,7 +183,7 @@ report::tags                list all run tags
 
 - **Single file to modify.** The agent only touches `train.py`. Diffs are reviewable, scope is manageable.
 - **Fixed time budget.** Training always runs for exactly 5 minutes. Experiments are directly comparable regardless of what the agent changes. Autoresearch finds the most optimal model for your platform in that time budget.
-- **Structured state.** Experiments, lineage, GPU pool, search strategy all live in iii-engine KV. Queryable, exportable, survives crashes.
+- **Structured state.** Experiments, lineage, GPU pool, search strategy all live in iii KV. Queryable, exportable, survives crashes.
 - **Multi-GPU native.** N GPUs = N parallel experiments. Atomic GPU acquisition prevents conflicts. Strategy adapts globally.
 - **TSV compatibility.** `report::tsv` exports in the original autoresearch format for backwards compatibility.
 
