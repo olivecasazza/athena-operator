@@ -2,9 +2,9 @@
 
 ![progress](progress.png)
 
-*1 hour, 17 experiments, 3 kept improvements, 1.48% better. Dual RTX 4090, batch_size=4, depth=8, 50.3M params. The agent modifies train.py, trains for 5 minutes, keeps or discards, repeats. You come back to a better model.*
+*Above: a 1-hour test run on dual RTX 4090s — 17 experiments, 3 kept improvements, 1.48% val_bpb improvement. Both GPUs running experiments in parallel, batch_size=4, depth=8, 50.3M params. A longer overnight run (8-24h) across more GPUs would find significantly more improvements, same as [karpathy's 2-day run](https://github.com/karpathy/autoresearch) that found 20+ improvements across 276 experiments.*
 
-Same idea as [karpathy/autoresearch](https://github.com/karpathy/autoresearch) — but with structured experiment state, multi-GPU parallelism, adaptive search, and crash recovery via [iii](https://github.com/iii-hq/iii) (Worker/Function/Trigger). The agent is still external. Claude, Codex, whatever you want. This repo is the infrastructure that replaces the bash loop, git-as-state, and flat TSV with queryable experiment tracking across N GPUs.
+Same idea as [autoresearch](https://github.com/karpathy/autoresearch) — agent modifies train.py, trains for 5 minutes, keeps or discards, repeats — but with structured experiment state, multi-GPU parallelism, adaptive search, and crash recovery via [iii](https://github.com/iii-hq/iii) (Worker/Function/Trigger). The agent is still external. Claude, Codex, whatever you want. This repo is the infrastructure that replaces the bash loop, git-as-state, and flat TSV with queryable experiment tracking across N GPUs. More GPUs = more parallel experiments = faster research.
 
 ## How it works
 
