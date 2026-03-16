@@ -4,7 +4,15 @@ import time
 import asyncio
 import signal
 from datetime import datetime, timezone
-from iii import III, InitOptions, OtelConfig, Logger
+from iii import InitOptions, OtelConfig, Logger
+try:
+    from iii import III
+except ImportError:
+    from iii.iii import III
+try:
+    from iii import register_worker as _register_worker
+except ImportError:
+    _register_worker = None
 
 logger = Logger("orchestrator")
 
@@ -645,7 +653,7 @@ def register_triggers(sdk):
 
 
 async def main():
-    sdk = III(WS_URL, InitOptions(
+    opts = InitOptions(
         worker_name=WORKER_NAME,
         otel=OtelConfig(
             enabled=True,
@@ -653,8 +661,12 @@ async def main():
             service_version=VERSION,
             metrics_enabled=True,
         ),
-    ))
-    await sdk.connect()
+    )
+    if _register_worker is not None:
+        sdk = _register_worker(WS_URL, opts)
+    else:
+        sdk = III(WS_URL, opts)
+        await sdk.connect()
 
     kv = StateKV(sdk)
 
