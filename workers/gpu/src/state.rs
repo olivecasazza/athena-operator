@@ -1,40 +1,35 @@
-use iii_sdk::{III, IIIError};
+use iii_sdk::III;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
-use std::sync::Arc;
 
 pub struct StateKV {
-    iii: Arc<III>,
+    iii: III,
 }
 
 impl StateKV {
-    pub fn new(iii: Arc<III>) -> Self {
+    pub fn new(iii: III) -> Self {
         Self { iii }
     }
 
-    pub async fn get<T: DeserializeOwned>(&self, scope: &str, key: &str) -> Option<T> {
+    pub fn get<T: DeserializeOwned>(&self, scope: &str, key: &str) -> Option<T> {
         let result = self
             .iii
-            .trigger("state::get", json!({ "scope": scope, "key": key }))
-            .await
+            .trigger(json!({
+                "function_id": "state::get",
+                "payload": { "scope": scope, "key": key }
+            }))
             .ok()?;
-        let value = result.get("value")?;
-        serde_json::from_value(value.clone()).ok()
+        serde_json::from_value(result).ok()
     }
 
-    pub async fn set<T: Serialize>(
-        &self,
-        scope: &str,
-        key: &str,
-        data: &T,
-    ) -> Result<(), IIIError> {
+    pub fn set<T: Serialize>(&self, scope: &str, key: &str, data: &T) -> Result<(), String> {
         self.iii
-            .trigger(
-                "state::set",
-                json!({ "scope": scope, "key": key, "value": data }),
-            )
-            .await?;
+            .trigger(json!({
+                "function_id": "state::set",
+                "payload": { "scope": scope, "key": key, "value": data }
+            }))
+            .map_err(|e| format!("{:?}", e))?;
         Ok(())
     }
 }

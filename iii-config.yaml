@@ -1,30 +1,35 @@
-modules:
-  - class: modules::state::StateModule
+workers:
+  - name: iii-worker-manager
+    config:
+      port: 49134
+      host: 127.0.0.1
+
+  - name: iii-state
     config:
       adapter:
-        class: modules::state::adapters::KvStore
+        name: kv
         config:
           store_method: file_based
           file_path: ./data/state_store.db
 
-  - class: modules::api::RestApiModule
+  - name: iii-http
     config:
       port: 3111
       host: 127.0.0.1
       cors:
         allowed_origins: ["*"]
 
-  - class: modules::pubsub::PubSubModule
+  - name: iii-pubsub
     config:
       adapter:
-        class: modules::pubsub::LocalAdapter
+        name: local
 
-  - class: modules::cron::CronModule
+  - name: iii-cron
     config:
       adapter:
-        class: modules::cron::KvCronAdapter
+        name: kv
 
-  - class: modules::observability::OtelModule
+  - name: iii-observability
     config:
       enabled: true
       service_name: n-autoresearch

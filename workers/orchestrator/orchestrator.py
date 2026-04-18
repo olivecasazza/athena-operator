@@ -39,7 +39,7 @@ def experiment_id():
 
 
 def _reg_fn(sdk, fn_id, handler, description=""):
-    sdk.register_function({"id": fn_id, "description": description}, handler)
+    sdk.register_function(fn_id, handler, description=description)
 
 
 def _reg_trigger(sdk, trigger_type, function_id, config=None):
@@ -47,11 +47,11 @@ def _reg_trigger(sdk, trigger_type, function_id, config=None):
 
 
 async def _trigger(sdk, function_id, payload=None):
-    return await sdk._async_trigger({"function_id": function_id, "payload": payload or {}})
+    return await sdk.trigger_async({"function_id": function_id, "payload": payload or {}})
 
 
 async def _trigger_void(sdk, function_id, payload=None):
-    await sdk._async_trigger({"function_id": function_id, "payload": payload or {}, "action": TriggerAction.Void()})
+    await sdk.trigger_async({"function_id": function_id, "payload": payload or {}, "action": TriggerAction.Void()})
 
 
 class StateKV:
@@ -700,7 +700,7 @@ async def main():
     loop.add_signal_handler(signal.SIGTERM, shutdown)
 
     await stop.wait()
-    await sdk.shutdown()
+    sdk.shutdown()
 
 
 if __name__ == "__main__":
