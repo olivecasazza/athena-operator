@@ -1,14 +1,11 @@
-use iii_sdk::{III, WorkerMetadata};
-use serde_json::{json, Value};
+use iii_sdk::{register_worker, InitOptions, OtelConfig};
+use serde_json::json;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::signal;
-use uuid::Uuid;
 
 mod config;
-mod functions;
 mod state;
-mod triggers;
 
 use config::GpuConfig;
 
@@ -28,32 +25,27 @@ async fn main() {
         "Starting n-autoresearch GPU worker"
     );
 
-    let iii = Arc::new(III::with_metadata(
+    let iii = register_worker(
         &config.ws_url,
-        WorkerMetadata {
-            name: format!("gpu-worker-{}", config.gpu_index),
+        InitOptions {
+            worker_name: Some(format!("gpu-worker-{}", config.gpu_index)),
+            otel: Some(OtelConfig::default()),
             ..Default::default()
         },
-    ));
-    iii.connect().await.expect("Failed to connect to iii-engine");
+    );
 
     let gpu_id = format!("gpu-{}", config.gpu_index);
-
-    functions::register_all(iii.clone(), &config, &gpu_id);
-    triggers::register_all(iii.clone(), &gpu_id);
-
     let gpu_info = detect_gpu(&config).await;
-    let reg_result = iii
-        .trigger(
-            "pool::register_gpu",
-            json!({
-                "gpu_id": gpu_id,
-                "gpu_name": gpu_info.name,
-                "gpu_index": config.gpu_index,
-                "vram_mb": gpu_info.vram_mb,
-            }),
-        )
-        .await;
+
+    let reg_result = iii.trigger(json!({
+        "function_id": "pool::register_gpu",
+        "payload": {
+            "gpu_id": &gpu_id,
+            "gpu_name": gpu_info.name,
+            "gpu_index": config.gpu_index,
+            "vram_mb": gpu_info.vram_mb,
+        }
+    }));
     tracing::info!(?reg_result, "Registered with GPU pool");
 
     tracing::info!(gpu_id = %gpu_id, "GPU worker ready. Waiting for experiments...");
@@ -61,10 +53,11 @@ async fn main() {
     signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
     tracing::info!("Shutting down GPU worker...");
 
-    let _ = iii
-        .trigger("pool::deregister", json!({ "gpu_id": gpu_id }))
-        .await;
-    iii.shutdown_async().await;
+    let _ = iii.trigger(json!({
+        "function_id": "pool::deregister",
+        "payload": { "gpu_id": &gpu_id }
+    }));
+    iii.shutdown();
 }
 
 struct GpuInfo {
