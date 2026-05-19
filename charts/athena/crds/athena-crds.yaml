@@ -153,10 +153,7 @@
                         "type": "string"
                       },
                       "tolerations": {
-                        "items": {
-                          "type": "object",
-                          "x-kubernetes-preserve-unknown-fields": true
-                        },
+                        "items": {},
                         "type": "array"
                       }
                     },
@@ -317,7 +314,7 @@
                     "additionalProperties": {
                       "properties": {
                         "default": {
-                          "x-kubernetes-preserve-unknown-fields": true
+                          "nullable": true
                         },
                         "description": {
                           "nullable": true,
@@ -637,6 +634,82 @@
               "status": {
                 "nullable": true,
                 "properties": {
+                  "artifacts": {
+                    "nullable": true,
+                    "properties": {
+                      "checkpointsUri": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "metricsUri": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "outputCommit": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "reportsUri": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "workspaceUri": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "conditions": {
+                    "items": {
+                      "properties": {
+                        "lastTransitionTime": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "message": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "reason": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "status": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "type": {
+                          "nullable": true,
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "nullable": true,
+                    "type": "array"
+                  },
+                  "cost": {
+                    "nullable": true,
+                    "properties": {
+                      "estimatedUsd": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
+                      "gpuHours": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
+                      "runtimeSeconds": {
+                        "format": "int64",
+                        "nullable": true,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
                   "decision": {
                     "enum": [
                       "keep",
@@ -645,6 +718,50 @@
                     ],
                     "nullable": true,
                     "type": "string"
+                  },
+                  "environment": {
+                    "nullable": true,
+                    "properties": {
+                      "id": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "jobName": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "namespace": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "nodeNames": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "nullable": true,
+                        "type": "array"
+                      },
+                      "podNames": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "nullable": true,
+                        "type": "array"
+                      },
+                      "provider": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "skypilotCluster": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "skypilotJobId": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
                   },
                   "jobName": {
                     "nullable": true,
@@ -662,6 +779,34 @@
                     "additionalProperties": true,
                     "type": "object"
                   },
+                  "metricsDetail": {
+                    "nullable": true,
+                    "properties": {
+                      "best": {
+                        "nullable": true
+                      },
+                      "lastUpdated": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "latest": {
+                        "nullable": true
+                      },
+                      "metricsPath": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "objectiveGoal": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "objectiveName": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
                   "metricsLink": {
                     "nullable": true,
                     "type": "string"
@@ -676,6 +821,34 @@
                       "error"
                     ],
                     "type": "string"
+                  },
+                  "resources": {
+                    "nullable": true,
+                    "properties": {
+                      "cpuRequested": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "gpuAllocated": {
+                        "format": "int64",
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "gpuRequested": {
+                        "format": "int64",
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "gpuType": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "memoryRequested": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
                   },
                   "workspacePath": {
                     "nullable": true,

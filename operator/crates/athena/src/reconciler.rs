@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use athena_api::experiment::{Experiment, ExperimentPhase, ExperimentStatus};
+use athena_api::experiment::{
+    Experiment, ExperimentEnvironment, ExperimentPhase, ExperimentStatus,
+};
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use serde_json::json;
@@ -32,12 +34,19 @@ pub async fn reconcile(experiment: Arc<Experiment>, ctx: Arc<Context>) -> Result
 
     if phase == ExperimentPhase::Pending {
         let api: Api<Experiment> = Api::namespaced(ctx.client.clone(), ns);
+        let job_name = format!("exp-{}", name);
         let status = ExperimentStatus {
             phase: ExperimentPhase::Preparing,
             workspace_path: Some(format!(
                 "/workspace/runs/{}/{}",
                 experiment.spec.campaign_ref, name
             )),
+            job_name: Some(job_name.clone()),
+            environment: Some(ExperimentEnvironment {
+                namespace: Some(ns.to_string()),
+                job_name: Some(job_name),
+                ..Default::default()
+            }),
             message: Some("workspace preparation/job generation not implemented yet".to_string()),
             ..Default::default()
         };
