@@ -1,0 +1,703 @@
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "runtimeprofiles.research.nixlab.io"
+  },
+  "spec": {
+    "group": "research.nixlab.io",
+    "names": {
+      "categories": [],
+      "kind": "RuntimeProfile",
+      "plural": "runtimeprofiles",
+      "shortNames": [
+        "rtp"
+      ],
+      "singular": "runtimeprofile"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.runtime.type",
+            "name": "Runtime",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".spec.runtime.mode",
+            "name": "Mode",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.ready",
+            "name": "Ready",
+            "type": "boolean"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for RuntimeProfileSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "args": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "command": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "image": {
+                    "type": "string"
+                  },
+                  "policy": {
+                    "default": {
+                      "allowCommandOverride": false,
+                      "allowImageOverride": false,
+                      "allowSecretRefs": false
+                    },
+                    "properties": {
+                      "allowCommandOverride": {
+                        "type": "boolean"
+                      },
+                      "allowImageOverride": {
+                        "type": "boolean"
+                      },
+                      "allowSecretRefs": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "allowCommandOverride",
+                      "allowImageOverride",
+                      "allowSecretRefs"
+                    ],
+                    "type": "object"
+                  },
+                  "resources": {
+                    "default": {},
+                    "properties": {
+                      "limits": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "type": "object"
+                      },
+                      "requests": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "type": "object"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "runtime": {
+                    "properties": {
+                      "config": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "mode": {
+                        "enum": [
+                          "batchJob",
+                          "service",
+                          "externalJob"
+                        ],
+                        "type": "string"
+                      },
+                      "type": {
+                        "enum": [
+                          "pytorch",
+                          "mlx",
+                          "ollama",
+                          "vllm",
+                          "llamaCpp",
+                          "skypilot",
+                          "modal",
+                          "custom"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "mode",
+                      "type"
+                    ],
+                    "type": "object"
+                  },
+                  "scheduling": {
+                    "default": {},
+                    "properties": {
+                      "nodeSelector": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "type": "object"
+                      },
+                      "priorityClassName": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "tolerations": {
+                        "items": {},
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "storage": {
+                    "default": {
+                      "workspaceClaimName": "athena-workspace",
+                      "workspaceMountPath": "/workspace"
+                    },
+                    "properties": {
+                      "workspaceClaimName": {
+                        "type": "string"
+                      },
+                      "workspaceMountPath": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "workspaceClaimName",
+                      "workspaceMountPath"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "image",
+                  "runtime"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "message": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "ready": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ready"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "RuntimeProfile",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "experimenttemplates.research.nixlab.io"
+  },
+  "spec": {
+    "group": "research.nixlab.io",
+    "names": {
+      "categories": [],
+      "kind": "ExperimentTemplate",
+      "plural": "experimenttemplates",
+      "shortNames": [
+        "ext"
+      ],
+      "singular": "experimenttemplate"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for ExperimentTemplateSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "defaults": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "metrics": {
+                    "default": {
+                      "parser": {
+                        "path": "metrics.json",
+                        "type": "file"
+                      }
+                    },
+                    "properties": {
+                      "parser": {
+                        "default": {
+                          "path": "metrics.json",
+                          "type": "file"
+                        },
+                        "properties": {
+                          "path": {
+                            "default": "metrics.json",
+                            "type": "string"
+                          },
+                          "patterns": {
+                            "additionalProperties": {
+                              "type": "string"
+                            },
+                            "type": "object"
+                          },
+                          "type": {
+                            "enum": [
+                              "file",
+                              "regex"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "objective": {
+                    "properties": {
+                      "goal": {
+                        "enum": [
+                          "minimize",
+                          "maximize"
+                        ],
+                        "type": "string"
+                      },
+                      "metric": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "goal",
+                      "metric"
+                    ],
+                    "type": "object"
+                  },
+                  "parameterSchema": {
+                    "additionalProperties": {
+                      "properties": {
+                        "default": {
+                          "nullable": true
+                        },
+                        "description": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "object"
+                  },
+                  "runtimeProfileRef": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "properties": {
+                      "git": {
+                        "properties": {
+                          "commit": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "ref": {
+                            "type": "string"
+                          },
+                          "url": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "ref",
+                          "url"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "git"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "objective",
+                  "runtimeProfileRef",
+                  "source"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "message": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "ready": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ready"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "ExperimentTemplate",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "researchcampaigns.research.nixlab.io"
+  },
+  "spec": {
+    "group": "research.nixlab.io",
+    "names": {
+      "categories": [],
+      "kind": "ResearchCampaign",
+      "plural": "researchcampaigns",
+      "shortNames": [
+        "rcp"
+      ],
+      "singular": "researchcampaign"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.templateRef",
+            "name": "Template",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.runningExperiments",
+            "name": "Running",
+            "type": "integer"
+          },
+          {
+            "jsonPath": ".status.succeededExperiments",
+            "name": "Succeeded",
+            "type": "integer"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for ResearchCampaignSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "budget": {
+                    "default": {
+                      "maxDuration": "24h",
+                      "maxExperiments": 300
+                    },
+                    "properties": {
+                      "maxDuration": {
+                        "type": "string"
+                      },
+                      "maxExperiments": {
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "maxDuration",
+                      "maxExperiments"
+                    ],
+                    "type": "object"
+                  },
+                  "concurrency": {
+                    "default": 0,
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "strategy": {
+                    "default": {
+                      "type": "heuristic"
+                    },
+                    "properties": {
+                      "type": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "type": "object"
+                  },
+                  "templateRef": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "templateRef"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "bestExperiment": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "failedExperiments": {
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "runningExperiments": {
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "succeededExperiments": {
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "failedExperiments",
+                  "runningExperiments",
+                  "succeededExperiments"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "ResearchCampaign",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "experiments.research.nixlab.io"
+  },
+  "spec": {
+    "group": "research.nixlab.io",
+    "names": {
+      "categories": [],
+      "kind": "Experiment",
+      "plural": "experiments",
+      "shortNames": [
+        "exp"
+      ],
+      "singular": "experiment"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".status.phase",
+            "name": "Phase",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.decision",
+            "name": "Decision",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for ExperimentSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "campaignRef": {
+                    "type": "string"
+                  },
+                  "hypothesis": {
+                    "type": "string"
+                  },
+                  "parameters": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "patch": {
+                    "nullable": true,
+                    "properties": {
+                      "type": {
+                        "enum": [
+                          "gitPatch",
+                          "none"
+                        ],
+                        "type": "string"
+                      },
+                      "value": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "value"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "campaignRef",
+                  "hypothesis"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "decision": {
+                    "enum": [
+                      "keep",
+                      "discard",
+                      "needsReview"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "jobName": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "logsLink": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "message": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "metrics": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "metricsLink": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "phase": {
+                    "enum": [
+                      "pending",
+                      "preparing",
+                      "running",
+                      "succeeded",
+                      "failed",
+                      "error"
+                    ],
+                    "type": "string"
+                  },
+                  "workspacePath": {
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "phase"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "Experiment",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}

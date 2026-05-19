@@ -1,0 +1,40 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "athena.fullname" . }}
+rules:
+  - apiGroups: ["research.nixlab.io"]
+    resources: ["runtimeprofiles", "experimenttemplates", "researchcampaigns", "experiments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["research.nixlab.io"]
+    resources: ["runtimeprofiles/status", "experimenttemplates/status", "researchcampaigns/status", "experiments/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "persistentvolumeclaims", "events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "athena.fullname" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "athena.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "athena.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "athena.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "athena.labels" . | nindent 4 }}
+{{- end }}

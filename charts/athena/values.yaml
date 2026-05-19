@@ -1,0 +1,28 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/iii-experimental/athena
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+metrics:
+  enabled: true
+  port: 8080
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+
+observability:
+  grafanaDashboard:
+    enabled: true
+
+serviceAccount:
+  create: true
+  name: "athena-operator"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi

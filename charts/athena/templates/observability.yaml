@@ -1,0 +1,45 @@
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "athena.fullname" . }}
+  labels:
+    {{- include "athena.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "athena.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+{{- end }}
+---
+{{- if .Values.observability.grafanaDashboard.enabled }}
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: {{ include "athena.fullname" . }}
+  namespace: monitoring
+  labels:
+    {{- include "athena.labels" . | nindent 4 }}
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana"
+  json: |
+    {
+      "title": "Athena Research Experiments",
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Running Experiments",
+          "targets": [
+            {
+              "expr": "sum(athena_experiments_total{phase=\"Running\"}) by (campaign)",
+              "legendFormat": "{{`{{campaign}}`}}"
+            }
+          ]
+        }
+      ]
+    }
+{{- end }}

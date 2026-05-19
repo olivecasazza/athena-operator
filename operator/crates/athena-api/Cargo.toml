@@ -1,0 +1,14 @@
+[package]
+name = "athena-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kube.workspace = true
+k8s-openapi.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true

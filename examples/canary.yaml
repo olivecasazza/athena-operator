@@ -1,0 +1,81 @@
+# Athena canary test: exercises the full operator + training pipeline.
+# Apply all four resources in order. The operator will provision a Job
+# that runs canary_train.py and writes metrics.json to the workspace.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: hp-8gb-canary
+spec:
+  runtime:
+    type: pytorch
+    mode: batchJob
+  image: "ghcr.io/iii-experimental/n-autoresearch:latest"
+  command: ["python", "canary_train.py"]
+  resources:
+    requests:
+      cpu: "2"
+      memory: "8Gi"
+    limits:
+      nvidia.com/gpu: "1"
+  storage:
+    workspaceClaimName: "autoresearch-workspace"
+    workspaceMountPath: "/workspace"
+  scheduling:
+    nodeSelector:
+      nixlab.io/pool: hpc
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: canary-template
+spec:
+  runtimeProfileRef: hp-8gb-canary
+  source:
+    git:
+      url: "https://github.com/iii-experimental/n-autoresearch"
+      ref: "main"
+  objective:
+    metric: "val_bpb"
+    goal: "minimize"
+  metrics:
+    parser:
+      type: "file"
+      path: "metrics.json"
+  parameterSchema:
+    depth:
+      type: integer
+      default: 2
+    deviceBatchSize:
+      type: integer
+      default: 4
+    totalBatchSize:
+      type: integer
+      default: 1024
+    timeBudget:
+      type: integer
+      default: 15
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: canary-campaign
+spec:
+  templateRef: canary-template
+  concurrency: 1
+  budget:
+    maxExperiments: 1
+    maxDuration: "10m"
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: Experiment
+metadata:
+  name: canary-run-01
+spec:
+  campaignRef: canary-campaign
+  hypothesis: "Canary test using minimal depth and 15s budget to exercise operator and autoscaler."
+  parameters:
+    depth: 2
+    deviceBatchSize: 4
+    totalBatchSize: 1024
+    timeBudget: 15
