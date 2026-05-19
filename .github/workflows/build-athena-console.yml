@@ -1,0 +1,85 @@
+name: Build and publish Athena Console
+
+on:
+  push:
+    branches:
+      - main
+      - feat/athena-operator
+      - feat/athena-operator-status
+    paths:
+      - .github/workflows/build-athena-console.yml
+      - athena-console/**
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  packages: write
+
+concurrency:
+  group: athena-console-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT_ID: casazza-compute
+  GAR_LOCATION: us-central1
+  GAR_REPOSITORY: nixlab
+  IMAGE_NAME: athena-console
+
+jobs:
+  build-publish:
+    name: Build console image, push to GAR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute image metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::12}"
+          registry="${GAR_LOCATION}-docker.pkg.dev"
+          image_repo="${registry}/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}"
+          tag="sha-${short_sha}"
+          echo "registry=${registry}" >> "$GITHUB_OUTPUT"
+          echo "image_repo=${image_repo}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "image=${image_repo}:${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        shell: bash
+        run: gcloud auth configure-docker "${{ steps.meta.outputs.registry }}" --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Athena Console image
+        uses: docker/build-push-action@v6
+        with:
+          context: athena-console
+          file: athena-console/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ steps.meta.outputs.image_repo }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=athena-console
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
