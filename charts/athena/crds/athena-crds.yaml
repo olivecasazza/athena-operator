@@ -317,7 +317,7 @@
                     "additionalProperties": {
                       "properties": {
                         "default": {
-                          "nullable": true
+                          "x-kubernetes-preserve-unknown-fields": true
                         },
                         "description": {
                           "nullable": true,
