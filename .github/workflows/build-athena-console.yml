@@ -6,9 +6,6 @@ on:
       - main
       - feat/athena-operator
       - feat/athena-operator-status
-    paths:
-      - .github/workflows/build-athena-console.yml
-      - athena-console/**
   workflow_dispatch:
 
 permissions:
