@@ -39,7 +39,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.ATHENA_CHART_UPDATE_TOKEN || github.token }}
+          token: ${{ github.token }}
 
       - name: Compute image metadata
         id: meta
