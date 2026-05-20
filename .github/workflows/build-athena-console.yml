@@ -1,29 +1,19 @@
 name: Build and publish Athena Console
 
-"on":
+on:
+  workflow_dispatch:
   push:
     branches:
       - main
-      - feat/athena-operator
       - feat/athena-operator-status
-  workflow_dispatch:
-
-env:
-  GCP_PROJECT_ID: casazza-compute
-  GAR_LOCATION: us-central1
-  GAR_REPOSITORY: nixlab
-  IMAGE_NAME: athena-console
 
 jobs:
   build-publish:
     name: Build console image, push to GAR
     runs-on: ubuntu-24.04
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Compute image metadata
         id: meta
@@ -31,13 +21,15 @@ jobs:
         run: |
           set -euo pipefail
           short_sha="${GITHUB_SHA::12}"
-          registry="${GAR_LOCATION}-docker.pkg.dev"
-          image_repo="${registry}/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}"
+          registry="us-central1-docker.pkg.dev"
+          image_repo="${registry}/casazza-compute/nixlab/athena-console"
           tag="sha-${short_sha}"
-          echo "registry=${registry}" >> "$GITHUB_OUTPUT"
-          echo "image_repo=${image_repo}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "image=${image_repo}:${tag}" >> "$GITHUB_OUTPUT"
+          {
+            echo "registry=${registry}"
+            echo "image_repo=${image_repo}"
+            echo "tag=${tag}"
+            echo "image=${image_repo}:${tag}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -64,9 +56,3 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image }}
             ${{ steps.meta.outputs.image_repo }}:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.title=athena-console
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
