@@ -1,0 +1,67 @@
+# Example Auto-RL ResearchCampaign for Physics (e.g., Material Discovery)
+# This YAML defines a ResearchCampaign for automatically exploring and
+# optimizing material properties using reinforcement learning.
+
+ResearchCampaign:
+  name: "MaterialDiscovery-AutoRL"
+  description: "Automated RL campaign for discovering novel materials with desired properties."
+  version: "1.0.0"
+
+  # Define the simulation environment where the RL agent will interact.
+  environment:
+    type: "Simulation"
+    name: "MaterialLabSim" # Placeholder for a custom material simulation environment
+    config:
+      simulation_engine: "LAMMPS" # Example simulation engine
+      initial_composition: "Fe"
+      temperature_range: [300, 1500]
+      pressure_range: [1, 1000]
+
+  # Define the agent configuration. This could be a reference to an existing agent
+  # or inline configuration for a new agent.
+  agent:
+    name: "Material-RL-Agent"
+    type: "GraphNeuralNetwork"
+    model: "GNN-Transformer" # Example GNN architecture
+    finetune_strategy: "PPO"
+
+    # Specific agent configurations, e.g., action space for material modifications.
+    config:
+      action_space:
+        - "add_element"
+        - "substitute_element"
+        - "change_lattice_parameter"
+      observation_space:
+        - "crystal_structure"
+        - "electronic_band_gap"
+        - "thermal_conductivity"
+
+  # Define the objectives for the research campaign.
+  objectives:
+    - name: "MaximizeBandGap"
+      target: "electronic_band_gap"
+      direction: "maximize"
+      threshold: 3.0 # eV
+
+    - name: "OptimizeThermalConductivity"
+      target: "thermal_conductivity"
+      direction: "target"
+      target_value: 50.0 # W/mK
+      tolerance: 5.0
+
+  # Define the rewards for the RL agent during the campaign.
+  rewards:
+    - name: "BandGapReward"
+      type: "Numeric"
+      value: "if electronic_band_gap > 3.0 then 100 else electronic_band_gap * 10"
+    - name: "ConductivityProximityReward"
+      type: "Numeric"
+      value: "100 - abs(thermal_conductivity - 50.0)"
+
+  # Strategy for running the RL campaign.
+  campaign_strategy:
+    iterations: 500
+    batch_size: 32
+    exploration_strategy: "epsilon_greedy"
+    epsilon_decay: 0.995
+    evaluation_interval: 50 # Evaluate material properties every 50 iterations

@@ -1,0 +1,26 @@
+apiVersion: research.nixlab.io/v1alpha1
+kind: MetricSource
+metadata:
+  name: file-metrics-json
+spec:
+  sourceType: file
+  path: metrics.json
+  format: json
+  metrics:
+    - name: reward_mean
+      path: $.reward_mean
+      type: number
+      required: true
+    - name: reward_std
+      path: $.reward_std
+      type: number
+      required: true
+    - name: wall_clock_seconds
+      path: $.wall_clock_seconds
+      type: number
+      required: true
+    - name: reproducibility_hash
+      path: $.reproducibility_hash
+      type: string
+      required: true
+  timestampPath: $.created_at

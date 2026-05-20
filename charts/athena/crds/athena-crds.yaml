@@ -877,3 +877,1261 @@
     ]
   }
 }
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "benchmarksuites.research.nixlab.io"
+  },
+  "spec": {
+    "group": "research.nixlab.io",
+    "names": {
+      "categories": [],
+      "kind": "BenchmarkSuite",
+      "plural": "benchmarksuites",
+      "shortNames": [
+        "bsuite"
+      ],
+      "singular": "benchmarksuite"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.taxonomy",
+            "name": "Taxonomy",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.ready",
+            "name": "Ready",
+            "type": "boolean"
+          },
+          {
+            "jsonPath": ".status.taskCount",
+            "name": "Tasks",
+            "type": "integer"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for BenchmarkSuiteSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "description": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "integrity": {
+                    "default": {
+                      "immutableInputsRequired": false,
+                      "requireDatasetHash": false,
+                      "requireGitCommit": false,
+                      "requireImageDigest": false
+                    },
+                    "properties": {
+                      "holdoutPolicy": {
+                        "enum": [
+                          "publicOnly",
+                          "privateHoldout",
+                          "mixed"
+                        ],
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "immutableInputsRequired": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "leakagePolicy": {
+                        "enum": [
+                          "warn",
+                          "blockOnMatch"
+                        ],
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "requireDatasetHash": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "requireGitCommit": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "requireImageDigest": {
+                        "default": false,
+                        "type": "boolean"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "metricSources": {
+                    "items": {
+                      "properties": {
+                        "metricSourceRef": {
+                          "properties": {
+                            "name": {
+                              "type": "string"
+                            },
+                            "namespace": {
+                              "nullable": true,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "name"
+                          ],
+                          "type": "object"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "metricSourceRef",
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "reporting": {
+                    "default": {},
+                    "properties": {
+                      "compareAgainst": {
+                        "items": {
+                          "properties": {
+                            "name": {
+                              "type": "string"
+                            },
+                            "namespace": {
+                              "nullable": true,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "name"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "gates": {
+                        "items": {
+                          "properties": {
+                            "metric": {
+                              "type": "string"
+                            },
+                            "operator": {
+                              "enum": [
+                                ">=",
+                                ">",
+                                "<=",
+                                "<"
+                              ],
+                              "type": "string"
+                            },
+                            "value": {
+                              "format": "double",
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "metric",
+                            "operator",
+                            "value"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "suiteHash": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "suiteVersion": {
+                    "type": "string"
+                  },
+                  "targetRefPolicy": {
+                    "default": {},
+                    "properties": {
+                      "allowedKinds": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "tasks": {
+                    "items": {
+                      "properties": {
+                        "budget": {
+                          "properties": {
+                            "maxConcurrency": {
+                              "format": "uint32",
+                              "minimum": 0.0,
+                              "nullable": true,
+                              "type": "integer"
+                            },
+                            "maxGpuHours": {
+                              "format": "double",
+                              "nullable": true,
+                              "type": "number"
+                            },
+                            "maxRetries": {
+                              "format": "uint32",
+                              "minimum": 0.0,
+                              "nullable": true,
+                              "type": "integer"
+                            },
+                            "maxTokens": {
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer"
+                            },
+                            "maxWallClock": {
+                              "nullable": true,
+                              "type": "string"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "datasetRef": {
+                          "nullable": true,
+                          "properties": {
+                            "name": {
+                              "type": "string"
+                            },
+                            "revision": {
+                              "nullable": true,
+                              "type": "string"
+                            },
+                            "sourceType": {
+                              "enum": [
+                                "hfDataset",
+                                "seaweedfs",
+                                "s3",
+                                "pvc",
+                                "secretHoldout"
+                              ],
+                              "nullable": true,
+                              "type": "string"
+                            },
+                            "split": {
+                              "nullable": true,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "name"
+                          ],
+                          "type": "object"
+                        },
+                        "evaluator": {
+                          "nullable": true,
+                          "properties": {
+                            "argsTemplate": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "command": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "image": {
+                              "nullable": true,
+                              "type": "string"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "execution": {
+                          "default": {
+                            "grouped": false
+                          },
+                          "properties": {
+                            "grouped": {
+                              "default": false,
+                              "type": "boolean"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "integration": {
+                          "enum": [
+                            "toyRl",
+                            "customCommand",
+                            "lmEvaluationHarness",
+                            "liveCodeBench",
+                            "sweBenchHook"
+                          ],
+                          "type": "string"
+                        },
+                        "labels": {
+                          "additionalProperties": {
+                            "type": "string"
+                          },
+                          "type": "object"
+                        },
+                        "metrics": {
+                          "properties": {
+                            "goal": {
+                              "enum": [
+                                "maximize",
+                                "minimize"
+                              ],
+                              "type": "string"
+                            },
+                            "optional": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "primary": {
+                              "type": "string"
+                            },
+                            "required": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "goal",
+                            "primary"
+                          ],
+                          "type": "object"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "seeds": {
+                          "nullable": true,
+                          "properties": {
+                            "aggregation": {
+                              "enum": [
+                                "meanStd",
+                                "medianIqr"
+                              ],
+                              "nullable": true,
+                              "type": "string"
+                            },
+                            "values": {
+                              "items": {
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "budget",
+                        "integration",
+                        "metrics",
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "taxonomy": {
+                    "enum": [
+                      "rlTraining",
+                      "llmCapability",
+                      "researchLoop",
+                      "runtimeHealth"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "suiteVersion",
+                  "tasks",
+                  "taxonomy"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "conditions": {
+                    "items": {
+                      "properties": {
+                        "lastTransitionTime": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "message": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "reason": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "Unknown",
+                            "True",
+                            "False"
+                          ],
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "controllerVersion": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "holdoutTaskCount": {
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "lastValidationTime": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "observedGeneration": {
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "publicTaskCount": {
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "ready": {
+                    "type": "boolean"
+                  },
+                  "resolvedSuiteHash": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "taskCount": {
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "ready"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "BenchmarkSuite",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "benchmarkruns.research.nixlab.io"
+  },
+  "spec": {
+    "group": "research.nixlab.io",
+    "names": {
+      "categories": [],
+      "kind": "BenchmarkRun",
+      "plural": "benchmarkruns",
+      "shortNames": [
+        "brun"
+      ],
+      "singular": "benchmarkrun"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.suiteRef.name",
+            "name": "Suite",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.phase",
+            "name": "Phase",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for BenchmarkRunSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "budget": {
+                    "default": {},
+                    "properties": {
+                      "maxConcurrency": {
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "maxGpuHours": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
+                      "maxRetries": {
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "maxTokens": {
+                        "format": "int64",
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "maxWallClock": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "cleanupPolicy": {
+                    "default": {
+                      "retainFailedJobs": false,
+                      "ttlSecondsAfterFinished": null
+                    },
+                    "properties": {
+                      "retainFailedJobs": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "ttlSecondsAfterFinished": {
+                        "format": "int32",
+                        "nullable": true,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "maxParallelTasks": {
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "mode": {
+                    "default": "full",
+                    "enum": [
+                      "full",
+                      "subset",
+                      "smoke",
+                      "holdoutOnly",
+                      "replay"
+                    ],
+                    "type": "string"
+                  },
+                  "output": {
+                    "nullable": true,
+                    "properties": {
+                      "workspacePath": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "promotionPolicy": {
+                    "default": {
+                      "blockOnHoldoutFailure": false,
+                      "updateExperimentStatus": false
+                    },
+                    "properties": {
+                      "blockOnHoldoutFailure": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "updateExperimentStatus": {
+                        "default": false,
+                        "type": "boolean"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "runtimeProfileRef": {
+                    "nullable": true,
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "namespace": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
+                    "type": "object"
+                  },
+                  "seedMatrix": {
+                    "nullable": true,
+                    "properties": {
+                      "deterministic": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "seeds": {
+                        "items": {
+                          "format": "int64",
+                          "type": "integer"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "suiteRef": {
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "namespace": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
+                    "type": "object"
+                  },
+                  "suspend": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "targetRef": {
+                    "properties": {
+                      "apiVersion": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "namespace": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "apiVersion",
+                      "kind",
+                      "name"
+                    ],
+                    "type": "object"
+                  },
+                  "taskSelector": {
+                    "nullable": true,
+                    "properties": {
+                      "labels": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "type": "object"
+                      },
+                      "names": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "suiteRef",
+                  "targetRef"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "aggregateMetrics": {
+                    "additionalProperties": {
+                      "properties": {
+                        "ciHigh": {
+                          "format": "double",
+                          "nullable": true,
+                          "type": "number"
+                        },
+                        "ciLow": {
+                          "format": "double",
+                          "nullable": true,
+                          "type": "number"
+                        },
+                        "count": {
+                          "format": "uint32",
+                          "minimum": 0.0,
+                          "nullable": true,
+                          "type": "integer"
+                        },
+                        "max": {
+                          "format": "double",
+                          "nullable": true,
+                          "type": "number"
+                        },
+                        "mean": {
+                          "format": "double",
+                          "nullable": true,
+                          "type": "number"
+                        },
+                        "min": {
+                          "format": "double",
+                          "nullable": true,
+                          "type": "number"
+                        },
+                        "std": {
+                          "format": "double",
+                          "nullable": true,
+                          "type": "number"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "object"
+                  },
+                  "completionTime": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "conditions": {
+                    "items": {
+                      "properties": {
+                        "lastTransitionTime": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "message": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "reason": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "Unknown",
+                            "True",
+                            "False"
+                          ],
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "controllerVersion": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "cost": {
+                    "default": {},
+                    "properties": {
+                      "gpuHours": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
+                      "totalTokens": {
+                        "format": "int64",
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "wallClockSeconds": {
+                        "format": "int64",
+                        "nullable": true,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "gates": {
+                    "items": {
+                      "properties": {
+                        "actual": {
+                          "format": "double",
+                          "nullable": true,
+                          "type": "number"
+                        },
+                        "metric": {
+                          "type": "string"
+                        },
+                        "passed": {
+                          "type": "boolean"
+                        },
+                        "threshold": {
+                          "format": "double",
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "metric",
+                        "passed",
+                        "threshold"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "jobNames": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "logsLink": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "metricsLink": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "observedGeneration": {
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "observedSuiteHash": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "phase": {
+                    "default": "pending",
+                    "enum": [
+                      "pending",
+                      "preparing",
+                      "running",
+                      "succeeded",
+                      "failed",
+                      "error",
+                      "cancelled",
+                      "skipped"
+                    ],
+                    "type": "string"
+                  },
+                  "reportUri": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "reproducibilityHash": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "startTime": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "taskResults": {
+                    "items": {
+                      "properties": {
+                        "artifacts": {
+                          "default": {},
+                          "properties": {
+                            "manifestUri": {
+                              "nullable": true,
+                              "type": "string"
+                            },
+                            "metricsUri": {
+                              "nullable": true,
+                              "type": "string"
+                            },
+                            "reportUri": {
+                              "nullable": true,
+                              "type": "string"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "attempt": {
+                          "format": "uint32",
+                          "minimum": 0.0,
+                          "nullable": true,
+                          "type": "integer"
+                        },
+                        "gpuType": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "metrics": {
+                          "additionalProperties": {
+                            "format": "double",
+                            "type": "number"
+                          },
+                          "type": "object"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "nodeName": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "phase": {
+                          "default": "pending",
+                          "enum": [
+                            "pending",
+                            "preparing",
+                            "running",
+                            "succeeded",
+                            "failed",
+                            "error",
+                            "cancelled",
+                            "skipped"
+                          ],
+                          "type": "string"
+                        },
+                        "seed": {
+                          "format": "int64",
+                          "nullable": true,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "BenchmarkRun",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "metricsources.research.nixlab.io"
+  },
+  "spec": {
+    "group": "research.nixlab.io",
+    "names": {
+      "categories": [],
+      "kind": "MetricSource",
+      "plural": "metricsources",
+      "shortNames": [
+        "msrc"
+      ],
+      "singular": "metricsource"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.sourceType",
+            "name": "Type",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".spec.format",
+            "name": "Format",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.ready",
+            "name": "Ready",
+            "type": "boolean"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for MetricSourceSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "failureRules": {
+                    "items": {
+                      "properties": {
+                        "equals": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "equals",
+                        "path",
+                        "reason"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "format": {
+                    "enum": [
+                      "json",
+                      "jsonl",
+                      "prometheusText",
+                      "regex",
+                      "junit",
+                      "custom"
+                    ],
+                    "type": "string"
+                  },
+                  "metrics": {
+                    "items": {
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "normalize": {
+                          "nullable": true,
+                          "properties": {
+                            "multiply": {
+                              "format": "double",
+                              "nullable": true,
+                              "type": "number"
+                            },
+                            "offset": {
+                              "format": "double",
+                              "nullable": true,
+                              "type": "number"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "required": {
+                          "default": false,
+                          "type": "boolean"
+                        },
+                        "type": {
+                          "enum": [
+                            "number",
+                            "integer",
+                            "string",
+                            "boolean"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "path",
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "sourceType": {
+                    "enum": [
+                      "file",
+                      "stdoutRegex",
+                      "prometheus",
+                      "loki",
+                      "httpJson",
+                      "artifactManifest"
+                    ],
+                    "type": "string"
+                  },
+                  "timestampPath": {
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "format",
+                  "path",
+                  "sourceType"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "conditions": {
+                    "items": {
+                      "properties": {
+                        "lastTransitionTime": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "message": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "reason": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "Unknown",
+                            "True",
+                            "False"
+                          ],
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "controllerVersion": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "lastValidationTime": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "message": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "observedGeneration": {
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "ready": {
+                    "type": "boolean"
+                  },
+                  "sampleValidated": {
+                    "nullable": true,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "ready"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "MetricSource",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}

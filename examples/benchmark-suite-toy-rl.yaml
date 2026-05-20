@@ -1,0 +1,46 @@
+apiVersion: research.nixlab.io/v1alpha1
+kind: BenchmarkSuite
+metadata:
+  name: toy-rl-canary-v1
+spec:
+  taxonomy: rlTraining
+  suiteVersion: "2026-05-20"
+  description: Deterministic toy RL canary for Athena benchmark controller development.
+  targetRefPolicy:
+    allowedKinds:
+      - Experiment
+      - RuntimeProfile
+  tasks:
+    - name: toy-rl-cpu
+      integration: toyRl
+      labels:
+        costTier: cheap
+        device: cpu
+      metrics:
+        primary: reward_mean
+        goal: maximize
+        required:
+          - reward_mean
+          - reward_std
+          - wall_clock_seconds
+          - reproducibility_hash
+      budget:
+        maxWallClock: 5m
+        maxGpuHours: 0
+        maxRetries: 1
+      seeds:
+        values: [1, 2, 3]
+        aggregation: meanStd
+      execution:
+        grouped: true
+  metricSources:
+    - name: metrics-json
+      metricSourceRef:
+        name: file-metrics-json
+  integrity:
+    holdoutPolicy: publicOnly
+    leakagePolicy: warn
+    immutableInputsRequired: false
+    requireImageDigest: false
+    requireGitCommit: false
+    requireDatasetHash: false

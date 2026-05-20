@@ -1,0 +1,69 @@
+# Example Auto-RL ResearchCampaign for Chemistry/Biology (e.g., Drug Discovery)
+# This YAML defines a ResearchCampaign for automatically designing and
+# optimizing drug candidates using reinforcement learning.
+
+ResearchCampaign:
+  name: "DrugDiscovery-AutoRL"
+  description: "Automated RL campaign for discovering novel drug molecules with desired binding affinities and ADMET properties."
+  version: "1.0.0"
+
+  # Define the simulation environment where the RL agent will interact.
+  environment:
+    type: "VirtualScreening"
+    name: "DrugDesignEnv" # Placeholder for a custom drug design simulation environment
+    config:
+      docking_software: "AutoDock Vina"
+      protein_target: "data/protein_targets/kinase_X.pdb" # Example protein target
+      scoring_function: "Vina_score"
+
+  # Define the agent configuration. This could be a reference to an existing agent
+  # or inline configuration for a new agent.
+  agent:
+    name: "Molecule-RL-Agent"
+    type: "GenerativeModel"
+    model: "Graph-VAE" # Example generative model for molecules
+    finetune_strategy: "PPO"
+
+    # Specific agent configurations, e.g., action space for molecular modifications.
+    config:
+      action_space:
+        - "add_atom"
+        - "remove_atom"
+        - "change_bond"
+        - "add_ring_structure"
+      observation_space:
+        - "SMILES_string"
+        - "molecular_fingerprint"
+        - "binding_affinity"
+        - "logP" # Lipophilicity
+        - "TPSA" # Topological Polar Surface Area
+
+  # Define the objectives for the research campaign.
+  objectives:
+    - name: "MinimizeBindingAffinity"
+      target: "binding_affinity"
+      direction: "minimize"
+      threshold: -8.0 # kcal/mol (more negative is better)
+
+    - name: "OptimizeLogP"
+      target: "logP"
+      direction: "target"
+      target_value: 2.5
+      tolerance: 0.5
+
+  # Define the rewards for the RL agent during the campaign.
+  rewards:
+    - name: "BindingAffinityReward"
+      type: "Numeric"
+      value: "if binding_affinity < -8.0 then 100 else binding_affinity * -10"
+    - name: "LogPReward"
+      type: "Numeric"
+      value: "100 - abs(logP - 2.5) * 10" # Reward for being close to target LogP
+
+  # Strategy for running the RL campaign.
+  campaign_strategy:
+    generations: 200
+    population_size: 64
+    mutation_rate: 0.1
+    crossover_rate: 0.7
+    diversity_metric: "Tanimoto_similarity"

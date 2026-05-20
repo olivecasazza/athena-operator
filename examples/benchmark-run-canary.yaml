@@ -1,0 +1,26 @@
+apiVersion: research.nixlab.io/v1alpha1
+kind: BenchmarkRun
+metadata:
+  name: toy-rl-canary-smoke
+spec:
+  suiteRef:
+    name: toy-rl-canary-v1
+  targetRef:
+    apiVersion: research.nixlab.io/v1alpha1
+    kind: RuntimeProfile
+    name: cpu-toy-runner
+  mode: smoke
+  runtimeProfileRef:
+    name: cpu-toy-runner
+  budget:
+    maxWallClock: 5m
+    maxGpuHours: 0
+    maxRetries: 1
+  seedMatrix:
+    seeds: [1, 2, 3]
+    deterministic: true
+  output:
+    workspacePath: /workspace/benchmarks/runs/default/toy-rl-canary-smoke
+  cleanupPolicy:
+    ttlSecondsAfterFinished: 3600
+    retainFailedJobs: true
