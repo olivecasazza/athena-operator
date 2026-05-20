@@ -1,7 +1,28 @@
+{{- if .Values.auth.rbac.create }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "athena.fullname" . }}
+  name: {{ .Values.auth.rbac.adminClusterRoleName | quote }}
+  labels:
+{{ include "athena.labels" . | indent 4 }}
+rules:
+  - apiGroups: ["research.nixlab.io"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "persistentvolumeclaims", "events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Values.auth.rbac.operatorClusterRoleName | quote }}
+  labels:
+{{ include "athena.labels" . | indent 4 }}
 rules:
   - apiGroups: ["research.nixlab.io"]
     resources: ["runtimeprofiles", "experimenttemplates", "researchcampaigns", "experiments", "benchmarksuites", "benchmarkruns", "metricsources"]
@@ -19,15 +40,29 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "athena.fullname" . }}
+  name: {{ include "athena.fullname" . }}-operator
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "athena.fullname" . }}
+  name: {{ .Values.auth.rbac.operatorClusterRoleName | quote }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "athena.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "athena.fullname" . }}-admin-group-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Values.auth.rbac.adminClusterRoleName | quote }}
+subjects:
+  - kind: Group
+    name: {{ .Values.auth.rbac.adminGroupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+{{- end }}
 ---
 {{- if .Values.serviceAccount.create }}
 apiVersion: v1
@@ -36,5 +71,5 @@ metadata:
   name: {{ include "athena.serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "athena.labels" . | nindent 4 }}
+{{ include "athena.labels" . | indent 4 }}
 {{- end }}

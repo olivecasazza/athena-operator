@@ -10,15 +10,84 @@ import (
 	"strconv"
 	"strings"
 
+	authv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
 
 type spaHandler struct {
 	staticPath string
 	indexPath  string
+}
+
+type principal struct {
+	Subject string   `json:"subject"`
+	Email   string   `json:"email"`
+	Groups  []string `json:"groups"`
+	Roles   []string `json:"roles"`
+}
+
+type authz struct {
+	CanView   bool `json:"canView"`
+	CanCreate bool `json:"canCreate"`
+	CanAdmin  bool `json:"canAdmin"`
+}
+
+type meResponse struct {
+	principal
+	Authz authz `json:"authz"`
+}
+
+func splitHeader(raw string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, chunk := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ';' || r == '|' }) {
+		value := strings.TrimSpace(chunk)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func principalFromHeaders(r *http.Request) principal {
+	email := firstNonEmpty(
+		r.Header.Get("X-Auth-Request-Email"),
+		r.Header.Get("Cf-Access-Authenticated-User-Email"),
+		r.Header.Get("X-Forwarded-Email"),
+	)
+	subject := firstNonEmpty(r.Header.Get("X-Auth-Request-User"), r.Header.Get("X-Forwarded-User"), email)
+	groups := splitHeader(firstNonEmpty(r.Header.Get("X-Auth-Request-Groups"), r.Header.Get("X-Forwarded-Groups"), r.Header.Get("X-Auth-Groups")))
+	if email == "" {
+		email = "anonymous"
+	}
+	if subject == "" {
+		subject = email
+	}
+	return principal{Subject: subject, Email: email, Groups: groups, Roles: groups}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func hasGroup(p principal, group string) bool {
+	for _, candidate := range p.Groups {
+		if candidate == group {
+			return true
+		}
+	}
+	return false
 }
 
 func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -39,12 +108,17 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.FileServer(http.Dir(h.staticPath)).ServeHTTP(w, r)
 }
 
-func getKubernetesClient() (dynamic.Interface, error) {
+func getKubernetesClients() (dynamic.Interface, *kubernetes.Clientset, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return dynamic.NewForConfig(config)
+	dynClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, nil, err
+	}
+	k8sClient, err := kubernetes.NewForConfig(config)
+	return dynClient, k8sClient, err
 }
 
 var researchResources = map[string]schema.GroupVersionResource{
@@ -134,7 +208,7 @@ func listResearchResource(client dynamic.Interface, resourceName string) http.Ha
 }
 
 func main() {
-	client, err := getKubernetesClient()
+	client, k8sClient, err := getKubernetesClients()
 	if err != nil {
 		log.Printf("Warning: Could not create Kubernetes client: %v", err)
 	}
@@ -149,7 +223,45 @@ func main() {
 	})
 	http.HandleFunc("/api/v1/me", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"subject": "admin@example.com", "roles": ["athena:admin", "athena:operator", "athena:viewer"]}`))
+		p := principalFromHeaders(r)
+
+		adminGroup := os.Getenv("ATHENA_ADMIN_GROUP")
+		if adminGroup == "" {
+			adminGroup = "athena:admin"
+		}
+		opGroup := os.Getenv("ATHENA_OPERATOR_GROUP")
+		if opGroup == "" {
+			opGroup = "athena:operator"
+		}
+
+		az := authz{
+			CanView:   true,
+			CanCreate: hasGroup(p, adminGroup) || hasGroup(p, opGroup),
+			CanAdmin:  hasGroup(p, adminGroup),
+		}
+
+		// SelfSubjectAccessReview to check RBAC fallback
+		if k8sClient != nil && !az.CanAdmin {
+			sar := &authv1.SelfSubjectAccessReview{
+				Spec: authv1.SelfSubjectAccessReviewSpec{
+					ResourceAttributes: &authv1.ResourceAttributes{
+						Group:    "research.nixlab.io",
+						Resource: "experiments",
+						Verb:     "create",
+					},
+				},
+			}
+			res, err := k8sClient.AuthorizationV1().SelfSubjectAccessReviews().Create(context.Background(), sar, metav1.CreateOptions{})
+			if err == nil && res.Status.Allowed {
+				az.CanCreate = true
+			}
+		}
+
+		resp := meResponse{
+			principal: p,
+			Authz:     az,
+		}
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	for name := range researchResources {

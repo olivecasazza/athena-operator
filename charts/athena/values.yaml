@@ -20,6 +20,21 @@ serviceAccount:
   create: true
   name: "athena-operator"
 
+auth:
+  oidc:
+    enabled: true
+    issuerURL: "https://auth.casazza.io/realms/master"
+    usernameClaim: "email"
+    groupsClaim: "groups"
+    adminGroup: "athena:admin"
+    operatorGroup: "athena:operator"
+    viewerGroup: "athena:viewer"
+  rbac:
+    create: true
+    adminClusterRoleName: "athena-admin"
+    operatorClusterRoleName: "athena-operator-role"
+    adminGroupName: "athena:admin"
+
 resources:
   requests:
     cpu: 100m
