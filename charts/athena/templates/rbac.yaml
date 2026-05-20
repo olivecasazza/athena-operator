@@ -4,10 +4,10 @@ metadata:
   name: {{ include "athena.fullname" . }}
 rules:
   - apiGroups: ["research.nixlab.io"]
-    resources: ["runtimeprofiles", "experimenttemplates", "researchcampaigns", "experiments"]
+    resources: ["runtimeprofiles", "experimenttemplates", "researchcampaigns", "experiments", "benchmarksuites", "benchmarkruns", "metricsources"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["research.nixlab.io"]
-    resources: ["runtimeprofiles/status", "experimenttemplates/status", "researchcampaigns/status", "experiments/status"]
+    resources: ["runtimeprofiles/status", "experimenttemplates/status", "researchcampaigns/status", "experiments/status", "benchmarksuites/status", "benchmarkruns/status", "metricsources/status"]
     verbs: ["get", "patch", "update"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
