@@ -1,10 +1,17 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
 
 type spaHandler struct {
@@ -30,7 +37,20 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.FileServer(http.Dir(h.staticPath)).ServeHTTP(w, r)
 }
 
+func getKubernetesClient() (dynamic.Interface, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	return dynamic.NewForConfig(config)
+}
+
 func main() {
+	client, err := getKubernetesClient()
+	if err != nil {
+		log.Printf("Warning: Could not create Kubernetes client: %v", err)
+	}
+
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok\n"))
@@ -39,13 +59,34 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ready\n"))
 	})
-	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("# HELP athena_console_up Process is up\n# TYPE athena_console_up gauge\nathena_console_up 1\n"))
-	})
 	http.HandleFunc("/api/v1/me", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"subject": "admin@example.com", "roles": ["athena:admin", "athena:operator", "athena:viewer"]}`))
+	})
+	
+	http.HandleFunc("/api/v1/experiments", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if client == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error": "No Kubernetes client"}`))
+			return
+		}
+
+		gvr := schema.GroupVersionResource{
+			Group:    "athena.casazza.io",
+			Version:  "v1alpha1",
+			Resource: "experiments",
+		}
+
+		list, err := client.Resource(gvr).Namespace("").List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			log.Printf("Failed to list experiments: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error": "Failed to fetch experiments"}`))
+			return
+		}
+
+		json.NewEncoder(w).Encode(list.Items)
 	})
 
 	spa := spaHandler{staticPath: "web/dist", indexPath: "index.html"}
