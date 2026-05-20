@@ -187,6 +187,8 @@ spec:
   tasks:
     - name: gsm8k
       integration: lmEvaluationHarness
+      execution:
+        grouped: false            # true to run all seeds in one job
       datasetRef:
         name: gsm8k
         split: test
@@ -296,6 +298,9 @@ spec:
   promotionPolicy:
     updateExperimentStatus: true
     blockOnHoldoutFailure: true
+  cleanupPolicy:
+    deleteJobsOnSuccess: true
+    ttlSecondsAfterFinished: 3600
 ```
 
 Status fields:
