@@ -47,9 +47,9 @@ Non-goals for this step:
 
 ## 3. Design principles
 
-Athena separates intent, benchmark definition, metric ingestion, execution policy, and infrastructure:
+Athena separates intent, benchmark definition, metric ingestion, execution policy, and infrastructure. Phase 1 deliberately implements a small vertical slice first (`runtimeHealth`/`rlTraining`, `toyRl`/`customCommand`, and file JSON metrics) so the operator proves executable semantics before broad LLM/campaign scope:
 
-- `BenchmarkSuite`: immutable-ish benchmark definition. Defines tasks, datasets, evaluators, seed matrices, holdouts, metrics, budgets, and pass/fail gates.
+- `BenchmarkSuite`: benchmark definition versioned by `suiteVersion` and `resolvedSuiteHash`. Defines tasks, datasets, evaluators, seed matrices, holdouts, metrics, budgets, and pass/fail gates. Any spec mutation that changes the resolved hash is treated as a new comparable suite version.
 - `BenchmarkRun`: one execution of a suite or subset of a suite against a target artifact, model, image, git ref, experiment, campaign, or runtime profile.
 - `MetricSource`: reusable metric ingestion definition. Describes where metrics come from and how to parse/normalize them.
 - `ExperimentTemplate`: project-owned experiment contract. Extended to reference benchmark suites, integrity policy, and artifact schema.
@@ -57,7 +57,16 @@ Athena separates intent, benchmark definition, metric ingestion, execution polic
 - `ResearchCampaign`: multi-run loop. Extended to define benchmark gates, novelty constraints, duplicate-hypothesis detection, promotion criteria, and campaign-level comparisons.
 - `RuntimeProfile`: admin-owned execution policy. Extended to define benchmark runners, GPU scheduling, cache/workspace mounts, metrics endpoints, and anti-cheating controls.
 
-The operator owns reconciliation and status updates. Agents and humans may create specs and write decisions, but they must not forge benchmark status.
+The operator owns reconciliation and status updates. Agents and humans may create specs and write decisions, but they must not forge benchmark status. RBAC/admission must grant `/status` writes only to the Athena operator service account for benchmark, experiment, and campaign status fields.
+
+API guardrails:
+
+- Phase-1 changes to existing CRDs are additive only. Do not add required fields without defaults and do not rename existing v1alpha1 fields.
+- Every new CRD has structural OpenAPI schemas, bounded enums, `status.observedGeneration`, bounded `status.conditions[]`, and `status.controllerVersion`.
+- Avoid unbounded `serde_json::Value` in specs except explicitly named extension maps. Large item-level results live in SeaweedFS artifacts, not CR status.
+- Use common local object references with `name` and optional `namespace`; generic target refs include `apiVersion`, `kind`, and `name`. Cross-namespace refs are disabled unless explicitly allowed by policy.
+- `ModelArtifact` is a future target kind and not part of phase 1 unless a CRD/schema is added in the same change.
+- Plan a `v1beta1` conversion/deprecation step before broad multi-user adoption.
 
 ## 4. Benchmark taxonomy
 
@@ -179,11 +188,11 @@ metadata:
   name: llm-core-v1
 spec:
   taxonomy: llmCapability        # rlTraining | llmCapability | researchLoop | runtimeHealth
-  version: "2026-05-20"
+  suiteVersion: "2026-05-20"
   description: "Core LLM capability evals for Athena candidates"
   suiteHash: "sha256:<optional-precomputed-hash>"
   targetRefPolicy:
-    allowedKinds: [Experiment, ResearchCampaign, ModelArtifact, RuntimeProfile]
+    allowedKinds: [Experiment, ResearchCampaign, RuntimeProfile]
   tasks:
     - name: gsm8k
       integration: lmEvaluationHarness
@@ -350,12 +359,16 @@ status:
 Controller behavior:
 
 - Resolve `BenchmarkSuite`, `RuntimeProfile`, `MetricSource`, and target refs before creating jobs.
+- Snapshot the resolved suite spec to `/workspace/benchmarks/suites/<suite-name>/<suite-hash>/suite.json` and set `BenchmarkRun.status.observedSuiteHash` before creating task jobs.
 - Refuse to run if immutable image/git/data hashes required by the suite are missing.
-- Create one Kubernetes `Job` per task/seed unless the suite task declares `execution.grouped=true`.
+- Create one Kubernetes `Job` per task/seed unless the suite task declares `execution.grouped=true`; grouped execution is preferred for tiny canaries to reduce pod startup/API overhead.
+- Add `spec.suspend`, `spec.maxParallelTasks`, retry attempt numbering, deterministic 63-character-safe job names, ownerReferences, and the `athena.nixlab.io/benchmark-run` finalizer while jobs or artifact finalization are active.
+- Support `cleanupPolicy` for completed task Jobs; artifacts are retained according to the artifact retention policy, independent of Job cleanup.
 - Add labels to every job/pod: `athena.nixlab.io/benchmark-run`, `athena.nixlab.io/benchmark-suite`, `athena.nixlab.io/task`, `athena.nixlab.io/seed`, `athena.nixlab.io/target-kind`, `athena.nixlab.io/target-name`.
 - Update status from Kubernetes job state, parsed metrics, and artifact existence.
 - Compute aggregate metrics only after all required task results complete.
 - Do not mark `Succeeded` if required metrics are missing or unparsable.
+- On deletion, finalizer cancellation deletes active Jobs, records terminal status when possible, and leaves finalized artifacts intact unless retention policy says otherwise.
 
 ### 5.3 `MetricSource`
 
@@ -405,6 +418,8 @@ status:
 
 Metric extraction requirements:
 
+- Phase 1 supports only `sourceType=file` with `format=json` or `jsonl`. Regex/stdout, Prometheus, Loki, HTTP JSON, and custom parsers are later phases after timeout/auth/query restrictions are defined.
+- Parsing must use safe JSONPath/simple extraction only; no dynamic code execution in the operator.
 - Metric names are lowercase snake_case in status.
 - Numeric values must remain numeric in JSON status and Prometheus labels must not contain unbounded metric names.
 - Parser errors are status conditions, not controller panics.
@@ -667,7 +682,8 @@ Aggregation rules:
 
 - For seed matrices, compute `mean`, `std`, `min`, `max`, `count`, and list failed seeds.
 - For pass@k, store both `pass_at_k` and `k`; do not infer k from the metric name alone.
-- For failed runs, include the denominator. Example: `failed_run_rate=failed/attempted` with `attempted_run_count` and `failed_run_count`.
+- For all rates, include denominators. Example: `failed_run_rate=failed/attempted` with `attempted_run_count` and `failed_run_count`; item metrics include `evaluated_item_count`, `passed_item_count`, `invalid_item_count`, and `blocked_item_count` where applicable.
+- Aggregate metrics may include `ci_low`, `ci_high`, `confidence_level`, and `method` when enough seeds/items exist.
 - For `time_to_best_seconds`, use controller timestamps, not self-reported job timestamps.
 - For `gpu_hours`, compute from requested/allocated GPU count and controller-observed runtime; evaluator-provided GPU hours may be stored as raw metrics only.
 - For `reproducibility_hash`, hash normalized JSON containing suite hash, task name, seed, image digest, git commit, patch hash, dataset hashes, runtime profile name/generation, evaluator image digest, and metric source version.
@@ -857,8 +873,10 @@ Implementation requirements:
 
 - Add node affinity or node selector from `RuntimeProfile`, not from agent-controlled `Experiment` fields.
 - Prefer one GPU per job; do not assume multi-GPU on 8GB cards.
+- hp01-hp03 8GB GPUs are suitable for toy/canary, small local models, quantized runners, or API-target evals. Do not assume vLLM/large local LLM serving fits on these cards.
 - Default precision should be safe for 8GB GPUs; benchmarks may use CPU-only profiles when GPU is unnecessary.
 - If autoscaling is active, queue latency and pod start latency must be recorded.
+- RuntimeProfile/profile-level concurrency limits must prevent GPU campaign starvation beyond default Kubernetes scheduling.
 
 ## 10. SeaweedFS artifact layout
 
@@ -917,6 +935,13 @@ Required layout:
 }
 ```
 
+Artifact immutability and retention:
+
+- Completed run directories are write-once after controller finalization. The controller may append final report/status metadata before writing a finalization marker; agents and evaluator jobs must not mutate completed artifacts.
+- Reports reference content-addressed files and manifest checksums for every artifact they cite.
+- Workspace preparation must be idempotent and concurrency-safe; task/seed/attempt writers never share mutable output paths.
+- Default retention is indefinite for kept/promoted/baseline runs. Discarded experiment artifacts may be garbage-collected after a configured retention window, but suite snapshots and final reports needed for comparisons are retained.
+
 ## 11. Anti-cheating and research integrity
 
 Athena must make benchmark cheating harder than honest improvement.
@@ -933,6 +958,10 @@ Controls:
 - Baseline comparison: campaign benchmarks must run a baseline under the same suite hash and budget before claiming improvement.
 - Duplicate hypothesis detection: campaign controller stores normalized hypothesis hashes and optional embedding similarity scores. Duplicates count against `duplicate_hypothesis_rate`.
 - Reproducibility replay: `BenchmarkRun.spec.mode=replay` reruns a prior run from manifest inputs and compares metrics within tolerance.
+- Code/evaluator sandboxing: generated-code benchmarks run with no hostPath mounts, `automountServiceAccountToken: false`, non-privileged security context, seccomp/runtime default, bounded CPU/memory/pids/ephemeral storage, read-only root filesystem where practical, timeouts, and default-deny egress except explicitly declared package mirrors.
+- Holdout redaction: agent-visible statuses expose only pass/fail and approved aggregates. Hidden prompts, labels, assertions, exact holdout item failures, and secret paths are visible only to admin/reporting paths with redaction controls.
+- Patch integrity checks cover symlink escapes, path traversal, submodules, binary blobs, hidden files, and attempts to modify eval/data/benchmark harness paths when denied.
+- Baseline/candidate improvement claims require identical suite hash, dataset hash, evaluator image digest, runtime profile generation, and budget unless the report explicitly marks the comparison as non-equivalent.
 
 Integrity status must distinguish:
 
@@ -985,6 +1014,7 @@ Implementation requirements:
 - Normalize unstructured CRDs into typed JSON DTOs before returning to Vue.
 - Include `resourceVersion` and namespace/name in every response.
 - Do not expose secret refs, holdout answers, or hidden dataset paths.
+- Apply namespace scoping, pagination/limits, redaction, and watch reconnect handling. SSE endpoints must respect backpressure and resume from resourceVersion where possible.
 
 ### 12.2 Vue UI views
 
@@ -1053,7 +1083,7 @@ Failure classes:
 
 Each phase should end with tests and a commit. Do not touch `/home/olive/Repositories/nixlab` until a later GitOps phase explicitly requests it.
 
-### Phase 1: API scaffolding and examples
+### Phase 1: API guardrails and benchmark CRD scaffolding
 
 Files to touch:
 
@@ -1075,9 +1105,10 @@ Tasks:
 2. Add additive spec/status fields to existing CRDs.
 3. Regenerate CRD YAML using the repo's existing CRD generation flow.
 4. Add example manifests for toy RL canary and file JSON metric parsing.
-5. Verify with `cargo test` for the operator workspace and any existing CRD generation checks.
+5. Update Helm CRDs/RBAC for new resources and `/status` subresources.
+6. Verify with `cargo test` for the operator workspace and any existing CRD generation checks.
 
-### Phase 2: BenchmarkRun controller
+### Phase 2: Minimal runnable BenchmarkRun vertical slice
 
 Files to touch:
 
@@ -1091,15 +1122,15 @@ Files to touch:
 Tasks:
 
 1. Watch `BenchmarkRun` resources.
-2. Resolve suite, runtime profile, metric sources, and target refs.
-3. Prepare SeaweedFS artifact directories.
-4. Generate task/seed Kubernetes Jobs with required labels/env/mounts.
-5. Track job phases and retry counts.
-6. Parse `metrics.json` via `MetricSource` definitions.
-7. Aggregate seed metrics and write status.
+2. Resolve suite, runtime profile, metric sources, and target refs for `runtimeHealth`/`rlTraining` suites only.
+3. Prepare idempotent SeaweedFS artifact directories and suite/run snapshots.
+4. Generate a CPU toy canary Job first with required labels/env/mounts and sandbox defaults.
+5. Track job phases, retry counts, cancellation/suspend, cleanup policy, and finalizer behavior.
+6. Parse workspace `metrics.json` via phase-1 file JSON `MetricSource` definitions.
+7. Aggregate bounded seed metrics and write status.
 8. Compute and store reproducibility hash.
 9. Emit Prometheus metrics and Kubernetes Events.
-10. Add unit tests for job naming, budget enforcement, metric parsing, and hash inputs.
+10. Add unit tests for job naming, budget enforcement, metric parsing, hash inputs, suspend/cancel, and status bounds.
 
 ### Phase 3: Benchmark integrations
 
