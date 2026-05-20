@@ -1,6 +1,6 @@
 name: Build and publish Athena Console
 
-on:
+"on":
   push:
     branches:
       - main
