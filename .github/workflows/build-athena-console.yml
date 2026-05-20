@@ -13,10 +13,6 @@ permissions:
   id-token: write
   packages: write
 
-concurrency:
-  group: athena-console-publish-${{ github.ref }}
-  cancel-in-progress: false
-
 env:
   GCP_PROJECT_ID: casazza-compute
   GAR_LOCATION: us-central1
