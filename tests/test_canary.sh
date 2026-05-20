@@ -19,7 +19,7 @@ ATHENA_TIME_BUDGET=5 \
 ATHENA_SEQ_LEN=32 \
 ATHENA_VOCAB_SIZE=64 \
 ATHENA_METRICS_PATH="$METRICS_FILE" \
-  python3 examples/canary/canary_train.py
+  uv run python3 examples/canary/canary_train.py
 
 echo ""
 echo "=== Validating metrics JSON ==="
@@ -29,7 +29,7 @@ if [ ! -f "$METRICS_FILE" ]; then
 fi
 
 # Validate JSON and required keys
-python3 -c "
+uv run python3 -c "
 import json, sys
 with open('$METRICS_FILE') as f:
     m = json.load(f)

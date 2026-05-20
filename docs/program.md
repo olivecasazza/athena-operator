@@ -1,6 +1,6 @@
 # n-autoresearch
 
-Autonomous ML research on iii-engine. Same philosophy as autoresearch — you modify `train.py`, train for 5 minutes, keep or discard — but with structured experiment tracking, multi-GPU parallelism, and adaptive search via iii functions.
+Autonomous ML research on iii-engine. Same philosophy as autoresearch — you modify `experiments/train.py`, train for 5 minutes, keep or discard — but with structured experiment tracking, multi-GPU parallelism, and adaptive search via iii functions.
 
 ## Setup
 
@@ -11,8 +11,8 @@ Autonomous ML research on iii-engine. Same philosophy as autoresearch — you mo
    ```
 3. **Create the git branch**: `git checkout -b autoresearch/<tag>` from current master.
 4. **Read the in-scope files**:
-   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-   - `prepare.py` — fixed constants, data prep, dataloader, evaluation. Do not modify.
+   - `experiments/train.py` — the file you modify. Model architecture, optimizer, training loop.
+   - `experiments/prepare.py` — fixed constants, data prep, dataloader, evaluation. Do not modify.
 5. **Verify data exists**: Check `~/.cache/autoresearch/` for data shards.
 6. **Run baseline**: Register and run the first experiment unchanged.
 
@@ -28,9 +28,9 @@ curl -X POST http://localhost:3111/api/search/suggest -d '{"tag":"mar11"}'
 
 Returns: current strategy (explore/exploit/combine/ablation), underexplored categories, high-yield categories, near-misses to combine, and concrete suggestions.
 
-### 2. Modify train.py
+### 2. Modify experiments/train.py
 
-Edit `train.py` with your experimental idea. Classify the change:
+Edit `experiments/train.py` with your experimental idea. Classify the change:
 - `architecture` — model structure, layer types, attention mechanism
 - `optimizer` — optimizer params, new optimizer, scheduling
 - `hyperparams` — learning rates, batch sizes, warmup/cooldown
@@ -48,7 +48,7 @@ Edit `train.py` with your experimental idea. Classify the change:
 ### 3. Git commit + Register
 
 ```bash
-git add train.py && git commit -m "experiment: <description>"
+git add experiments/train.py && git commit -m "experiment: <description>"
 COMMIT=$(git rev-parse --short HEAD)
 ```
 
@@ -69,7 +69,7 @@ Save the returned `experiment_id`.
 ### 4. Run training
 
 ```bash
-uv run train.py > run.log 2>&1
+uv run experiments/train.py > run.log 2>&1
 ```
 
 ### 5. Extract results
@@ -127,7 +127,7 @@ curl http://localhost:3111/api/pool/list
 curl -X POST http://localhost:3111/api/pool/acquire -d '{"experiment_id":"<id>"}'
 
 # Run on specific GPU
-CUDA_VISIBLE_DEVICES=<gpu_index> uv run train.py > run.log 2>&1
+CUDA_VISIBLE_DEVICES=<gpu_index> uv run experiments/train.py > run.log 2>&1
 
 # Release GPU when done
 curl -X POST http://localhost:3111/api/pool/release -d '{"gpu_id":"<id>"}'
@@ -157,12 +157,12 @@ curl -X POST http://localhost:3111/api/experiment/near-misses -d '{"tag":"mar11"
 ## Rules
 
 **What you CAN do:**
-- Modify `train.py` — everything is fair game.
+- `experiments/train.py` — everything is fair game.
 - Use the iii API to register, complete, and query experiments.
 - Run multiple experiments in parallel on different GPUs.
 
 **What you CANNOT do:**
-- Modify `prepare.py`. Read-only.
+- Modify `experiments/prepare.py`. Read-only.
 - Install new packages or add dependencies.
 - Modify the evaluation harness.
 

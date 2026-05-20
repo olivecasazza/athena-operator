@@ -14,7 +14,7 @@ pub fn register(iii: Arc<III>, config: &GpuConfig, gpu_id: &str) {
 
     iii.register_function_with_description(
         "gpu::train",
-        "Execute a training run on this GPU. Runs train.py with fixed time budget, captures metrics.",
+        "Execute a training run on this GPU. Runs experiments/train.py with fixed time budget, captures metrics.",
         move |input: Value| {
             let repo_dir = repo_dir.clone();
             let gpu_id = gpu_id_owned.clone();
@@ -148,7 +148,7 @@ struct TrainingMetrics {
 
 async fn run_training(repo_dir: &str, gpu_index: u32, log_path: &str) -> Result<TrainingMetrics, String> {
     let output = Command::new("uv")
-        .args(["run", "train.py"])
+        .args(["run", "experiments/train.py"])
         .current_dir(repo_dir)
         .env("CUDA_VISIBLE_DEVICES", gpu_index.to_string())
         .output()

@@ -3,8 +3,8 @@ One-time data preparation for autoresearch experiments.
 Downloads data shards and trains a BPE tokenizer.
 
 Usage:
-    python prepare.py                  # full prep (download + tokenizer)
-    python prepare.py --num-shards 8   # download only 8 shards (for testing)
+    python experiments/prepare.py                  # full prep (download + tokenizer)
+    python experiments/prepare.py --num-shards 8   # download only 8 shards (for testing)
 
 Data and tokenizer are stored in ~/.cache/autoresearch/.
 """
@@ -222,7 +222,7 @@ def get_token_bytes(device="cpu"):
 
 def _document_batches(split, tokenizer_batch_size=128):
     parquet_paths = list_parquet_files()
-    assert len(parquet_paths) > 0, "No parquet files found. Run prepare.py first."
+    assert len(parquet_paths) > 0, "No parquet files found. Run experiments/prepare.py first."
     val_path = os.path.join(DATA_DIR, VAL_FILENAME)
     if split == "train":
         parquet_paths = [p for p in parquet_paths if p != val_path]

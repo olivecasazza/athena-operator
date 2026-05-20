@@ -13,3 +13,5 @@ target/
 uv.lock
 workers/orchestrator/dist/
 package-lock.json
+.athena-workflow/
+*.tsbuildinfo
