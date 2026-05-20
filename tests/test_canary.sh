@@ -19,7 +19,7 @@ ATHENA_TIME_BUDGET=5 \
 ATHENA_SEQ_LEN=32 \
 ATHENA_VOCAB_SIZE=64 \
 ATHENA_METRICS_PATH="$METRICS_FILE" \
-  python3 canary_train.py
+  python3 examples/canary/canary_train.py
 
 echo ""
 echo "=== Validating metrics JSON ==="

@@ -11,7 +11,7 @@ spec:
     type: pytorch
     mode: batchJob
   image: "ghcr.io/iii-experimental/n-autoresearch:latest"
-  command: ["python", "canary_train.py"]
+  command: ["python", "examples/canary/canary_train.py"]
   resources:
     requests:
       cpu: "2"
