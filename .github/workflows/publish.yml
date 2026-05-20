@@ -1,76 +1,74 @@
-name: Build and publish Athena
+name: Publish
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
       - feat/athena-operator-status
+  workflow_dispatch:
 
 jobs:
-  build-publish:
-    name: Build image and update chart
-    runs-on: ubuntu-24.04
+  build-console:
+    runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Compute image metadata
+      - uses: actions/checkout@v4
+      - name: Compute meta
         id: meta
-        shell: bash
         run: |
-          set -euo pipefail
           short_sha="${GITHUB_SHA::12}"
-          registry="us-central1-docker.pkg.dev"
-          image_repo="${registry}/casazza-compute/nixlab/athena"
-          tag="sha-${short_sha}"
-          {
-            echo "registry=${registry}"
-            echo "image_repo=${image_repo}"
-            echo "tag=${tag}"
-            echo "image=${image_repo}:${tag}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+          echo "tag=sha-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "repo=us-central1-docker.pkg.dev/casazza-compute/nixlab/athena-console" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: athena-console
+          file: athena-console/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.meta.outputs.repo }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.repo }}:latest
 
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure Docker for Artifact Registry
-        shell: bash
-        run: gcloud auth configure-docker "${{ steps.meta.outputs.registry }}" --quiet
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push Athena image
-        uses: docker/build-push-action@v6
+  build-operator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute meta
+        id: meta
+        run: |
+          short_sha="${GITHUB_SHA::12}"
+          echo "tag=sha-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "repo=us-central1-docker.pkg.dev/casazza-compute/nixlab/athena" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.athena
           push: true
           platforms: linux/amd64
           tags: |
-            ${{ steps.meta.outputs.image }}
-            ${{ steps.meta.outputs.image_repo }}:latest
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
-
+            ${{ steps.meta.outputs.repo }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.repo }}:latest
+      - uses: azure/setup-helm@v4
       - name: Update Helm chart image tag
-        shell: bash
         env:
-          IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
+          IMAGE_REPO: ${{ steps.meta.outputs.repo }}
           IMAGE_TAG: ${{ steps.meta.outputs.tag }}
           CHART_PATH: charts/athena
         run: |
-          set -euo pipefail
           python3 - <<'PY'
-          from pathlib import Path
           import os
+          from pathlib import Path
           chart = Path(os.environ["CHART_PATH"])
           values = chart / "values.yaml"
           chart_yaml = chart / "Chart.yaml"
@@ -97,25 +95,15 @@ jobs:
                   chart_lines[i] = f'appVersion: "{image_tag}"'
           chart_yaml.write_text("\n".join(chart_lines) + "\n")
           PY
-
-      - name: Lint Helm chart
-        run: helm lint charts/athena
-
-      - name: Render Helm chart
-        run: helm template athena-operator charts/athena > /tmp/athena-rendered.yaml
-
-      - name: Commit chart tag update
-        shell: bash
-        env:
-          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+      - run: helm lint charts/athena
+      - run: helm template athena-operator charts/athena > /tmp/athena-rendered.yaml
+      - name: Commit chart update
         run: |
-          set -euo pipefail
           if git diff --quiet -- charts/athena/Chart.yaml charts/athena/values.yaml; then
-            echo "Chart already points at ${IMAGE_TAG}"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add charts/athena/Chart.yaml charts/athena/values.yaml
-          git commit -m "ci(chart): publish Athena image ${IMAGE_TAG}"
+          git commit -m "ci(chart): publish Athena image ${{ steps.meta.outputs.tag }}"
           git push
