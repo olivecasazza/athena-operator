@@ -183,7 +183,9 @@ spec:
   description: "Core LLM capability evals for Athena candidates"
   suiteHash: "sha256:<optional-precomputed-hash>"
   targetRefPolicy:
-    allowedKinds: [Experiment, ResearchCampaign, ModelArtifact, RuntimeProfile]
+    # Phase 1 supports only existing Athena CRDs. Add ModelArtifact here only
+    # after a ModelArtifact CRD/schema exists.
+    allowedKinds: [Experiment, ResearchCampaign, RuntimeProfile]
   tasks:
     - name: gsm8k
       integration: lmEvaluationHarness
@@ -256,6 +258,10 @@ Validation rules:
 - `integrity.requireImageDigest=true` means evaluator images must use immutable digests, not mutable tags.
 - Private holdout task details may reference Secrets or sealed paths, but status and console must not reveal answers.
 - `suiteHash` is computed from normalized spec excluding status and mutable metadata when omitted.
+- CRDs must remain Kubernetes structural schemas: use enums for bounded fields, explicit object shapes for spec/status, and preserve unknown fields only for intentionally opaque extension maps.
+- Status must stay bounded. Full item-level outputs live in SeaweedFS artifacts; CR status carries aggregates and concise task summaries only.
+- The controller snapshots the resolved suite spec to SeaweedFS and records `observedSuiteHash` on each `BenchmarkRun` before creating task Jobs.
+- Only the Athena operator service account should update `/status`; human and agent roles may create or update spec but must not forge benchmark results.
 
 ### 5.2 `BenchmarkRun`
 
