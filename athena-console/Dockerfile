@@ -4,8 +4,8 @@ COPY web/package.json web/package-lock.json* web/npm-shrinkwrap.json* web/yarn.l
 RUN npm install
 COPY web/ .
 RUN npm run build
-
-FROM golang:1.25-alpine AS backend-builder
+# Build backend
+FROM golang:1.26-alpine AS backend-builder
 WORKDIR /app
 COPY api/go.mod api/go.sum* ./
 RUN go mod download
