@@ -1,31 +1,19 @@
 name: Build and publish Athena
 
-"on":
+on:
+  workflow_dispatch:
   push:
     branches:
       - main
-      - feat/athena-operator
       - feat/athena-operator-status
-  workflow_dispatch:
-
-env:
-  GCP_PROJECT_ID: casazza-compute
-  GAR_LOCATION: us-central1
-  GAR_REPOSITORY: nixlab
-  IMAGE_NAME: athena
-  CHART_PATH: charts/athena
 
 jobs:
   build-publish:
-    name: Build image, push to GAR, update chart
+    name: Build image and update chart
     runs-on: ubuntu-24.04
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ github.token }}
 
       - name: Compute image metadata
         id: meta
@@ -33,13 +21,15 @@ jobs:
         run: |
           set -euo pipefail
           short_sha="${GITHUB_SHA::12}"
-          registry="${GAR_LOCATION}-docker.pkg.dev"
-          image_repo="${registry}/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}"
+          registry="us-central1-docker.pkg.dev"
+          image_repo="${registry}/casazza-compute/nixlab/athena"
           tag="sha-${short_sha}"
-          echo "registry=${registry}" >> "$GITHUB_OUTPUT"
-          echo "image_repo=${image_repo}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "image=${image_repo}:${tag}" >> "$GITHUB_OUTPUT"
+          {
+            echo "registry=${registry}"
+            echo "image_repo=${image_repo}"
+            echo "tag=${tag}"
+            echo "image=${image_repo}:${tag}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -66,36 +56,27 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image }}
             ${{ steps.meta.outputs.image_repo }}:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.title=athena
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Install Helm
         uses: azure/setup-helm@v4
 
       - name: Update Helm chart image tag
         shell: bash
+        env:
+          IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+          CHART_PATH: charts/athena
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
           import os
-
           chart = Path(os.environ["CHART_PATH"])
           values = chart / "values.yaml"
           chart_yaml = chart / "Chart.yaml"
           image_repo = os.environ["IMAGE_REPO"]
           image_tag = os.environ["IMAGE_TAG"]
-
-          text = values.read_text()
-          text = text.replace("  repository: us-central1-docker.pkg.dev/casazza-compute/nixlab/athena\n", f"  repository: {image_repo}\n")
-          text = text.replace("  repository: ghcr.io/olivecasazza/athena\n", f"  repository: {image_repo}\n")
-          text = text.replace("  repository: ghcr.io/iii-experimental/athena\n", f"  repository: {image_repo}\n")
-          text = text.replace("  pullPolicy: IfNotPresent\n", "  pullPolicy: Always\n")
-          lines = text.splitlines()
+          lines = values.read_text().splitlines()
           in_image = False
           for i, line in enumerate(lines):
               if line == "image:":
@@ -103,38 +84,38 @@ jobs:
                   continue
               if in_image and line and not line.startswith(" "):
                   in_image = False
+              if in_image and line.strip().startswith("repository:"):
+                  lines[i] = f"  repository: {image_repo}"
+              if in_image and line.strip().startswith("pullPolicy:"):
+                  lines[i] = "  pullPolicy: Always"
               if in_image and line.strip().startswith("tag:"):
                   lines[i] = f'  tag: "{image_tag}"'
           values.write_text("\n".join(lines) + "\n")
-
-          chart_text = chart_yaml.read_text().splitlines()
-          for i, line in enumerate(chart_text):
+          chart_lines = chart_yaml.read_text().splitlines()
+          for i, line in enumerate(chart_lines):
               if line.startswith("appVersion:"):
-                  chart_text[i] = f'appVersion: "{image_tag}"'
-          chart_yaml.write_text("\n".join(chart_text) + "\n")
+                  chart_lines[i] = f'appVersion: "{image_tag}"'
+          chart_yaml.write_text("\n".join(chart_lines) + "\n")
           PY
-        env:
-          IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
-          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
 
       - name: Lint Helm chart
-        run: helm lint "${CHART_PATH}"
+        run: helm lint charts/athena
 
       - name: Render Helm chart
-        run: helm template athena-operator "${CHART_PATH}" > /tmp/athena-rendered.yaml
+        run: helm template athena-operator charts/athena > /tmp/athena-rendered.yaml
 
       - name: Commit chart tag update
         shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
-          if git diff --quiet -- "${CHART_PATH}/Chart.yaml" "${CHART_PATH}/values.yaml"; then
+          if git diff --quiet -- charts/athena/Chart.yaml charts/athena/values.yaml; then
             echo "Chart already points at ${IMAGE_TAG}"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "${CHART_PATH}/Chart.yaml" "${CHART_PATH}/values.yaml"
+          git add charts/athena/Chart.yaml charts/athena/values.yaml
           git commit -m "ci(chart): publish Athena image ${IMAGE_TAG}"
           git push
-        env:
-          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
