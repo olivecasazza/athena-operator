@@ -8,11 +8,6 @@ name: Build and publish Athena
       - feat/athena-operator-status
   workflow_dispatch:
 
-permissions:
-  contents: write
-  id-token: write
-  packages: write
-
 env:
   GCP_PROJECT_ID: casazza-compute
   GAR_LOCATION: us-central1
