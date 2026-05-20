@@ -73,7 +73,7 @@ func main() {
 		}
 
 		gvr := schema.GroupVersionResource{
-			Group:    "athena.casazza.io",
+			Group:    "research.nixlab.io",
 			Version:  "v1alpha1",
 			Resource: "experiments",
 		}
