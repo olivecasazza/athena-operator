@@ -1,7 +1,5 @@
 # n-autoresearch
 
-Athena / n-autoresearch root is intentionally kept small.
-
 Start here:
 
 - docs/README.md — project overview and usage guide
@@ -10,7 +8,7 @@ Start here:
 - experiments/ — train/eval scripts used by experiment workers
 - operator/ — Rust kube-rs Athena operator
 - athena-console/ — Go BFF + Vue console
-- workers/ — legacy iii orchestrator and GPU workers
+- workers/ — legacy iii orchestrator and GPU workers (kept for impl reference)
 - examples/ — example manifests and canary resources
 - config/ — local/runtime config files
 

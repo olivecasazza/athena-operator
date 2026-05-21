@@ -94,7 +94,9 @@
 </template>
 
 <script setup lang="ts">
+import { context, trace } from '@opentelemetry/api'
 import { ref, onMounted } from 'vue'
+import { injectTraceHeaders, startUiSpan } from './telemetry'
 
 const experiments = ref<any[]>([])
 const benchmarkSuites = ref<any[]>([])
@@ -103,15 +105,27 @@ const loading = ref(true)
 const error = ref<string | null>(null)
 
 const fetchJson = async (path: string) => {
-  const res = await fetch(path)
-  if (!res.ok) {
-    const errText = await res.text()
-    throw new Error(`Error ${res.status} from ${path}: ${errText}`)
-  }
-  return await res.json()
+  const span = startUiSpan(`fetch ${path}`)
+  return await context.with(trace.setSpan(context.active(), span), async () => {
+    try {
+      const headers = injectTraceHeaders()
+      const res = await fetch(path, { headers })
+      if (!res.ok) {
+        const errText = await res.text()
+        throw new Error(`Error ${res.status} from ${path}: ${errText}`)
+      }
+      return await res.json()
+    } catch (e) {
+      span.recordException(e as Error)
+      throw e
+    } finally {
+      span.end()
+    }
+  })
 }
 
 const refreshAll = async () => {
+  const span = startUiSpan('refresh athena resources')
   loading.value = true
   error.value = null
   try {
@@ -124,9 +138,11 @@ const refreshAll = async () => {
     benchmarkSuites.value = suiteData
     benchmarkRuns.value = runData
   } catch (e: any) {
+    span.recordException(e)
     console.error(e)
     error.value = e.message || 'Failed to fetch Athena resources'
   } finally {
+    span.end()
     loading.value = false
   }
 }

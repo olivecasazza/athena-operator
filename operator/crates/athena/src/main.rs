@@ -1,6 +1,7 @@
 mod crd;
 pub mod metrics;
 mod reconciler;
+mod telemetry;
 
 use std::sync::Arc;
 
@@ -18,13 +19,7 @@ pub struct Context {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,athena=debug".into()),
-        )
-        .json()
-        .init();
+    let tracer_provider = telemetry::init_telemetry()?;
 
     if let Some(arg) = std::env::args().nth(1) {
         if arg == "export-crds" {
@@ -35,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("starting Athena research operator");
     metrics::init();
+    telemetry::init_metrics();
     let metrics_port = std::env::var("METRICS_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -57,6 +53,12 @@ async fn main() -> anyhow::Result<()> {
             }
         })
         .await;
+
+    if let Some(provider) = tracer_provider {
+        if let Err(e) = provider.shutdown() {
+            error!(%e, "failed to shutdown OTEL tracer provider");
+        }
+    }
 
     Ok(())
 }

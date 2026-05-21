@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	authv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -208,20 +209,30 @@ func listResearchResource(client dynamic.Interface, resourceName string) http.Ha
 }
 
 func main() {
+	ctx := context.Background()
+	shutdownTelemetry := initTelemetry(ctx)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(shutdownCtx); err != nil {
+			log.Printf("failed to shutdown telemetry: %v", err)
+		}
+	}()
+
 	client, k8sClient, err := getKubernetesClients()
 	if err != nil {
 		log.Printf("Warning: Could not create Kubernetes client: %v", err)
 	}
 
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	http.Handle("/healthz", instrumentHandlerFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok\n"))
-	})
-	http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	http.Handle("/readyz", instrumentHandlerFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ready\n"))
-	})
-	http.HandleFunc("/api/v1/me", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	http.Handle("/api/v1/me", instrumentHandlerFunc("GET /api/v1/me", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		p := principalFromHeaders(r)
 
@@ -262,21 +273,21 @@ func main() {
 			Authz:     az,
 		}
 		json.NewEncoder(w).Encode(resp)
-	})
+	}))
 
 	for name := range researchResources {
 		resourceName := name
-		http.HandleFunc("/api/v1/"+resourceName, listResearchResource(client, resourceName))
+		http.Handle("/api/v1/"+resourceName, instrumentHandlerFunc("GET /api/v1/"+resourceName, listResearchResource(client, resourceName)))
 	}
-	http.HandleFunc("/api/experiments", listResearchResource(client, "experiments"))
-	http.HandleFunc("/api/benchmark-suites", listResearchResource(client, "benchmark-suites"))
-	http.HandleFunc("/api/benchmark-runs", listResearchResource(client, "benchmark-runs"))
-	http.HandleFunc("/api/metric-sources", listResearchResource(client, "metric-sources"))
-	http.HandleFunc("/api/runtime-profiles", listResearchResource(client, "runtime-profiles"))
-	http.HandleFunc("/api/campaigns", listResearchResource(client, "campaigns"))
+	http.Handle("/api/experiments", instrumentHandlerFunc("GET /api/experiments", listResearchResource(client, "experiments")))
+	http.Handle("/api/benchmark-suites", instrumentHandlerFunc("GET /api/benchmark-suites", listResearchResource(client, "benchmark-suites")))
+	http.Handle("/api/benchmark-runs", instrumentHandlerFunc("GET /api/benchmark-runs", listResearchResource(client, "benchmark-runs")))
+	http.Handle("/api/metric-sources", instrumentHandlerFunc("GET /api/metric-sources", listResearchResource(client, "metric-sources")))
+	http.Handle("/api/runtime-profiles", instrumentHandlerFunc("GET /api/runtime-profiles", listResearchResource(client, "runtime-profiles")))
+	http.Handle("/api/campaigns", instrumentHandlerFunc("GET /api/campaigns", listResearchResource(client, "campaigns")))
 
 	spa := spaHandler{staticPath: "web/dist", indexPath: "index.html"}
-	http.Handle("/", spa)
+	http.Handle("/", instrumentHandler("GET /", spa))
 
 	port := os.Getenv("PORT")
 	if port == "" {
