@@ -1,0 +1,248 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/instance: athena
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: athena
+    app.kubernetes.io/version: 0.1.3
+    helm.sh/chart: athena-0.1.3
+  name: athena-operator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/instance: athena
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: athena
+    app.kubernetes.io/version: 0.1.3
+    helm.sh/chart: athena-0.1.3
+  name: athena
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/name: athena
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: athena
+        app.kubernetes.io/name: athena
+    spec:
+      containers:
+        - env:
+            - name: METRICS_PORT
+              value: '8080'
+            - name: ATHENA_ADMIN_GROUP
+              value: athena:admin
+            - name: ATHENA_OPERATOR_GROUP
+              value: athena:operator
+          image: ghcr.io/olivecasazza/athena:0.1.3
+          imagePullPolicy: IfNotPresent
+          name: athena
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      serviceAccountName: athena-operator
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/instance: athena
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: athena
+    app.kubernetes.io/version: 0.1.3
+    helm.sh/chart: athena-0.1.3
+  name: athena-metrics
+spec:
+  ports:
+    - name: metrics
+      port: 8080
+      protocol: TCP
+      targetPort: metrics
+  selector:
+    app.kubernetes.io/instance: athena
+    app.kubernetes.io/name: athena
+  type: ClusterIP
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/instance: athena
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: athena
+    app.kubernetes.io/version: 0.1.3
+    helm.sh/chart: athena-0.1.3
+  name: athena-admin
+rules:
+  - apiGroups:
+      - research.nixlab.io
+    resources:
+      - '*'
+    verbs:
+      - '*'
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+  - apiGroups:
+      - ''
+    resources:
+      - pods
+      - pods/log
+      - persistentvolumeclaims
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/instance: athena
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: athena
+    app.kubernetes.io/version: 0.1.3
+    helm.sh/chart: athena-0.1.3
+  name: athena-operator-role
+rules:
+  - apiGroups:
+      - research.nixlab.io
+    resources:
+      - runtimeprofiles
+      - experimenttemplates
+      - researchcampaigns
+      - experiments
+      - benchmarksuites
+      - benchmarkruns
+      - metricsources
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - research.nixlab.io
+    resources:
+      - runtimeprofiles/status
+      - experimenttemplates/status
+      - researchcampaigns/status
+      - experiments/status
+      - benchmarksuites/status
+      - benchmarkruns/status
+      - metricsources/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ''
+    resources:
+      - pods
+      - pods/log
+      - persistentvolumeclaims
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: athena-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: athena-operator-role
+subjects:
+  - kind: ServiceAccount
+    name: athena-operator
+    namespace: athena
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: athena-admin-group-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: athena-admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: athena:admin
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/instance: athena
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: athena
+    app.kubernetes.io/version: 0.1.3
+    helm.sh/chart: athena-0.1.3
+  name: athena
+spec:
+  endpoints:
+    - interval: 15s
+      port: metrics
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/name: athena
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  labels:
+    app.kubernetes.io/instance: athena
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: athena
+    app.kubernetes.io/version: 0.1.3
+    helm.sh/chart: athena-0.1.3
+  name: athena
+  namespace: monitoring
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana
+  json: '{"panels":[{"targets":[{"expr":"sum(athena_experiments_total{phase=\"Running\"}) by (campaign)","legendFormat":"{{campaign}}"}],"title":"Running Experiments","type":"timeseries"}],"title":"Athena Research Experiments"}'
