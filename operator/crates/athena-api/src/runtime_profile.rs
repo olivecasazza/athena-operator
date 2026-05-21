@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 pub struct RuntimeProfileSpec {
     pub runtime: RuntimeSpec,
     pub image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_policy: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -100,6 +102,7 @@ pub struct SchedulingProfile {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub node_selector: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(schema_with = "crate::common::json_value_schema")]
     pub tolerations: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_class_name: Option<String>,

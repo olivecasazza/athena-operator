@@ -120,8 +120,10 @@ pub struct ExperimentMetrics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective_goal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::common::json_value_schema")]
     pub latest: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::common::json_value_schema")]
     pub best: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_path: Option<String>,

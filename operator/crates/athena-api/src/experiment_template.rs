@@ -102,6 +102,7 @@ pub struct ParameterSpec {
     #[serde(rename = "type")]
     pub parameter_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::common::json_value_schema")]
     pub default: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,

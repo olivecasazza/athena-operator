@@ -10,12 +10,13 @@ spec:
   runtime:
     type: pytorch
     mode: batchJob
-  image: "ghcr.io/iii-experimental/n-autoresearch:latest"
-  command: ["python", "examples/canary/canary_train.py"]
+  image: "python:3.11-slim"
+  pullPolicy: IfNotPresent
+  command: ["sh", "-c", "echo '[canary] running on python:3.11-slim'; pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu; python examples/canary/canary_train.py"]
   resources:
     requests:
-      cpu: "2"
-      memory: "8Gi"
+      cpu: "500m"
+      memory: "2Gi"
     limits:
       nvidia.com/gpu: "1"
   storage:
@@ -23,7 +24,11 @@ spec:
     workspaceMountPath: "/workspace"
   scheduling:
     nodeSelector:
-      nixlab.io/pool: hpc
+      kubernetes.io/hostname: contra
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: ExperimentTemplate

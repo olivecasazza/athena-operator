@@ -1,5 +1,16 @@
 use schemars::JsonSchema;
+use schemars::r#gen::SchemaGenerator;
+use schemars::schema::{Schema, SchemaObject};
 use serde::{Deserialize, Serialize};
+
+pub fn json_value_schema(_gen: &mut SchemaGenerator) -> Schema {
+    let mut schema = SchemaObject::default();
+    schema.extensions.insert(
+        "x-kubernetes-preserve-unknown-fields".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    schema.into()
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]

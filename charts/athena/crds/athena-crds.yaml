@@ -87,6 +87,10 @@
                     ],
                     "type": "object"
                   },
+                  "pullPolicy": {
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "resources": {
                     "default": {},
                     "properties": {
@@ -153,8 +157,7 @@
                         "type": "string"
                       },
                       "tolerations": {
-                        "items": {},
-                        "type": "array"
+                        "x-kubernetes-preserve-unknown-fields": true
                       }
                     },
                     "type": "object"
@@ -314,7 +317,7 @@
                     "additionalProperties": {
                       "properties": {
                         "default": {
-                          "nullable": true
+                          "x-kubernetes-preserve-unknown-fields": true
                         },
                         "description": {
                           "nullable": true,
@@ -783,14 +786,14 @@
                     "nullable": true,
                     "properties": {
                       "best": {
-                        "nullable": true
+                        "x-kubernetes-preserve-unknown-fields": true
                       },
                       "lastUpdated": {
                         "nullable": true,
                         "type": "string"
                       },
                       "latest": {
-                        "nullable": true
+                        "x-kubernetes-preserve-unknown-fields": true
                       },
                       "metricsPath": {
                         "nullable": true,
