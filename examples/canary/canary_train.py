@@ -25,6 +25,14 @@ import os
 import sys
 import time
 from contextlib import nullcontext
+
+# Nix Python wrappers can leak an empty _PYTHON_SYSCONFIGDATA_NAME into uv
+# subprocesses. PyTorch imports torch._dynamo during optimizer construction,
+# which probes Triton; Triton calls sysconfig, and CPython then tries to import
+# an empty sysconfigdata module. Drop only the broken empty value so the canary
+# remains runnable under Nix and normal container Python alike.
+if os.environ.get("_PYTHON_SYSCONFIGDATA_NAME") == "":
+    os.environ.pop("_PYTHON_SYSCONFIGDATA_NAME")
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -364,7 +372,7 @@ def _run_training(config: CanaryConfig, device: torch.device, use_cuda: bool, tr
     train_data = make_synthetic_data(num_train_batches, config.device_batch_size, config.seq_len, config.vocab_size, seed=42)
     val_data = make_synthetic_data(num_val_batches, config.device_batch_size, config.seq_len, config.vocab_size, seed=99)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01, foreach=False)
 
     # Initial val
     with tracer.start_as_current_span("athena.canary.evaluate.initial"):
