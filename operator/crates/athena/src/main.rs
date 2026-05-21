@@ -19,7 +19,7 @@ pub struct Context {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let tracer_provider = telemetry::init_telemetry()?;
+    let (tracer_provider, _telemetry_config) = telemetry::init_telemetry()?;
 
     if let Some(arg) = std::env::args().nth(1) {
         if arg == "export-crds" {
