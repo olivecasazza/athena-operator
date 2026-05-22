@@ -23,7 +23,7 @@
           {{ error }}
         </div>
 
-        <div v-else-if="benchmarkRuns.length === 0" class="text-gray-500 text-center py-8 border-2 border-dashed border-gray-700 rounded">
+        <div v-else-if="benchmarkRuns.length === 0" class="text-gray-500 text-center py-8 px-4 border-2 border-dashed border-gray-700 rounded">
           No benchmark runs found in the cluster.
         </div>
 
