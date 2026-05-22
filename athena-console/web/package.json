@@ -18,9 +18,12 @@
     "@opentelemetry/resources": "^2.7.1",
     "@opentelemetry/sdk-trace-web": "^2.7.1",
     "@opentelemetry/semantic-conventions": "^1.41.1",
+    "js-yaml": "^4.1.0",
+    "monaco-editor": "^0.55.1",
     "vue": "^3.5.13"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@vitejs/plugin-vue": "^5.2.1",
     "typescript": "~5.6.2",
     "vite": "^6.0.5",

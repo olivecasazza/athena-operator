@@ -7,7 +7,7 @@
 
     <main class="w-full max-w-6xl bg-gray-800 p-6 rounded-lg shadow-lg space-y-8">
       <section>
-        <div class="mb-6 flex justify-between items-center">
+        <div class="mb-6 flex justify-between items-center gap-4">
           <div>
             <h2 class="text-2xl font-semibold">Benchmark Runs</h2>
             <p class="text-gray-400 text-sm">Early benchmark API scaffold: phase, suite, target, cost, and report links.</p>
@@ -83,26 +83,61 @@
               <span class="text-pink-300 font-medium">{{ exp.metadata.name }}</span>
               <span class="text-xs text-gray-400">{{ exp.status?.phase || 'Unknown' }}</span>
             </div>
-            <div v-if="exp.status?.workspacePath" class="text-xs font-mono text-gray-500 mt-1 overflow-x-auto">
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <button class="border border-gray-700 px-3 py-1 font-mono text-xs text-gray-300 hover:border-pink-400 hover:text-white" @click="openIde(exp)">
+                Open IDE
+              </button>
+              <span v-if="draftCounts[draftKey(exp)]" class="font-mono text-xs text-yellow-400">
+                {{ draftCounts[draftKey(exp)] }} draft file(s)
+              </span>
+            </div>
+            <div v-if="exp.status?.workspacePath" class="text-xs font-mono text-gray-500 mt-2 overflow-x-auto">
               {{ exp.status.workspacePath }}
             </div>
           </div>
         </div>
       </section>
+
+      <section class="bg-gray-900/60 p-4 rounded border border-gray-700">
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <h2 class="text-xl font-semibold mb-1">Metrics debugging</h2>
+            <p class="text-sm text-gray-500">Use embedded Grafana panels for metric chart debugging instead of custom chart code.</p>
+          </div>
+          <a class="border border-gray-700 px-3 py-2 font-mono text-xs text-gray-300 hover:border-white hover:text-white" href="/grafana/d/athena-athena-experiment-debugging" target="_blank" rel="noreferrer">
+            Open Grafana
+          </a>
+        </div>
+      </section>
     </main>
+
+    <IdeModal
+      :is-open="ideOpen"
+      :experiment="selectedExperiment"
+      :runtime-profiles="runtimeProfiles"
+      :benchmark-suites="benchmarkSuites"
+      :benchmark-runs="benchmarkRuns"
+      @close="ideOpen = false"
+      @save-draft="recordDraftSave"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { context, trace } from '@opentelemetry/api'
 import { ref, onMounted } from 'vue'
+import IdeModal from './components/IdeModal.vue'
 import { injectTraceHeaders, startUiSpan } from './telemetry'
 
 const experiments = ref<any[]>([])
 const benchmarkSuites = ref<any[]>([])
 const benchmarkRuns = ref<any[]>([])
+const runtimeProfiles = ref<any[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
+const ideOpen = ref(false)
+const selectedExperiment = ref<any | null>(null)
+const draftCounts = ref<Record<string, number>>({})
 
 const fetchJson = async (path: string, fallbackData: any = []) => {
   const span = startUiSpan(`fetch ${path}`)
@@ -128,19 +163,47 @@ const fetchJson = async (path: string, fallbackData: any = []) => {
   })
 }
 
+const draftKey = (exp: any) => `athena-ide-draft:${exp.metadata?.namespace || 'default'}:${exp.metadata?.name || 'experiment'}`
+
+const refreshDraftCounts = () => {
+  const next: Record<string, number> = {}
+  for (const exp of experiments.value) {
+    const raw = localStorage.getItem(draftKey(exp))
+    if (!raw) continue
+    try {
+      next[draftKey(exp)] = JSON.parse(raw).length
+    } catch {
+      next[draftKey(exp)] = 1
+    }
+  }
+  draftCounts.value = next
+}
+
+const openIde = (exp: any) => {
+  selectedExperiment.value = exp
+  ideOpen.value = true
+}
+
+const recordDraftSave = () => {
+  refreshDraftCounts()
+}
+
 const refreshAll = async () => {
   const span = startUiSpan('refresh athena resources')
   loading.value = true
   error.value = null
   try {
-    const [expData, suiteData, runData] = await Promise.all([
+    const [expData, suiteData, runData, runtimeData] = await Promise.all([
       fetchJson('/api/v1/experiments'),
       fetchJson('/api/v1/benchmark-suites'),
       fetchJson('/api/v1/benchmark-runs'),
+      fetchJson('/api/v1/runtime-profiles'),
     ])
     experiments.value = expData
     benchmarkSuites.value = suiteData
     benchmarkRuns.value = runData
+    runtimeProfiles.value = runtimeData
+    refreshDraftCounts()
   } catch (e: any) {
     span.recordException(e)
     console.error(e)
