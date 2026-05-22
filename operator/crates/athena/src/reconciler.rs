@@ -141,10 +141,10 @@ async fn ensure_experiment_job(
         workspace_path: Some(workspace_path.clone()),
         job_name: Some(job_name.clone()),
         logs_link: Some(format!(
-            "https://grafana.casazza.io/explore?left={{\"datasource\":\"Loki\",\"queries\":[{{\"expr\":\"{{namespace=\\\"{}\\\",job_name=\\\"{}\\\"}}\"}}]}}",
+            r#"https://grafana.casazza.io/explore?left={{"datasource":"Loki","queries":[{{"expr":"{{namespace=\"{}\",job_name=\"{}\"}}"}}]}}"#,
             ns, job_name
         )),
-        metrics_link: Some("https://grafana.casazza.io/d/athena/athena-research-experiments".to_string()),
+        metrics_link: Some("https://grafana.casazza.io/d/athena-athena-experiment-debugging/athena-experiment-debugging".to_string()),
         environment: Some(ExperimentEnvironment {
             namespace: Some(ns.to_string()),
             job_name: Some(job_name),
