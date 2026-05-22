@@ -17,9 +17,11 @@
           </button>
         </div>
 
-        <div v-if="loading" class="text-gray-500 text-center py-8">Loading Athena resources...</div>
+        <div v-if="loading" class="border border-gray-800 bg-black/40 px-4 py-5 font-mono text-xs text-gray-500">
+          Loading Athena resources…
+        </div>
 
-        <div v-else-if="error" class="bg-red-900/50 border border-red-500 text-red-200 p-4 rounded mb-4">
+        <div v-else-if="error" class="border border-red-800 bg-red-950/40 px-4 py-5 font-mono text-xs text-red-200 mb-4 whitespace-pre-wrap break-words">
           {{ error }}
         </div>
 
@@ -148,20 +150,50 @@ const ideOpen = ref(false)
 const selectedExperiment = ref<any | null>(null)
 const draftCounts = ref<Record<string, number>>({})
 
+const isJsonContentType = (contentType: string | null) =>
+  Boolean(contentType && (contentType.includes('application/json') || contentType.includes('+json')))
+
+const summarizeResponseBody = (body: string, contentType: string | null) => {
+  const trimmed = body.trim()
+  if (!trimmed) return ''
+
+  if (trimmed.startsWith('<!DOCTYPE html') || trimmed.startsWith('<html') || contentType?.includes('text/html')) {
+    const title = trimmed.match(/<title>(.*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim()
+    return title ? `upstream returned HTML instead of JSON (${title})` : 'upstream returned HTML instead of JSON'
+  }
+
+  return trimmed.replace(/\s+/g, ' ').slice(0, 240)
+}
+
 const fetchJson = async (path: string, fallbackData: any = []) => {
   const span = startUiSpan(`fetch ${path}`)
   return await context.with(trace.setSpan(context.active(), span), async () => {
     try {
       const headers = injectTraceHeaders()
       const res = await fetch(path, { headers })
+      const contentType = res.headers.get('content-type')
+
       if (!res.ok) {
         if (res.status === 404) {
           console.warn(`[fallback] Kubernetes API unavailable from browser path (${path}: 404); rendering cached/mock projection.`)
           return fallbackData
         }
+
         const errText = await res.text()
-        throw new Error(`Error ${res.status} from ${path}: ${errText}`)
+        const summary = summarizeResponseBody(errText, contentType)
+        throw new Error(
+          `Error ${res.status} from ${path}${summary ? `: ${summary}` : ''}`,
+        )
       }
+
+      if (!isJsonContentType(contentType)) {
+        const responseText = await res.text()
+        const summary = summarizeResponseBody(responseText, contentType)
+        throw new Error(
+          `Invalid response from ${path}: expected JSON but received ${contentType || 'unknown content type'}${summary ? ` (${summary})` : ''}`,
+        )
+      }
+
       return await res.json()
     } catch (e) {
       span.recordException(e as Error)

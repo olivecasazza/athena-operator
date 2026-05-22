@@ -11,7 +11,6 @@ spec:
     type: pytorch
     mode: batchJob
   image: "python:3.11-slim"
-  pullPolicy: IfNotPresent
   command: ["sh", "-c", "echo '[canary] running on python:3.11-slim'; pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu; python examples/canary/canary_train.py"]
   resources:
     requests:
@@ -20,7 +19,7 @@ spec:
     limits:
       nvidia.com/gpu: "1"
   storage:
-    workspaceClaimName: "autoresearch-workspace"
+    workspaceClaimName: "athena-workspace"
     workspaceMountPath: "/workspace"
   scheduling:
     nodeSelector:
@@ -75,7 +74,7 @@ spec:
 apiVersion: research.nixlab.io/v1alpha1
 kind: Experiment
 metadata:
-  name: canary-run-01
+  name: canary-run-02
 spec:
   campaignRef: canary-campaign
   hypothesis: "Canary test using minimal depth and 15s budget to exercise operator and autoscaler."
