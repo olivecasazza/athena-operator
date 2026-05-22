@@ -279,19 +279,13 @@ func main() {
 		resourceName := name
 		http.Handle("/api/v1/"+resourceName, instrumentHandlerFunc("GET /api/v1/"+resourceName, listResearchResource(client, resourceName)))
 	}
-	http.Handle("/api/experiments", instrumentHandlerFunc("GET /api/experiments", listResearchResource(client, "experiments")))
-	http.Handle("/api/benchmark-suites", instrumentHandlerFunc("GET /api/benchmark-suites", listResearchResource(client, "benchmark-suites")))
-	http.Handle("/api/benchmark-runs", instrumentHandlerFunc("GET /api/benchmark-runs", listResearchResource(client, "benchmark-runs")))
-	http.Handle("/api/metric-sources", instrumentHandlerFunc("GET /api/metric-sources", listResearchResource(client, "metric-sources")))
-	http.Handle("/api/runtime-profiles", instrumentHandlerFunc("GET /api/runtime-profiles", listResearchResource(client, "runtime-profiles")))
-	http.Handle("/api/campaigns", instrumentHandlerFunc("GET /api/campaigns", listResearchResource(client, "campaigns")))
 
 	spa := spaHandler{staticPath: "web/dist", indexPath: "index.html"}
 	http.Handle("/", instrumentHandler("GET /", spa))
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "3000"
 	}
 	log.Printf("Starting BFF on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+strings.TrimPrefix(port, ":"), nil))

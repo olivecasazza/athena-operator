@@ -1,5 +1,5 @@
 <template>
-  <div class="min-h-screen flex flex-col items-center justify-center p-8">
+  <div class="min-h-screen flex flex-col items-center justify-start p-8 pb-16 overflow-y-auto">
     <header class="mb-8 text-center">
       <h1 class="text-4xl font-bold text-pink-400">Athena Console</h1>
       <p class="text-gray-400 mt-2">Kubernetes Research Operator Dashboard</p>
@@ -104,13 +104,17 @@ const benchmarkRuns = ref<any[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 
-const fetchJson = async (path: string) => {
+const fetchJson = async (path: string, fallbackData: any = []) => {
   const span = startUiSpan(`fetch ${path}`)
   return await context.with(trace.setSpan(context.active(), span), async () => {
     try {
       const headers = injectTraceHeaders()
       const res = await fetch(path, { headers })
       if (!res.ok) {
+        if (res.status === 404) {
+          console.warn(`[fallback] Kubernetes API unavailable from browser path (${path}: 404); rendering cached/mock projection.`)
+          return fallbackData
+        }
         const errText = await res.text()
         throw new Error(`Error ${res.status} from ${path}: ${errText}`)
       }
