@@ -1,11 +1,11 @@
 <template>
-  <div class="min-h-screen flex flex-col items-center justify-start p-8 pb-16 overflow-y-auto">
-    <header class="mb-8 text-center">
+  <div class="min-h-screen bg-gray-950 text-gray-100 flex flex-col overflow-y-auto pb-24">
+    <header class="px-8 pt-8 pb-6 text-center shrink-0">
       <h1 class="text-4xl font-bold text-pink-400">Athena Console</h1>
       <p class="text-gray-400 mt-2">Kubernetes Research Operator Dashboard</p>
     </header>
 
-    <main class="w-full max-w-6xl bg-gray-800 p-6 rounded-lg shadow-lg space-y-8">
+    <main class="w-full max-w-6xl mx-auto bg-gray-800 p-6 rounded-lg shadow-lg space-y-8 flex-1">
       <section>
         <div class="mb-6 flex justify-between items-center gap-4">
           <div>
@@ -98,7 +98,7 @@
         </div>
       </section>
 
-      <section class="bg-gray-900/60 p-4 rounded border border-gray-700">
+      <section id="metrics" class="bg-gray-900/60 p-4 rounded border border-gray-700">
         <div class="flex items-center justify-between gap-4">
           <div>
             <h2 class="text-xl font-semibold mb-1">Metrics debugging</h2>
@@ -110,6 +110,15 @@
         </div>
       </section>
     </main>
+
+    <footer class="fixed bottom-0 left-0 right-0 z-40 border-t border-gray-800 bg-black/95 px-4 py-3 backdrop-blur">
+      <nav class="mx-auto flex max-w-6xl items-center justify-center gap-2 font-mono text-xs text-gray-500">
+        <a class="border border-transparent px-3 py-2 hover:border-white hover:text-white" href="#">overview</a>
+        <a class="border border-transparent px-3 py-2 hover:border-white hover:text-white" href="#metrics">metrics</a>
+        <button class="border border-transparent px-3 py-2 hover:border-white hover:text-white" @click="experiments[0] && openIde(experiments[0])">ide</button>
+        <button class="border border-transparent px-3 py-2 hover:border-white hover:text-white" @click="refreshAll">refresh</button>
+      </nav>
+    </footer>
 
     <IdeModal
       :is-open="ideOpen"
