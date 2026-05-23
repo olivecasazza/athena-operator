@@ -1,0 +1,106 @@
+# Athena UI-ready GRPO smoke template.
+#
+# This is intentionally small enough for a console-launched experiment:
+# - bounded synthetic prompt set
+# - tiny rollout/step budget
+# - metrics.json parser contract
+# - embedded dashboard metadata for Athena Console controls
+#
+# Apply the RuntimeProfile and ExperimentTemplate, then dispatch Experiments
+# from Athena Console by editing the parameters below.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: gpu-small-grpo-smoke
+  namespace: athena
+spec:
+  runtime:
+    type: pytorch
+    mode: batchJob
+  image: "python:3.11-slim"
+  command:
+    - sh
+    - -c
+    - >-
+      echo '[grpo-smoke] install tiny runtime';
+      pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu;
+      python experiments/grpo/smoke_train.py
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      memory: "4Gi"
+  storage:
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: grpo-smoke-improvement
+  namespace: athena
+  labels:
+    athena.nixlab.io/example: ui-template
+spec:
+  runtimeProfileRef: gpu-small-grpo-smoke
+  source:
+    git:
+      url: "https://github.com/iii-experimental/n-autoresearch"
+      ref: "main"
+  objective:
+    metric: "reward_mean"
+    goal: "maximize"
+  metrics:
+    parser:
+      type: "file"
+      path: "metrics.json"
+  defaults:
+    prompt_set: "synthetic-arithmetic-v0"
+    learning_rate: 0.00001
+    rollout_count: 4
+    training_steps: 12
+    reward_baseline: 0.2
+  parameterSchema:
+    prompt_set:
+      type: string
+      description: "Small deterministic prompt corpus for smoke testing."
+      default: "synthetic-arithmetic-v0"
+    learning_rate:
+      type: number
+      description: "Optimizer step size for the GRPO trial."
+      default: 0.00001
+    rollout_count:
+      type: integer
+      description: "Completions sampled per prompt."
+      default: 4
+    training_steps:
+      type: integer
+      description: "Tiny bounded step budget for UI-launched experiments."
+      default: 12
+    reward_baseline:
+      type: number
+      description: "Baseline reward threshold used to show lift."
+      default: 0.2
+  dashboard:
+    title: "GRPO Smoke Lift"
+    metrics:
+      reward_mean:
+        label: "Reward mean"
+        unit: score
+        goal: maximize
+        baseline: 0.2
+        description: "Primary metric expected to improve over the baseline."
+      baseline_lift:
+        label: "Lift over baseline"
+        unit: delta
+        goal: maximize
+        baseline: 0
+        description: "reward_mean minus reward_baseline; positive means the experiment improved."
+      pass_rate:
+        label: "Pass rate"
+        unit: "%"
+        goal: maximize
+        baseline: 50
+        description: "Share of validation prompts solved after the tiny training run."

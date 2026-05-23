@@ -250,6 +250,47 @@
             "properties": {
               "spec": {
                 "properties": {
+                  "dashboard": {
+                    "nullable": true,
+                    "properties": {
+                      "metrics": {
+                        "additionalProperties": {
+                          "properties": {
+                            "baseline": {
+                              "format": "double",
+                              "nullable": true,
+                              "type": "number"
+                            },
+                            "description": {
+                              "nullable": true,
+                              "type": "string"
+                            },
+                            "goal": {
+                              "nullable": true,
+                              "type": "string"
+                            },
+                            "label": {
+                              "type": "string"
+                            },
+                            "unit": {
+                              "nullable": true,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "label"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "object"
+                      },
+                      "title": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
                   "defaults": {
                     "additionalProperties": true,
                     "type": "object"
