@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/instance: athena
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: athena
+    app.kubernetes.io/version: 0.1.3
+    helm.sh/chart: athena-0.1.3
+  name: athena
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/name: athena
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: athena
+        app.kubernetes.io/name: athena
+    spec:
+      containers:
+        - env:
+            - name: METRICS_PORT
+              value: '8080'
+            - name: ATHENA_ADMIN_GROUP
+              value: athena:admin
+            - name: ATHENA_OPERATOR_GROUP
+              value: athena:operator
+          image: ghcr.io/olivecasazza/athena-operator:latest@sha256:e1f33c4d182c984f8790aba645138f11cc9dc4d92b4fc6c19c2a5aadd88f3211
+          imagePullPolicy: IfNotPresent
+          name: athena
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      imagePullSecrets:
+        - name: ghcr-pull
+      serviceAccountName: athena-operator

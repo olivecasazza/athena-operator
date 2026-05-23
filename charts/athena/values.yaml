@@ -1,43 +1,37 @@
-replicaCount: 1
-
+auth:
+  oidc:
+    adminGroup: athena:admin
+    enabled: true
+    groupsClaim: groups
+    issuerURL: https://auth.casazza.io/realms/master
+    operatorGroup: athena:operator
+    usernameClaim: email
+    viewerGroup: athena:viewer
+  rbac:
+    adminClusterRoleName: athena-admin
+    adminGroupName: athena:admin
+    create: true
+    operatorClusterRoleName: athena-operator-role
 image:
-  repository: ghcr.io/olivecasazza/athena
   pullPolicy: IfNotPresent
-  # Overrides the image tag whose default is the chart appVersion.
-  tag: ""
+  repository: ghcr.io/olivecasazza/athena-operator
+  tag: ''
 metrics:
   enabled: true
   port: 8080
   serviceMonitor:
     enabled: true
     interval: 15s
-
 observability:
   grafanaDashboard:
     enabled: true
-
-serviceAccount:
-  create: true
-  name: "athena-operator"
-
-auth:
-  oidc:
-    enabled: true
-    issuerURL: "https://auth.casazza.io/realms/master"
-    usernameClaim: "email"
-    groupsClaim: "groups"
-    adminGroup: "athena:admin"
-    operatorGroup: "athena:operator"
-    viewerGroup: "athena:viewer"
-  rbac:
-    create: true
-    adminClusterRoleName: "athena-admin"
-    operatorClusterRoleName: "athena-operator-role"
-    adminGroupName: "athena:admin"
-
+replicaCount: 1
 resources:
+  limits:
+    memory: 256Mi
   requests:
     cpu: 100m
     memory: 128Mi
-  limits:
-    memory: 256Mi
+serviceAccount:
+  create: true
+  name: athena-operator
