@@ -60,6 +60,119 @@ pub struct ExperimentStatus {
     pub decision: Option<ExperimentDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<ExperimentEnvironment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ExperimentResources>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_detail: Option<ExperimentMetrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<ExperimentArtifacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ExperimentCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Vec<ExperimentCondition>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<crate::experiment_template::DashboardSpec>,
+}
+
+// --- Denormalized status sub-types ---
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentEnvironment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skypilot_cluster: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skypilot_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_names: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_names: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentResources {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_requested: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_allocated: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_requested: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_requested: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentMetrics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_goal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::common::json_value_schema")]
+    pub latest: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::common::json_value_schema")]
+    pub best: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_updated: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentArtifacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoints_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reports_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_commit: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentCost {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_hours: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_seconds: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentCondition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "type")]
+    pub condition_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_transition_time: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default, PartialEq)]

@@ -10,20 +10,24 @@ spec:
   runtime:
     type: pytorch
     mode: batchJob
-  image: "ghcr.io/iii-experimental/n-autoresearch:latest"
-  command: ["python", "canary_train.py"]
+  image: "python:3.11-slim"
+  command: ["sh", "-c", "echo '[canary] running on python:3.11-slim'; pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu; python examples/canary/canary_train.py"]
   resources:
     requests:
-      cpu: "2"
-      memory: "8Gi"
+      cpu: "500m"
+      memory: "2Gi"
     limits:
       nvidia.com/gpu: "1"
   storage:
-    workspaceClaimName: "autoresearch-workspace"
+    workspaceClaimName: "athena-workspace"
     workspaceMountPath: "/workspace"
   scheduling:
     nodeSelector:
-      nixlab.io/pool: hpc
+      kubernetes.io/hostname: contra
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: ExperimentTemplate
@@ -55,6 +59,13 @@ spec:
     timeBudget:
       type: integer
       default: 15
+  dashboard:
+    title: "Canary Run Dashboard"
+    metrics:
+      val_bpb:
+        label: "Validation BPB"
+      peak_vram_mb:
+        label: "Peak VRAM (MB)"
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: ResearchCampaign
@@ -70,7 +81,7 @@ spec:
 apiVersion: research.nixlab.io/v1alpha1
 kind: Experiment
 metadata:
-  name: canary-run-01
+  name: canary-run-02
 spec:
   campaignRef: canary-campaign
   hypothesis: "Canary test using minimal depth and 15s budget to exercise operator and autoscaler."
