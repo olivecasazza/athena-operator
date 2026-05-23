@@ -15,9 +15,9 @@ let
     releaseName = "athena";
 
     image = {
-      repository = "ghcr.io/olivecasazza/athena";
-      pullPolicy = "IfNotPresent";
-      tag = chart.appVersion;
+      repository = "ghcr.io/olivecasazza/athena-operator";
+      pullPolicy = "Always";
+      tag = "latest";
     };
 
     operator = {
@@ -503,6 +503,7 @@ let
           metadata.labels = selectorLabels;
           spec = {
             serviceAccountName = deployment.operator.serviceAccountName;
+            imagePullSecrets = [ { name = "ghcr-pull"; } ];
             containers = [
               {
                 name = deployment.chart.name;
