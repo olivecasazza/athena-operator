@@ -7,8 +7,8 @@ let
     chart = {
       name = "athena";
       description = "Athena Kubernetes Research Operator Template";
-      version = "0.1.6";
-      appVersion = "0.1.6";
+      version = "0.1.7";
+      appVersion = "0.1.7";
     };
 
     namespace = "athena";
