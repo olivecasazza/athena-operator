@@ -5,8 +5,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.5
-    helm.sh/chart: athena-0.1.5
+    app.kubernetes.io/version: 0.1.6
+    helm.sh/chart: athena-0.1.6
   name: athena-metrics
 spec:
   ports:
