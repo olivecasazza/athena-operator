@@ -754,6 +754,48 @@
                     },
                     "type": "object"
                   },
+                  "dashboard": {
+                    "nullable": true,
+                    "properties": {
+                      "metrics": {
+                        "additionalProperties": {
+                          "properties": {
+                            "baseline": {
+                              "format": "double",
+                              "nullable": true,
+                              "type": "number"
+                            },
+                            "description": {
+                              "nullable": true,
+                              "type": "string"
+                            },
+                            "goal": {
+                              "nullable": true,
+                              "type": "string"
+                            },
+                            "label": {
+                              "type": "string"
+                            },
+                            "unit": {
+                              "nullable": true,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "label"
+                          ],
+                          "type": "object"
+                        },
+                        "default": {},
+                        "type": "object"
+                      },
+                      "title": {
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
                   "decision": {
                     "enum": [
                       "keep",
