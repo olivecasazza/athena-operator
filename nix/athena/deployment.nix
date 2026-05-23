@@ -735,7 +735,8 @@ let
       installPhase = ''
         mkdir -p $out
         cp ${renderObjects pkgs "athena-manifests.yaml" k8sObjects} $out/athena-manifests.yaml
-        yq eval-all '. as $item ireduce ([]; . + $item)' $out/athena-manifests.yaml ${../../examples/grpo-smoke-template.yaml} > $out/manifests-merged.yaml
+        cp ${../../examples/grpo-smoke-template.yaml} grpo-smoke-template.yaml
+        cat $out/athena-manifests.yaml grpo-smoke-template.yaml > $out/manifests-merged.yaml
         mv $out/manifests-merged.yaml $out/athena-manifests.yaml
       '';
     };
