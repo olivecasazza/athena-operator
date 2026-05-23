@@ -5,8 +5,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.9
-    helm.sh/chart: athena-0.1.9
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.10
   name: athena
 spec:
   replicas: 1
@@ -28,7 +28,7 @@ spec:
               value: athena:admin
             - name: ATHENA_OPERATOR_GROUP
               value: athena:operator
-          image: ghcr.io/olivecasazza/athena-operator:latest@sha256:2e4b1613c05e70096923e23485331ebd24fdeffa31dc0a1672a6ae7954abb1c0
+          image: ghcr.io/olivecasazza/athena-operator:latest@sha256:80c87719a1ed5be2e59037e8f734bbb1524d23094804321a18dd965325d8c8bc
           imagePullPolicy: IfNotPresent
           name: athena
           ports:

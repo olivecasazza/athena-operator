@@ -7,8 +7,8 @@ let
     chart = {
       name = "athena";
       description = "Athena Kubernetes Research Operator Template";
-      version = "0.1.9";
-      appVersion = "0.1.9";
+      version = "0.1.10";
+      appVersion = "0.1.10";
     };
 
     namespace = "athena";
@@ -17,7 +17,7 @@ let
     image = {
       repository = "ghcr.io/olivecasazza/athena-operator";
       pullPolicy = "IfNotPresent";
-      tag = "latest@sha256:2e4b1613c05e70096923e23485331ebd24fdeffa31dc0a1672a6ae7954abb1c0";
+      tag = "latest@sha256:80c87719a1ed5be2e59037e8f734bbb1524d23094804321a18dd965325d8c8bc";
     };
 
     operator = {
