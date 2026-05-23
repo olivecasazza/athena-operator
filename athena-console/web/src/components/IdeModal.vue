@@ -39,7 +39,7 @@
             class="mb-1 block w-full border px-3 py-2 text-left font-mono text-xs"
             :class="
               file.path === currentFilePath
-                ? 'border-pink-300 bg-blue-950/40 text-white'
+                ? 'border-pink-500 bg-blue-950/40 text-white'
                 : 'border-transparent text-zinc-400 hover:border-zinc-700 hover:text-white'
             "
             @click="currentFilePath = file.path"
@@ -101,19 +101,19 @@
         </p>
         <div class="mt-6 flex justify-end gap-3">
           <button
-            class="border border-zinc-700 px-4 py-2 text-xs text-zinc-300 hover:border-blue-200 hover:text-blue-200"
+            class="border border-zinc-700 px-4 py-2 text-xs text-zinc-300 hover:border-blue-400 hover:text-blue-400"
             @click="showConfirm = false"
           >
             Cancel
           </button>
           <button
-            class="border border-zinc-700 px-4 py-2 text-xs text-zinc-300 hover:border-blue-200 hover:text-blue-200"
+            class="border border-zinc-700 px-4 py-2 text-xs text-zinc-300 hover:border-blue-400 hover:text-blue-400"
             @click="discardAndClose"
           >
             Discard
           </button>
           <button
-            class="border border-pink-300 px-4 py-2 text-xs text-pink-200 hover:bg-pink-200 hover:text-black"
+            class="border border-pink-500 px-4 py-2 text-xs text-pink-300 hover:bg-pink-200 hover:text-black"
             @click="saveDraftAndClose"
           >
             Save draft
