@@ -17,7 +17,7 @@ let
     image = {
       repository = "ghcr.io/olivecasazza/athena-operator";
       pullPolicy = "IfNotPresent";
-      tag = "latest@sha256:e1f33c4d182c984f8790aba645138f11cc9dc4d92b4fc6c19c2a5aadd88f3211";
+      tag = "latest@sha256:2e4b1613c05e70096923e23485331ebd24fdeffa31dc0a1672a6ae7954abb1c0";
     };
 
     operator = {
