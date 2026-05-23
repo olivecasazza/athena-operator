@@ -260,7 +260,7 @@ let
   tablePanel = id: title: expr: gridPos: {
     inherit id title gridPos;
     type = "table";
-    targets = [ (prometheusTarget expr "{{namespace}} {{experiment}} {{action}} {{result}}") ];
+    targets = [ (prometheusTarget expr "{{`{{`}}namespace}} {{`{{`}}experiment}} {{`{{`}}action}} {{`{{`}}result}}") ];
   };
 
   dashboardJson = dashboard: builtins.toJSON (dashboardDefaults // dashboard);
@@ -311,7 +311,7 @@ let
           )
           (timeseriesPanel 5 "Experiments by phase"
             ''sum(athena_experiments_total{namespace=~"$namespace"}) by (namespace,campaign,phase)''
-            "{{namespace}}/{{campaign}} {{phase}}"
+            "{{`{{`}}namespace}}/{{`{{`}}campaign}} {{`{{`}}phase}}"
             {
               x = 0;
               y = 4;
@@ -321,7 +321,7 @@ let
           )
           (timeseriesPanel 6 "Operator reconcile rate"
             ''sum(rate(athena_operator_reconcile_total{namespace=~"$namespace"}[5m])) by (namespace,campaign,phase,result)''
-            "{{namespace}}/{{campaign}} {{phase}} {{result}}"
+            "{{`{{`}}namespace}}/{{`{{`}}campaign}} {{`{{`}}phase}} {{`{{`}}result}}"
             {
               x = 12;
               y = 4;
@@ -331,7 +331,7 @@ let
           )
           (timeseriesPanel 7 "Agent action rate"
             ''sum(rate(athena_operator_agent_action_total{namespace=~"$namespace"}[5m])) by (namespace,action,result)''
-            "{{namespace}} {{action}} {{result}}"
+            "{{`{{`}}namespace}} {{`{{`}}action}} {{`{{`}}result}}"
             {
               x = 0;
               y = 12;
@@ -341,7 +341,7 @@ let
           )
           (timeseriesPanel 8 "p95 agent action latency"
             ''histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~"$namespace"}[5m])) by (le,namespace,action))''
-            "{{namespace}} {{action}}"
+            "{{`{{`}}namespace}} {{`{{`}}action}}"
             {
               x = 12;
               y = 12;
@@ -361,7 +361,7 @@ let
         panels = [
           (timeseriesPanel 1 "Reconcile rate by result"
             ''sum(rate(athena_operator_reconcile_total{namespace=~"$namespace"}[5m])) by (namespace,result)''
-            "{{namespace}} {{result}}"
+            "{{`{{`}}namespace}} {{`{{`}}result}}"
             {
               x = 0;
               y = 0;
@@ -371,7 +371,7 @@ let
           )
           (timeseriesPanel 2 "Reconcile p50/p95 latency"
             ''histogram_quantile(0.95, sum(rate(athena_operator_reconcile_duration_seconds_bucket{namespace=~"$namespace"}[5m])) by (le,namespace,campaign))''
-            "p95 {{namespace}}/{{campaign}}"
+            "p95 {{`{{`}}namespace}}/{{`{{`}}campaign}}"
             {
               x = 12;
               y = 0;
@@ -381,7 +381,7 @@ let
           )
           (timeseriesPanel 3 "Agent action duration p95"
             ''histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~"$namespace",experiment=~"$experiment"}[5m])) by (le,namespace,experiment,action))''
-            "{{namespace}}/{{experiment}} {{action}}"
+            "{{`{{`}}namespace}}/{{`{{`}}experiment}} {{`{{`}}action}}"
             {
               x = 0;
               y = 8;
@@ -391,7 +391,7 @@ let
           )
           (timeseriesPanel 4 "Agent action errors"
             ''sum(rate(athena_operator_agent_action_total{namespace=~"$namespace",experiment=~"$experiment",result!="ok"}[5m])) by (namespace,experiment,action,result)''
-            "{{namespace}}/{{experiment}} {{action}} {{result}}"
+            "{{`{{`}}namespace}}/{{`{{`}}experiment}} {{`{{`}}action}} {{`{{`}}result}}"
             {
               x = 12;
               y = 8;
@@ -417,7 +417,7 @@ let
         panels = [
           (timeseriesPanel 1 "Selected experiment actions"
             ''sum(rate(athena_operator_agent_action_total{namespace=~"$namespace",experiment=~"$experiment"}[5m])) by (namespace,experiment,action,result)''
-            "{{namespace}}/{{experiment}} {{action}} {{result}}"
+            "{{`{{`}}namespace}}/{{`{{`}}experiment}} {{`{{`}}action}} {{`{{`}}result}}"
             {
               x = 0;
               y = 0;
@@ -427,7 +427,7 @@ let
           )
           (timeseriesPanel 2 "Selected experiment action p95 latency"
             ''histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~"$namespace",experiment=~"$experiment"}[5m])) by (le,namespace,experiment,action,result))''
-            "{{namespace}}/{{experiment}} {{action}} {{result}}"
+            "{{`{{`}}namespace}}/{{`{{`}}experiment}} {{`{{`}}action}} {{`{{`}}result}}"
             {
               x = 0;
               y = 8;
@@ -437,7 +437,7 @@ let
           )
           (timeseriesPanel 3 "Selected experiment reconciles"
             ''sum(rate(athena_operator_reconcile_total{namespace=~"$namespace"}[5m])) by (namespace,campaign,phase,result)''
-            "{{namespace}}/{{campaign}} {{phase}} {{result}}"
+            "{{`{{`}}namespace}}/{{`{{`}}campaign}} {{`{{`}}phase}} {{`{{`}}result}}"
             {
               x = 12;
               y = 8;
