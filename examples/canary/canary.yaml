@@ -59,6 +59,13 @@ spec:
     timeBudget:
       type: integer
       default: 15
+  dashboard:
+    title: "Canary Run Dashboard"
+    metrics:
+      val_bpb:
+        label: "Validation BPB"
+      peak_vram_mb:
+        label: "Peak VRAM (MB)"
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: ResearchCampaign

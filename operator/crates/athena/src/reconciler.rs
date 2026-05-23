@@ -145,6 +145,7 @@ async fn ensure_experiment_job(
             ns, job_name
         )),
         metrics_link: Some("https://grafana.casazza.io/d/athena-athena-experiment-debugging/athena-experiment-debugging".to_string()),
+        dashboard: template.spec.dashboard.clone(),
         environment: Some(ExperimentEnvironment {
             namespace: Some(ns.to_string()),
             job_name: Some(job_name),
