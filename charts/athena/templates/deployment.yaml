@@ -5,8 +5,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.3
-    helm.sh/chart: athena-0.1.3
+    app.kubernetes.io/version: 0.1.4
+    helm.sh/chart: athena-0.1.4
   name: athena
 spec:
   replicas: 1
