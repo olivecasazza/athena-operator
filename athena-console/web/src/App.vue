@@ -1,7 +1,7 @@
 <template>
   <div class="min-h-screen bg-black text-zinc-500 flex flex-col">
     <header class="px-8 pt-8 pb-6 text-center shrink-0">
-      <h1 class="text-4xl font-bold text-white">Athena Console</h1>
+      <h1 class="text-4xl font-bold text-pink-300">Athena Console</h1>
       <p class="text-zinc-500 mt-2">Kubernetes Research Operator Dashboard</p>
     </header>
 
@@ -19,7 +19,7 @@
           class="px-2 py-2 text-left transition-colors cursor-pointer border-b-2"
           :class="
             activeTab === tab.id
-              ? 'border-white text-white'
+              ? 'border-pink-300 text-white'
               : 'border-transparent text-zinc-500 hover:text-white hover:border-zinc-700'
           "
           type="button"
@@ -30,7 +30,7 @@
           <span class="uppercase tracking-widest mr-2">{{ tab.label }}</span>
           <span
             class="bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 text-[10px]"
-            :class="activeTab === tab.id ? 'text-white' : 'text-zinc-500'"
+            :class="activeTab === tab.id ? 'text-blue-200' : 'text-zinc-500'"
             >{{ tab.count }}</span
           >
         </button>
@@ -51,7 +51,7 @@
           </div>
           <button
             @click="refreshAll"
-            class="bg-white hover:bg-zinc-200 text-black px-4 py-2 text-sm transition-colors uppercase tracking-widest font-mono font-bold"
+            class="bg-pink-200 hover:bg-blue-200 text-black px-4 py-2 text-sm transition-colors uppercase tracking-widest font-mono font-bold"
           >
             Refresh
           </button>
@@ -96,7 +96,7 @@
                 class="border-b border-zinc-700/70"
               >
                 <td class="py-3 pr-4">
-                  <div class="font-medium text-fuchsia-300">
+                  <div class="font-medium text-pink-300">
                     {{ exp.metadata.name }}
                   </div>
                   <div class="text-xs text-zinc-500">
@@ -104,7 +104,7 @@
                   </div>
                 </td>
                 <td class="py-3 pr-4">
-                  <span class="px-2 py-1 text-xs bg-sky-950 text-sky-200">
+                  <span class="px-2 py-1 text-xs bg-blue-950 text-blue-200">
                     {{ exp.status?.phase || "Unknown" }}
                   </span>
                 </td>
@@ -113,7 +113,7 @@
                 </td>
                 <td class="py-3 pr-4">
                   <button
-                    class="border border-zinc-700 px-3 py-1 font-mono text-xs text-zinc-300 hover:border-fuchsia-400 hover:text-white"
+                    class="border border-zinc-700 px-3 py-1 font-mono text-xs text-zinc-300 hover:border-pink-300 hover:text-white"
                     @click="openIde(exp)"
                   >
                     Open IDE
@@ -149,7 +149,7 @@
             class="py-3 border-b border-zinc-800 last:border-b-0"
           >
             <div class="flex justify-between gap-4">
-              <span class="text-fuchsia-300 font-medium">{{
+              <span class="text-pink-300 font-medium">{{
                 suite.metadata.name
               }}</span>
               <span class="text-xs text-zinc-400">{{
@@ -178,7 +178,7 @@
             class="py-3 border-b border-zinc-800 last:border-b-0"
           >
             <div class="flex justify-between gap-4">
-              <span class="text-fuchsia-300 font-medium">{{
+              <span class="text-pink-300 font-medium">{{
                 profile.metadata.name
               }}</span>
               <span class="text-xs text-zinc-400">{{
@@ -292,7 +292,7 @@
                 </p>
               </div>
               <span
-                class="border border-fuchsia-900 px-3 py-2 font-mono text-xs text-fuchsia-200"
+                class="border border-pink-800 px-3 py-2 font-mono text-xs text-pink-200"
                 >{{ template.spec?.source?.git?.url || "no source" }}</span
               >
             </div>
@@ -392,7 +392,7 @@
             </p>
           </div>
           <a
-            class="border border-zinc-700 px-3 py-2 font-mono text-xs text-zinc-300 hover:border-white hover:text-white"
+            class="border border-zinc-700 px-3 py-2 font-mono text-xs text-zinc-300 hover:border-blue-200 hover:text-blue-200"
             href="/grafana/d/athena-athena-experiment-debugging"
             target="_blank"
             rel="noreferrer"
