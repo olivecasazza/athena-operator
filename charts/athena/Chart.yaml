@@ -1,6 +1,6 @@
 apiVersion: v2
-appVersion: 0.1.7
+appVersion: 0.1.8
 description: Athena Kubernetes Research Operator Template
 name: athena
 type: application
-version: 0.1.7
+version: 0.1.8
