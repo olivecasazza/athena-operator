@@ -5,8 +5,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.4
-    helm.sh/chart: athena-0.1.4
+    app.kubernetes.io/version: 0.1.7
+    helm.sh/chart: athena-0.1.7
   name: athena-operator
 ---
 apiVersion: apps/v1
@@ -16,8 +16,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.4
-    helm.sh/chart: athena-0.1.4
+    app.kubernetes.io/version: 0.1.7
+    helm.sh/chart: athena-0.1.7
   name: athena
 spec:
   replicas: 1
@@ -63,8 +63,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.4
-    helm.sh/chart: athena-0.1.4
+    app.kubernetes.io/version: 0.1.7
+    helm.sh/chart: athena-0.1.7
   name: athena-metrics
 spec:
   ports:
@@ -84,8 +84,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.4
-    helm.sh/chart: athena-0.1.4
+    app.kubernetes.io/version: 0.1.7
+    helm.sh/chart: athena-0.1.7
   name: athena-admin
 rules:
   - apiGroups:
@@ -135,8 +135,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.4
-    helm.sh/chart: athena-0.1.4
+    app.kubernetes.io/version: 0.1.7
+    helm.sh/chart: athena-0.1.7
   name: athena-operator-role
 rules:
   - apiGroups:
@@ -237,8 +237,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.4
-    helm.sh/chart: athena-0.1.4
+    app.kubernetes.io/version: 0.1.7
+    helm.sh/chart: athena-0.1.7
   name: athena
 spec:
   endpoints:
@@ -256,8 +256,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.4
-    helm.sh/chart: athena-0.1.4
+    app.kubernetes.io/version: 0.1.7
+    helm.sh/chart: athena-0.1.7
   name: athena-athena-overview
   namespace: monitoring
 spec:
@@ -265,7 +265,7 @@ spec:
   instanceSelector:
     matchLabels:
       dashboards: grafana
-  json: '{"panels":[{"gridPos":{"h":4,"w":6,"x":0,"y":0},"id":1,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Running|running\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Running experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":6,"y":0},"id":2,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Succeeded|succeeded\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Succeeded experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":12,"y":0},"id":3,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Failed|Error|failed|error\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Failed/Error experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":18,"y":0},"id":4,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\",result=\"error\"}[5m]))","legendFormat":""}],"title":"Reconcile error rate","type":"stat"},{"gridPos":{"h":8,"w":12,"x":0,"y":4},"id":5,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{namespace=~\"$namespace\"}) by (namespace,campaign,phase)","legendFormat":"{{`{{`}}namespace}}/{{`{{`}}campaign}} {{`{{`}}phase}}"}],"title":"Experiments by phase","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":4},"id":6,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{`{{`}}namespace}}/{{`{{`}}campaign}} {{`{{`}}phase}} {{`{{`}}result}}"}],"title":"Operator reconcile rate","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":12},"id":7,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\"}[5m])) by (namespace,action,result)","legendFormat":"{{`{{`}}namespace}} {{`{{`}}action}} {{`{{`}}result}}"}],"title":"Agent action rate","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":12},"id":8,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le,namespace,action))","legendFormat":"{{`{{`}}namespace}} {{`{{`}}action}}"}],"title":"p95 agent action latency","type":"timeseries"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Overview","uid":"athena-overview"}'
+  json: '{"panels":[{"gridPos":{"h":4,"w":6,"x":0,"y":0},"id":1,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Running|running\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Running experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":6,"y":0},"id":2,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Succeeded|succeeded\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Succeeded experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":12,"y":0},"id":3,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Failed|Error|failed|error\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Failed/Error experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":18,"y":0},"id":4,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\",result=\"error\"}[5m]))","legendFormat":""}],"title":"Reconcile error rate","type":"stat"},{"gridPos":{"h":8,"w":12,"x":0,"y":4},"id":5,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{namespace=~\"$namespace\"}) by (namespace,campaign,phase)","legendFormat":"{{`{{namespace}}/{{`{{campaign}} {{`{{phase}}"}],"title":"Experiments by phase","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":4},"id":6,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{`{{namespace}}/{{`{{campaign}} {{`{{phase}} {{`{{result}}"}],"title":"Operator reconcile rate","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":12},"id":7,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\"}[5m])) by (namespace,action,result)","legendFormat":"{{`{{namespace}} {{`{{action}} {{`{{result}}"}],"title":"Agent action rate","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":12},"id":8,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le,namespace,action))","legendFormat":"{{`{{namespace}} {{`{{action}}"}],"title":"p95 agent action latency","type":"timeseries"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Overview","uid":"athena-overview"}'
 ---
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDashboard
@@ -274,8 +274,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.4
-    helm.sh/chart: athena-0.1.4
+    app.kubernetes.io/version: 0.1.7
+    helm.sh/chart: athena-0.1.7
   name: athena-athena-operator-telemetry
   namespace: monitoring
 spec:
@@ -283,7 +283,7 @@ spec:
   instanceSelector:
     matchLabels:
       dashboards: grafana
-  json: '{"panels":[{"gridPos":{"h":8,"w":12,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,result)","legendFormat":"{{`{{`}}namespace}} {{`{{`}}result}}"}],"title":"Reconcile rate by result","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":0},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_reconcile_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le,namespace,campaign))","legendFormat":"p95 {{`{{`}}namespace}}/{{`{{`}}campaign}}"}],"title":"Reconcile p50/p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action))","legendFormat":"{{`{{`}}namespace}}/{{`{{`}}experiment}} {{`{{`}}action}}"}],"title":"Agent action duration p95","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\",result!=\"ok\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{`{{`}}namespace}}/{{`{{`}}experiment}} {{`{{`}}action}} {{`{{`}}result}}"}],"title":"Agent action errors","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":5,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\"}","legendFormat":"{{`{{`}}namespace}} {{`{{`}}experiment}} {{`{{`}}action}} {{`{{`}}result}}"}],"title":"Dynamic Athena metric families","type":"table"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Operator Telemetry","uid":"athena-operator-telemetry"}'
+  json: '{"panels":[{"gridPos":{"h":8,"w":12,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,result)","legendFormat":"{{`{{namespace}} {{`{{result}}"}],"title":"Reconcile rate by result","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":0},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_reconcile_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le,namespace,campaign))","legendFormat":"p95 {{`{{namespace}}/{{`{{campaign}}"}],"title":"Reconcile p50/p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action))","legendFormat":"{{`{{namespace}}/{{`{{experiment}} {{`{{action}}"}],"title":"Agent action duration p95","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\",result!=\"ok\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{`{{namespace}}/{{`{{experiment}} {{`{{action}} {{`{{result}}"}],"title":"Agent action errors","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":5,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\"}","legendFormat":"{{`{{namespace}} {{`{{experiment}} {{`{{action}} {{`{{result}}"}],"title":"Dynamic Athena metric families","type":"table"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Operator Telemetry","uid":"athena-operator-telemetry"}'
 ---
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDashboard
@@ -292,8 +292,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.4
-    helm.sh/chart: athena-0.1.4
+    app.kubernetes.io/version: 0.1.7
+    helm.sh/chart: athena-0.1.7
   name: athena-athena-experiment-debugging
   namespace: monitoring
 spec:
@@ -301,7 +301,7 @@ spec:
   instanceSelector:
     matchLabels:
       dashboards: grafana
-  json: '{"panels":[{"gridPos":{"h":8,"w":24,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{`{{`}}namespace}}/{{`{{`}}experiment}} {{`{{`}}action}} {{`{{`}}result}}"}],"title":"Selected experiment actions","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action,result))","legendFormat":"{{`{{`}}namespace}}/{{`{{`}}experiment}} {{`{{`}}action}} {{`{{`}}result}}"}],"title":"Selected experiment action p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{`{{`}}namespace}}/{{`{{`}}campaign}} {{`{{`}}phase}} {{`{{`}}result}}"}],"title":"Selected experiment reconciles","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\",namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{`{{`}}namespace}} {{`{{`}}experiment}} {{`{{`}}action}} {{`{{`}}result}}"}],"title":"Latest Athena dynamic samples","type":"table"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Experiment Debugging","uid":"athena-experiment-debugging"}'
+  json: '{"panels":[{"gridPos":{"h":8,"w":24,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{`{{namespace}}/{{`{{experiment}} {{`{{action}} {{`{{result}}"}],"title":"Selected experiment actions","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action,result))","legendFormat":"{{`{{namespace}}/{{`{{experiment}} {{`{{action}} {{`{{result}}"}],"title":"Selected experiment action p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{`{{namespace}}/{{`{{campaign}} {{`{{phase}} {{`{{result}}"}],"title":"Selected experiment reconciles","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\",namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{`{{namespace}} {{`{{experiment}} {{`{{action}} {{`{{result}}"}],"title":"Latest Athena dynamic samples","type":"table"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Experiment Debugging","uid":"athena-experiment-debugging"}'
 # Athena UI-ready GRPO smoke template.
 #
 # This is intentionally small enough for a console-launched experiment:
