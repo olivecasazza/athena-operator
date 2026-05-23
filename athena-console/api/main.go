@@ -13,6 +13,7 @@ import (
 
 	authv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -213,6 +214,70 @@ func listResearchResource(client dynamic.Interface, resourceName string) http.Ha
 	}
 }
 
+func dispatchResearchResource(client dynamic.Interface, k8sClient *kubernetes.Clientset) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error": "Invalid JSON"}`))
+			return
+		}
+
+		kind, ok := payload["kind"].(string)
+		if !ok || kind != "ResearchCampaign" {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error": "Unsupported kind"}`))
+			return
+		}
+
+		gvr := researchResources["campaigns"]
+
+		unstructuredObj := &unstructured.Unstructured{
+			Object: payload,
+		}
+
+		namespace := unstructuredObj.GetNamespace()
+		if namespace == "" {
+			namespace = "apps"
+		}
+
+		p := principalFromHeaders(r)
+		adminGroup := os.Getenv("ATHENA_ADMIN_GROUP")
+		if adminGroup == "" {
+			adminGroup = "athena:admin"
+		}
+		opGroup := os.Getenv("ATHENA_OPERATOR_GROUP")
+		if opGroup == "" {
+			opGroup = "athena:operator"
+		}
+
+		if !hasGroup(p, adminGroup) && !hasGroup(p, opGroup) {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error": "Forbidden"}`))
+			return
+		}
+
+		created, err := client.Resource(gvr).Namespace(namespace).Create(context.Background(), unstructuredObj, metav1.CreateOptions{})
+		if err != nil {
+			log.Printf("Failed to create ResearchCampaign: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			errorBytes, _ := json.Marshal(map[string]interface{}{
+				"error": err.Error(),
+			})
+			w.Write(errorBytes)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(created.Object)
+	}
+}
+
 func main() {
 	ctx := context.Background()
 	shutdownTelemetry := initTelemetry(ctx)
@@ -284,6 +349,8 @@ func main() {
 		resourceName := name
 		http.Handle("/api/v1/"+resourceName, instrumentHandlerFunc("GET /api/v1/"+resourceName, listResearchResource(client, resourceName)))
 	}
+
+	http.Handle("/api/v1/dispatch", instrumentHandlerFunc("POST /api/v1/dispatch", dispatchResearchResource(client, k8sClient)))
 
 	spa := spaHandler{staticPath: "web/dist", indexPath: "index.html"}
 	http.Handle("/", instrumentHandler("GET /", spa))
