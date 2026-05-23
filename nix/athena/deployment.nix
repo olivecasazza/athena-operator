@@ -517,7 +517,7 @@ let
           metadata.labels = selectorLabels;
           spec = {
             serviceAccountName = deployment.operator.serviceAccountName;
-            imagePullSecrets = [ { name = "ghcr-pull"; } ];
+            imagePullSecrets = helmValues.imagePullSecrets;
             containers = [
               {
                 name = deployment.chart.name;
@@ -670,6 +670,7 @@ let
       };
     };
     resources = deployment.operator.resources;
+    imagePullSecrets = [ { name = "ghcr-pull"; } ];
   };
 
   helmTemplates = pkgs: {
