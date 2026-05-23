@@ -13,7 +13,7 @@ apiVersion: research.nixlab.io/v1alpha1
 kind: RuntimeProfile
 metadata:
   name: gpu-small-grpo-smoke
-  namespace: athena
+  namespace: apps
 spec:
   runtime:
     type: pytorch
@@ -40,14 +40,14 @@ apiVersion: research.nixlab.io/v1alpha1
 kind: ExperimentTemplate
 metadata:
   name: grpo-smoke-improvement
-  namespace: athena
+  namespace: apps
   labels:
     athena.nixlab.io/example: ui-template
 spec:
   runtimeProfileRef: gpu-small-grpo-smoke
   source:
     git:
-      url: "https://github.com/iii-experimental/n-autoresearch"
+      url: "https://github.com/olivecasazza/n-autoresearch"
       ref: "main"
   objective:
     metric: "reward_mean"
