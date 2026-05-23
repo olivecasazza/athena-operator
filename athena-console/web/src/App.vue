@@ -126,7 +126,61 @@
             <div class="flex justify-between border-b border-gray-800 pb-2"><span>Benchmark suites</span><span class="text-white">{{ benchmarkSuites.length }}</span></div>
             <div class="flex justify-between border-b border-gray-800 pb-2"><span>Runtime profiles</span><span class="text-white">{{ runtimeProfiles.length }}</span></div>
             <div class="flex justify-between border-b border-gray-800 pb-2"><span>Benchmark runs</span><span class="text-white">{{ benchmarkRuns.length }}</span></div>
+            <div class="flex justify-between border-b border-gray-800 pb-2"><span>Experiment templates</span><span class="text-white">{{ experimentTemplates.length }}</span></div>
             <div class="flex justify-between"><span>Experiments</span><span class="text-white">{{ experiments.length }}</span></div>
+          </div>
+        </div>
+
+        <div class="bg-gray-900/60 p-4 rounded border border-gray-700 md:col-span-2">
+          <div class="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <h2 class="text-xl font-semibold">Experiment Templates</h2>
+              <p class="mt-1 text-sm text-gray-500">Launch controls are generated from the CRD spec. Nothing runs until an explicit dispatch creates an Experiment.</p>
+            </div>
+            <span class="border border-gray-700 px-3 py-2 font-mono text-xs text-gray-400">{{ experimentTemplates.length }} template(s)</span>
+          </div>
+          <div v-if="experimentTemplates.length === 0" class="border border-dashed border-gray-700 p-4 text-sm text-gray-500">No experiment templates found.</div>
+          <div v-for="template in experimentTemplates" :key="template.metadata?.uid || template.metadata?.name" class="mb-4 border border-gray-800 bg-black/40 p-4 last:mb-0">
+            <div class="mb-4 flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div class="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">{{ template.metadata?.namespace || 'default' }}/{{ template.metadata?.name }}</div>
+                <h3 class="mt-1 text-lg font-semibold text-white">{{ template.spec?.dashboard?.title || template.metadata?.name }}</h3>
+                <p class="mt-1 text-sm text-gray-500">Objective: {{ template.spec?.objective?.metric || 'metric' }} / {{ template.spec?.objective?.goal || 'maximize' }} · Runtime: {{ template.spec?.runtimeProfileRef || 'runtime profile' }}</p>
+              </div>
+              <span class="border border-pink-900 px-3 py-2 font-mono text-xs text-pink-200">{{ template.spec?.source?.git?.url || 'no source' }}</span>
+            </div>
+
+            <div class="grid gap-4 lg:grid-cols-2">
+              <div class="space-y-3">
+                <h4 class="font-mono text-xs uppercase tracking-[0.18em] text-gray-400">Controls</h4>
+                <label v-for="control in templateControls(template)" :key="control.name" class="block border border-gray-800 bg-black p-3">
+                  <span class="mb-1 flex items-center justify-between gap-3 font-mono text-xs text-gray-300">
+                    <span>{{ control.name }}</span>
+                    <span class="text-gray-600">{{ control.type }}</span>
+                  </span>
+                  <input class="w-full rounded-none border border-gray-700 bg-black px-3 py-2 font-mono text-sm text-white outline-none focus:border-white" :type="control.inputType" :value="control.defaultValue" readonly />
+                  <span v-if="control.description" class="mt-2 block text-xs text-gray-500">{{ control.description }}</span>
+                </label>
+              </div>
+
+              <div class="space-y-3">
+                <div>
+                  <h4 class="font-mono text-xs uppercase tracking-[0.18em] text-gray-400">Embedded Metrics</h4>
+                  <p class="mt-1 text-xs text-gray-500">Goals and baselines declared in the template, so the run can prove improvement.</p>
+                </div>
+                <div v-for="metric in templateMetrics(template)" :key="metric.name" class="border border-gray-800 bg-black p-3">
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="font-mono text-sm text-white">{{ metric.label }}</span>
+                    <span class="border border-gray-700 px-2 py-1 font-mono text-[10px] text-gray-400">{{ metric.goal }}</span>
+                  </div>
+                  <div class="mt-2 grid grid-cols-2 gap-2 font-mono text-xs text-gray-500">
+                    <span>baseline: <span class="text-gray-200">{{ metric.baseline }}</span></span>
+                    <span>unit: <span class="text-gray-200">{{ metric.unit }}</span></span>
+                  </div>
+                  <p v-if="metric.description" class="mt-2 text-xs text-gray-500">{{ metric.description }}</p>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -173,6 +227,7 @@ const experiments = ref<any[]>([])
 const benchmarkSuites = ref<any[]>([])
 const benchmarkRuns = ref<any[]>([])
 const runtimeProfiles = ref<any[]>([])
+const experimentTemplates = ref<any[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const ideOpen = ref(false)
@@ -185,7 +240,7 @@ const runningCount = computed(() =>
 )
 const resourceCount = computed(() => benchmarkSuites.value.length + runtimeProfiles.value.length)
 const configurationCount = computed(() =>
-  experiments.value.length + benchmarkRuns.value.length + benchmarkSuites.value.length + runtimeProfiles.value.length,
+  experiments.value.length + benchmarkRuns.value.length + benchmarkSuites.value.length + runtimeProfiles.value.length + experimentTemplates.value.length,
 )
 const visibleExperiments = computed(() =>
   activeTab.value === 'running'
@@ -279,6 +334,34 @@ const fetchJson = async (path: string, fallbackData: any = []) => {
 
 const draftKey = (exp: any) => `athena-ide-draft:${exp.metadata?.namespace || 'default'}:${exp.metadata?.name || 'experiment'}`
 
+const schemaEntries = (template: any) => {
+  const schema = template?.spec?.parameterSchema || {}
+  const properties = schema.properties && typeof schema.properties === 'object' ? schema.properties : schema
+  return Object.entries(properties || {}).filter(([, value]) => value && typeof value === 'object') as [string, any][]
+}
+
+const templateControls = (template: any) =>
+  schemaEntries(template).map(([name, schema]) => {
+    const type = schema.type || typeof template?.spec?.defaults?.[name] || 'string'
+    return {
+      name,
+      type,
+      description: schema.description || '',
+      defaultValue: schema.default ?? template?.spec?.defaults?.[name] ?? '',
+      inputType: type === 'number' || type === 'integer' ? 'number' : type === 'boolean' ? 'checkbox' : 'text',
+    }
+  })
+
+const templateMetrics = (template: any) =>
+  Object.entries(template?.spec?.dashboard?.metrics || {}).map(([name, value]: [string, any]) => ({
+    name,
+    label: value?.label || name,
+    unit: value?.unit || 'value',
+    goal: value?.goal || template?.spec?.objective?.goal || 'maximize',
+    baseline: value?.baseline ?? '—',
+    description: value?.description || '',
+  }))
+
 const refreshDraftCounts = () => {
   const next: Record<string, number> = {}
   for (const exp of experiments.value) {
@@ -307,16 +390,18 @@ const refreshAll = async () => {
   loading.value = true
   error.value = null
   try {
-    const [expData, suiteData, runData, runtimeData] = await Promise.all([
+    const [expData, suiteData, runData, runtimeData, templateData] = await Promise.all([
       fetchJson('/api/v1/experiments'),
       fetchJson('/api/v1/benchmark-suites'),
       fetchJson('/api/v1/benchmark-runs'),
       fetchJson('/api/v1/runtime-profiles'),
+      fetchJson('/api/v1/experiment-templates'),
     ])
     experiments.value = expData
     benchmarkSuites.value = suiteData
     benchmarkRuns.value = runData
     runtimeProfiles.value = runtimeData
+    experimentTemplates.value = templateData
     refreshDraftCounts()
   } catch (e: any) {
     span.recordException(e)
