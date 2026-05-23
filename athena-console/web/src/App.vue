@@ -6,30 +6,31 @@
     </header>
 
     <main
-      class="w-full max-w-6xl mx-auto bg-gray-800 p-6 rounded-lg shadow-lg space-y-8 flex-1"
+      class="w-full max-w-6xl mx-auto bg-gray-800 p-6 rounded-lg shadow-lg space-y-8 flex-1 relative"
     >
       <nav
-        class="grid grid-cols-2 gap-2 font-mono text-xs text-gray-500 md:grid-cols-5"
+        class="sticky top-0 z-40 bg-gray-800 flex flex-wrap items-center gap-4 font-mono text-xs text-gray-500 border-b border-gray-700 pb-2 pt-6 mb-6 -mx-6 px-6 -mt-6 rounded-t-lg"
+        role="tablist"
         aria-label="Athena resource navigation"
       >
         <button
           v-for="tab in navigationTabs"
           :key="tab.id"
-          class="border px-3 py-3 text-left transition-colors hover:border-white hover:text-white"
+          class="px-2 py-2 text-left transition-colors cursor-pointer border-b-2"
           :class="
             activeTab === tab.id
-              ? 'border-white bg-white text-black'
-              : 'border-gray-700 bg-black/40'
+              ? 'border-white text-white'
+              : 'border-transparent hover:text-gray-300 hover:border-gray-600'
           "
           type="button"
+          role="tab"
+          :aria-selected="activeTab === tab.id"
           @click="activeTab = tab.id"
         >
-          <span class="block text-[10px] uppercase tracking-[0.18em]">{{
-            tab.label
-          }}</span>
+          <span class="uppercase tracking-widest mr-2">{{ tab.label }}</span>
           <span
-            class="mt-2 block text-2xl leading-none"
-            :class="activeTab === tab.id ? 'text-black' : 'text-white'"
+            class="bg-gray-900 rounded px-1.5 py-0.5 text-[10px]"
+            :class="activeTab === tab.id ? 'text-white' : 'text-gray-500'"
             >{{ tab.count }}</span
           >
         </button>
