@@ -72,6 +72,8 @@ pub struct ExperimentStatus {
     pub cost: Option<ExperimentCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<ExperimentCondition>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<crate::experiment_template::DashboardSpec>,
 }
 
 // --- Denormalized status sub-types ---
