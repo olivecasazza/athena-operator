@@ -107,6 +107,12 @@ let
         "get"
         "list"
         "watch"
+      ];
+    }
+    {
+      apiGroups = [ deployment.api.group ];
+      resources = [ "benchmarkruns" ];
+      verbs = [
         "create"
         "update"
         "patch"
@@ -158,8 +164,16 @@ let
   adminRules = [
     {
       apiGroups = [ deployment.api.group ];
-      resources = [ "*" ];
-      verbs = [ "*" ];
+      resources = deployment.api.resources;
+      verbs = [
+        "get"
+        "list"
+        "watch"
+        "create"
+        "update"
+        "patch"
+        "delete"
+      ];
     }
     {
       apiGroups = [ "batch" ];
@@ -717,9 +731,12 @@ let
       pname = "athena-k8s-manifests";
       version = deployment.chart.version;
       dontUnpack = true;
+      nativeBuildInputs = [ pkgs.yq-go ];
       installPhase = ''
         mkdir -p $out
         cp ${renderObjects pkgs "athena-manifests.yaml" k8sObjects} $out/athena-manifests.yaml
+        yq eval-all '. as $item ireduce ([]; . + $item)' $out/athena-manifests.yaml ${../../examples/grpo-smoke-template.yaml} > $out/manifests-merged.yaml
+        mv $out/manifests-merged.yaml $out/athena-manifests.yaml
       '';
     };
 in
