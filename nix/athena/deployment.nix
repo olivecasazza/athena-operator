@@ -634,7 +634,7 @@ let
         selector.matchLabels = selectorLabels;
         endpoints = [
           {
-            port = "metrics";
+            port = deployment.operator.metricsPort;
             interval = deployment.observability.metrics.serviceMonitor.interval;
           }
         ];
