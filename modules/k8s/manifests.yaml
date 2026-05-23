@@ -1,285 +1,396 @@
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  labels:
-    app.kubernetes.io/instance: athena
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.3
-    helm.sh/chart: athena-0.1.3
-  name: athena-operator
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  labels:
-    app.kubernetes.io/instance: athena
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.3
-    helm.sh/chart: athena-0.1.3
-  name: athena
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    labels:
       app.kubernetes.io/instance: athena
+      app.kubernetes.io/managed-by: Helm
       app.kubernetes.io/name: athena
-  template:
-    metadata:
-      labels:
+      app.kubernetes.io/version: 0.1.3
+      helm.sh/chart: athena-0.1.3
+    name: athena-operator
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    labels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/managed-by: Helm
+      app.kubernetes.io/name: athena
+      app.kubernetes.io/version: 0.1.3
+      helm.sh/chart: athena-0.1.3
+    name: athena
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
         app.kubernetes.io/instance: athena
         app.kubernetes.io/name: athena
-    spec:
-      containers:
-        - env:
-            - name: METRICS_PORT
-              value: '8080'
-            - name: ATHENA_ADMIN_GROUP
-              value: athena:admin
-            - name: ATHENA_OPERATOR_GROUP
-              value: athena:operator
-          image: ghcr.io/olivecasazza/athena:0.1.3
-          imagePullPolicy: IfNotPresent
-          name: athena
-          ports:
-            - containerPort: 8080
-              name: metrics
-              protocol: TCP
-          resources:
-            limits:
-              memory: 256Mi
-            requests:
-              cpu: 100m
-              memory: 128Mi
-      serviceAccountName: athena-operator
----
-apiVersion: v1
-kind: Service
-metadata:
-  labels:
-    app.kubernetes.io/instance: athena
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.3
-    helm.sh/chart: athena-0.1.3
-  name: athena-metrics
-spec:
-  ports:
-    - name: metrics
-      port: 8080
-      protocol: TCP
-      targetPort: metrics
-  selector:
-    app.kubernetes.io/instance: athena
-    app.kubernetes.io/name: athena
-  type: ClusterIP
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app.kubernetes.io/instance: athena
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.3
-    helm.sh/chart: athena-0.1.3
-  name: athena-admin
-rules:
-  - apiGroups:
-      - research.nixlab.io
-    resources:
-      - '*'
-    verbs:
-      - '*'
-  - apiGroups:
-      - batch
-    resources:
-      - jobs
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - delete
-  - apiGroups:
-      - ''
-    resources:
-      - pods
-      - pods/log
-      - persistentvolumeclaims
-      - events
-    verbs:
-      - get
-      - list
-      - watch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app.kubernetes.io/instance: athena
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.3
-    helm.sh/chart: athena-0.1.3
-  name: athena-operator-role
-rules:
-  - apiGroups:
-      - research.nixlab.io
-    resources:
-      - runtimeprofiles
-      - experimenttemplates
-      - researchcampaigns
-      - experiments
-      - benchmarksuites
-      - benchmarkruns
-      - metricsources
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - patch
-      - delete
-  - apiGroups:
-      - research.nixlab.io
-    resources:
-      - runtimeprofiles/status
-      - experimenttemplates/status
-      - researchcampaigns/status
-      - experiments/status
-      - benchmarksuites/status
-      - benchmarkruns/status
-      - metricsources/status
-    verbs:
-      - get
-      - patch
-      - update
-  - apiGroups:
-      - batch
-    resources:
-      - jobs
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - patch
-      - delete
-  - apiGroups:
-      - ''
-    resources:
-      - pods
-      - pods/log
-      - persistentvolumeclaims
-      - events
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - patch
-      - delete
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: athena-operator
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: athena-operator-role
-subjects:
-  - kind: ServiceAccount
-    name: athena-operator
-    namespace: athena
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: athena-admin-group-binding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: athena-admin
-subjects:
-  - apiGroup: rbac.authorization.k8s.io
-    kind: Group
-    name: athena:admin
----
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  labels:
-    app.kubernetes.io/instance: athena
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.3
-    helm.sh/chart: athena-0.1.3
-  name: athena
-spec:
-  endpoints:
-    - interval: 15s
-      port: metrics
-  selector:
-    matchLabels:
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/instance: athena
+          app.kubernetes.io/name: athena
+      spec:
+        containers:
+          - env:
+              - name: METRICS_PORT
+                value: '8080'
+              - name: ATHENA_ADMIN_GROUP
+                value: athena:admin
+              - name: ATHENA_OPERATOR_GROUP
+                value: athena:operator
+            image: ghcr.io/olivecasazza/athena-operator:latest@sha256:e1f33c4d182c984f8790aba645138f11cc9dc4d92b4fc6c19c2a5aadd88f3211
+            imagePullPolicy: IfNotPresent
+            name: athena
+            ports:
+              - containerPort: 8080
+                name: metrics
+                protocol: TCP
+            resources:
+              limits:
+                memory: 256Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+        imagePullSecrets:
+          - name: ghcr-pull
+        serviceAccountName: athena-operator
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/managed-by: Helm
+      app.kubernetes.io/name: athena
+      app.kubernetes.io/version: 0.1.3
+      helm.sh/chart: athena-0.1.3
+    name: athena-metrics
+  spec:
+    ports:
+      - name: metrics
+        port: 8080
+        protocol: TCP
+        targetPort: metrics
+    selector:
       app.kubernetes.io/instance: athena
       app.kubernetes.io/name: athena
----
-apiVersion: grafana.integreatly.org/v1beta1
-kind: GrafanaDashboard
-metadata:
-  labels:
-    app.kubernetes.io/instance: athena
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.3
-    helm.sh/chart: athena-0.1.3
-  name: athena-athena-overview
-  namespace: monitoring
-spec:
-  folder: Athena
-  instanceSelector:
-    matchLabels:
-      dashboards: grafana
-  json: '{"panels":[{"gridPos":{"h":4,"w":6,"x":0,"y":0},"id":1,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Running|running\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Running experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":6,"y":0},"id":2,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Succeeded|succeeded\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Succeeded experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":12,"y":0},"id":3,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Failed|Error|failed|error\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Failed/Error experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":18,"y":0},"id":4,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\",result=\"error\"}[5m]))","legendFormat":""}],"title":"Reconcile error rate","type":"stat"},{"gridPos":{"h":8,"w":12,"x":0,"y":4},"id":5,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{namespace=~\"$namespace\"}) by (namespace,campaign,phase)","legendFormat":"{{namespace}}/{{campaign}} {{phase}}"}],"title":"Experiments by phase","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":4},"id":6,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{namespace}}/{{campaign}} {{phase}} {{result}}"}],"title":"Operator reconcile rate","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":12},"id":7,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\"}[5m])) by (namespace,action,result)","legendFormat":"{{namespace}} {{action}} {{result}}"}],"title":"Agent action rate","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":12},"id":8,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le,namespace,action))","legendFormat":"{{namespace}} {{action}}"}],"title":"p95 agent action latency","type":"timeseries"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Overview","uid":"athena-overview"}'
----
-apiVersion: grafana.integreatly.org/v1beta1
-kind: GrafanaDashboard
-metadata:
-  labels:
-    app.kubernetes.io/instance: athena
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.3
-    helm.sh/chart: athena-0.1.3
-  name: athena-athena-operator-telemetry
-  namespace: monitoring
-spec:
-  folder: Athena
-  instanceSelector:
-    matchLabels:
-      dashboards: grafana
-  json: '{"panels":[{"gridPos":{"h":8,"w":12,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,result)","legendFormat":"{{namespace}} {{result}}"}],"title":"Reconcile rate by result","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":0},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_reconcile_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le,namespace,campaign))","legendFormat":"p95 {{namespace}}/{{campaign}}"}],"title":"Reconcile p50/p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action))","legendFormat":"{{namespace}}/{{experiment}} {{action}}"}],"title":"Agent action duration p95","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\",result!=\"ok\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{namespace}}/{{experiment}} {{action}} {{result}}"}],"title":"Agent action errors","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":5,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\"}","legendFormat":"{{namespace}} {{experiment}} {{action}} {{result}}"}],"title":"Dynamic Athena metric families","type":"table"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Operator Telemetry","uid":"athena-operator-telemetry"}'
----
-apiVersion: grafana.integreatly.org/v1beta1
-kind: GrafanaDashboard
-metadata:
-  labels:
-    app.kubernetes.io/instance: athena
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.3
-    helm.sh/chart: athena-0.1.3
-  name: athena-athena-experiment-debugging
-  namespace: monitoring
-spec:
-  folder: Athena
-  instanceSelector:
-    matchLabels:
-      dashboards: grafana
-  json: '{"panels":[{"gridPos":{"h":8,"w":24,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{namespace}}/{{experiment}} {{action}} {{result}}"}],"title":"Selected experiment actions","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action,result))","legendFormat":"{{namespace}}/{{experiment}} {{action}} {{result}}"}],"title":"Selected experiment action p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{namespace}}/{{campaign}} {{phase}} {{result}}"}],"title":"Selected experiment reconciles","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\",namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{namespace}} {{experiment}} {{action}} {{result}}"}],"title":"Latest Athena dynamic samples","type":"table"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Experiment Debugging","uid":"athena-experiment-debugging"}'
+    type: ClusterIP
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRole
+  metadata:
+    labels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/managed-by: Helm
+      app.kubernetes.io/name: athena
+      app.kubernetes.io/version: 0.1.3
+      helm.sh/chart: athena-0.1.3
+    name: athena-admin
+  rules:
+    - apiGroups:
+        - research.nixlab.io
+      resources:
+        - runtimeprofiles
+        - experimenttemplates
+        - researchcampaigns
+        - experiments
+        - benchmarksuites
+        - benchmarkruns
+        - metricsources
+      verbs:
+        - get
+        - list
+        - watch
+        - create
+        - update
+        - patch
+        - delete
+    - apiGroups:
+        - batch
+      resources:
+        - jobs
+      verbs:
+        - get
+        - list
+        - watch
+        - create
+        - delete
+    - apiGroups:
+        - ''
+      resources:
+        - pods
+        - pods/log
+        - persistentvolumeclaims
+        - events
+      verbs:
+        - get
+        - list
+        - watch
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRole
+  metadata:
+    labels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/managed-by: Helm
+      app.kubernetes.io/name: athena
+      app.kubernetes.io/version: 0.1.3
+      helm.sh/chart: athena-0.1.3
+    name: athena-operator-role
+  rules:
+    - apiGroups:
+        - research.nixlab.io
+      resources:
+        - runtimeprofiles
+        - experimenttemplates
+        - researchcampaigns
+        - experiments
+        - benchmarksuites
+        - benchmarkruns
+        - metricsources
+      verbs:
+        - get
+        - list
+        - watch
+    - apiGroups:
+        - research.nixlab.io
+      resources:
+        - benchmarkruns
+      verbs:
+        - create
+        - update
+        - patch
+        - delete
+    - apiGroups:
+        - research.nixlab.io
+      resources:
+        - runtimeprofiles/status
+        - experimenttemplates/status
+        - researchcampaigns/status
+        - experiments/status
+        - benchmarksuites/status
+        - benchmarkruns/status
+        - metricsources/status
+      verbs:
+        - get
+        - patch
+        - update
+    - apiGroups:
+        - batch
+      resources:
+        - jobs
+      verbs:
+        - get
+        - list
+        - watch
+        - create
+        - update
+        - patch
+        - delete
+    - apiGroups:
+        - ''
+      resources:
+        - pods
+        - pods/log
+        - persistentvolumeclaims
+        - events
+      verbs:
+        - get
+        - list
+        - watch
+        - create
+        - update
+        - patch
+        - delete
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRoleBinding
+  metadata:
+    name: athena-operator
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: athena-operator-role
+  subjects:
+    - kind: ServiceAccount
+      name: athena-operator
+      namespace: athena
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRoleBinding
+  metadata:
+    name: athena-admin-group-binding
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: athena-admin
+  subjects:
+    - apiGroup: rbac.authorization.k8s.io
+      kind: Group
+      name: athena:admin
+- apiVersion: monitoring.coreos.com/v1
+  kind: ServiceMonitor
+  metadata:
+    labels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/managed-by: Helm
+      app.kubernetes.io/name: athena
+      app.kubernetes.io/version: 0.1.3
+      helm.sh/chart: athena-0.1.3
+    name: athena
+  spec:
+    endpoints:
+      - interval: 15s
+        port: metrics
+    selector:
+      matchLabels:
+        app.kubernetes.io/instance: athena
+        app.kubernetes.io/name: athena
+- apiVersion: grafana.integreatly.org/v1beta1
+  kind: GrafanaDashboard
+  metadata:
+    labels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/managed-by: Helm
+      app.kubernetes.io/name: athena
+      app.kubernetes.io/version: 0.1.3
+      helm.sh/chart: athena-0.1.3
+    name: athena-athena-overview
+    namespace: monitoring
+  spec:
+    folder: Athena
+    instanceSelector:
+      matchLabels:
+        dashboards: grafana
+    json: '{"panels":[{"gridPos":{"h":4,"w":6,"x":0,"y":0},"id":1,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Running|running\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Running experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":6,"y":0},"id":2,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Succeeded|succeeded\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Succeeded experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":12,"y":0},"id":3,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{phase=~\"Failed|Error|failed|error\",namespace=~\"$namespace\"})","legendFormat":""}],"title":"Failed/Error experiments","type":"stat"},{"gridPos":{"h":4,"w":6,"x":18,"y":0},"id":4,"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\",result=\"error\"}[5m]))","legendFormat":""}],"title":"Reconcile error rate","type":"stat"},{"gridPos":{"h":8,"w":12,"x":0,"y":4},"id":5,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(athena_experiments_total{namespace=~\"$namespace\"}) by (namespace,campaign,phase)","legendFormat":"{{namespace}}/{{campaign}} {{phase}}"}],"title":"Experiments by phase","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":4},"id":6,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{namespace}}/{{campaign}} {{phase}} {{result}}"}],"title":"Operator reconcile rate","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":12},"id":7,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\"}[5m])) by (namespace,action,result)","legendFormat":"{{namespace}} {{action}} {{result}}"}],"title":"Agent action rate","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":12},"id":8,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le,namespace,action))","legendFormat":"{{namespace}} {{action}}"}],"title":"p95 agent action latency","type":"timeseries"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Overview","uid":"athena-overview"}'
+- apiVersion: grafana.integreatly.org/v1beta1
+  kind: GrafanaDashboard
+  metadata:
+    labels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/managed-by: Helm
+      app.kubernetes.io/name: athena
+      app.kubernetes.io/version: 0.1.3
+      helm.sh/chart: athena-0.1.3
+    name: athena-athena-operator-telemetry
+    namespace: monitoring
+  spec:
+    folder: Athena
+    instanceSelector:
+      matchLabels:
+        dashboards: grafana
+    json: '{"panels":[{"gridPos":{"h":8,"w":12,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,result)","legendFormat":"{{namespace}} {{result}}"}],"title":"Reconcile rate by result","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":0},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_reconcile_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])) by (le,namespace,campaign))","legendFormat":"p95 {{namespace}}/{{campaign}}"}],"title":"Reconcile p50/p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action))","legendFormat":"{{namespace}}/{{experiment}} {{action}}"}],"title":"Agent action duration p95","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\",result!=\"ok\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{namespace}}/{{experiment}} {{action}} {{result}}"}],"title":"Agent action errors","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":5,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\"}","legendFormat":"{{namespace}} {{experiment}} {{action}} {{result}}"}],"title":"Dynamic Athena metric families","type":"table"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Operator Telemetry","uid":"athena-operator-telemetry"}'
+- apiVersion: grafana.integreatly.org/v1beta1
+  kind: GrafanaDashboard
+  metadata:
+    labels:
+      app.kubernetes.io/instance: athena
+      app.kubernetes.io/managed-by: Helm
+      app.kubernetes.io/name: athena
+      app.kubernetes.io/version: 0.1.3
+      helm.sh/chart: athena-0.1.3
+    name: athena-athena-experiment-debugging
+    namespace: monitoring
+  spec:
+    folder: Athena
+    instanceSelector:
+      matchLabels:
+        dashboards: grafana
+    json: '{"panels":[{"gridPos":{"h":8,"w":24,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{namespace}}/{{experiment}} {{action}} {{result}}"}],"title":"Selected experiment actions","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action,result))","legendFormat":"{{namespace}}/{{experiment}} {{action}} {{result}}"}],"title":"Selected experiment action p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{namespace}}/{{campaign}} {{phase}} {{result}}"}],"title":"Selected experiment reconciles","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\",namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{namespace}} {{experiment}} {{action}} {{result}}"}],"title":"Latest Athena dynamic samples","type":"table"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Experiment Debugging","uid":"athena-experiment-debugging"}'
+- # Athena UI-ready GRPO smoke template.
+  #
+  # This is intentionally small enough for a console-launched experiment:
+  # - bounded synthetic prompt set
+  # - tiny rollout/step budget
+  # - metrics.json parser contract
+  # - embedded dashboard metadata for Athena Console controls
+  #
+  # Apply the RuntimeProfile and ExperimentTemplate, then dispatch Experiments
+  # from Athena Console by editing the parameters below.
+  apiVersion: research.nixlab.io/v1alpha1
+  kind: RuntimeProfile
+  metadata:
+    name: gpu-small-grpo-smoke
+    namespace: apps
+  spec:
+    runtime:
+      type: pytorch
+      mode: batchJob
+    image: "python:3.11-slim"
+    command:
+      - sh
+      - -c
+      - >-
+        echo '[grpo-smoke] install tiny runtime'; pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu; python experiments/grpo/smoke_train.py
+    resources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+      limits:
+        memory: "4Gi"
+    storage:
+      workspaceClaimName: "athena-workspace"
+      workspaceMountPath: "/workspace"
+- apiVersion: research.nixlab.io/v1alpha1
+  kind: ExperimentTemplate
+  metadata:
+    name: grpo-smoke-improvement
+    namespace: apps
+    labels:
+      athena.nixlab.io/example: ui-template
+  spec:
+    runtimeProfileRef: gpu-small-grpo-smoke
+    source:
+      git:
+        url: "https://github.com/olivecasazza/n-autoresearch"
+        ref: "main"
+    objective:
+      metric: "reward_mean"
+      goal: "maximize"
+    metrics:
+      parser:
+        type: "file"
+        path: "metrics.json"
+    defaults:
+      prompt_set: "synthetic-arithmetic-v0"
+      learning_rate: 0.00001
+      rollout_count: 4
+      training_steps: 12
+      reward_baseline: 0.2
+    parameterSchema:
+      prompt_set:
+        type: string
+        description: "Small deterministic prompt corpus for smoke testing."
+        default: "synthetic-arithmetic-v0"
+      learning_rate:
+        type: number
+        description: "Optimizer step size for the GRPO trial."
+        default: 0.00001
+      rollout_count:
+        type: integer
+        description: "Completions sampled per prompt."
+        default: 4
+      training_steps:
+        type: integer
+        description: "Tiny bounded step budget for UI-launched experiments."
+        default: 12
+      reward_baseline:
+        type: number
+        description: "Baseline reward threshold used to show lift."
+        default: 0.2
+    dashboard:
+      title: "GRPO Smoke Lift"
+      metrics:
+        reward_mean:
+          label: "Reward mean"
+          unit: score
+          goal: maximize
+          baseline: 0.2
+          description: "Primary metric expected to improve over the baseline."
+        baseline_lift:
+          label: "Lift over baseline"
+          unit: delta
+          goal: maximize
+          baseline: 0
+          description: "reward_mean minus reward_baseline; positive means the experiment improved."
+        pass_rate:
+          label: "Pass rate"
+          unit: "%"
+          goal: maximize
+          baseline: 50
+          description: "Share of validation prompts solved after the tiny training run."

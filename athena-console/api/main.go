@@ -148,6 +148,11 @@ var researchResources = map[string]schema.GroupVersionResource{
 		Version:  "v1alpha1",
 		Resource: "runtimeprofiles",
 	},
+	"experiment-templates": {
+		Group:    "research.nixlab.io",
+		Version:  "v1alpha1",
+		Resource: "experimenttemplates",
+	},
 	"campaigns": {
 		Group:    "research.nixlab.io",
 		Version:  "v1alpha1",
