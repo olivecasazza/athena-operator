@@ -41,6 +41,8 @@ spec:
             requests:
               cpu: 100m
               memory: 128Mi
+      {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
-        - name: ghcr-pull
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccountName: athena-operator
