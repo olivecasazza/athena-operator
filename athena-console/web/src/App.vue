@@ -1,15 +1,15 @@
 <template>
-  <div class="min-h-screen bg-gray-950 text-gray-100 flex flex-col">
+  <div class="min-h-screen bg-black text-zinc-500 flex flex-col">
     <header class="px-8 pt-8 pb-6 text-center shrink-0">
-      <h1 class="text-4xl font-bold text-pink-400">Athena Console</h1>
-      <p class="text-gray-400 mt-2">Kubernetes Research Operator Dashboard</p>
+      <h1 class="text-4xl font-bold text-white">Athena Console</h1>
+      <p class="text-zinc-500 mt-2">Kubernetes Research Operator Dashboard</p>
     </header>
 
     <main
-      class="w-full max-w-6xl mx-auto bg-gray-800 p-6 rounded-lg shadow-lg space-y-8 flex-1 relative"
+      class="w-full max-w-6xl mx-auto bg-black p-6 space-y-8 flex-1 relative"
     >
       <nav
-        class="sticky top-0 z-40 bg-gray-800 flex flex-wrap items-center gap-4 font-mono text-xs text-gray-500 border-b border-gray-700 pb-2 pt-6 mb-6 -mx-6 px-6 -mt-6 rounded-t-lg"
+        class="sticky top-0 z-40 bg-black flex flex-wrap items-center gap-4 font-mono text-xs text-zinc-500 border-b border-zinc-800 pb-2 pt-6 mb-6 -mx-6 px-6 -mt-6"
         role="tablist"
         aria-label="Athena resource navigation"
       >
@@ -20,7 +20,7 @@
           :class="
             activeTab === tab.id
               ? 'border-white text-white'
-              : 'border-transparent hover:text-gray-300 hover:border-gray-600'
+              : 'border-transparent text-zinc-500 hover:text-white hover:border-zinc-700'
           "
           type="button"
           role="tab"
@@ -29,8 +29,8 @@
         >
           <span class="uppercase tracking-widest mr-2">{{ tab.label }}</span>
           <span
-            class="bg-gray-900 rounded px-1.5 py-0.5 text-[10px]"
-            :class="activeTab === tab.id ? 'text-white' : 'text-gray-500'"
+            class="bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 text-[10px]"
+            :class="activeTab === tab.id ? 'text-white' : 'text-zinc-500'"
             >{{ tab.count }}</span
           >
         </button>
@@ -39,19 +39,19 @@
       <section v-if="activeTab === 'experiments' || activeTab === 'running'">
         <div class="mb-6 flex justify-between items-center gap-4">
           <div>
-            <h2 class="text-2xl font-semibold">
+            <h2 class="text-2xl font-semibold text-white">
               {{
                 activeTab === "running" ? "Running Experiments" : "Experiments"
               }}
             </h2>
-            <p class="text-gray-400 text-sm">
+            <p class="text-zinc-500 text-sm">
               Kubernetes-native experiment resources, phases, workspace refs,
               and local IDE drafts.
             </p>
           </div>
           <button
             @click="refreshAll"
-            class="bg-pink-600 hover:bg-pink-500 px-4 py-2 rounded text-sm transition-colors"
+            class="bg-white hover:bg-zinc-200 text-black px-4 py-2 text-sm transition-colors uppercase tracking-widest font-mono font-bold"
           >
             Refresh
           </button>
@@ -59,21 +59,21 @@
 
         <div
           v-if="loading"
-          class="border border-gray-800 bg-black/40 px-4 py-5 font-mono text-xs text-gray-500"
+          class="border border-zinc-800 bg-zinc-950/40 px-4 py-5 font-mono text-xs text-zinc-500"
         >
           Loading Athena resources…
         </div>
 
         <div
           v-else-if="error"
-          class="border border-red-800 bg-red-950/40 px-4 py-5 font-mono text-xs text-red-200 mb-4 whitespace-pre-wrap break-words"
+          class="border border-red-900 bg-red-950/20 px-4 py-5 font-mono text-xs text-red-500 mb-4 whitespace-pre-wrap break-words"
         >
           {{ error }}
         </div>
 
         <div
           v-else-if="visibleExperiments.length === 0"
-          class="text-gray-500 text-center py-8 px-4 border-2 border-dashed border-gray-700 rounded"
+          class="text-zinc-500 text-center py-8 px-4 border border-dashed border-zinc-800"
         >
           No {{ activeTab === "running" ? "running " : "" }}experiments found in
           the cluster.
@@ -81,7 +81,7 @@
 
         <div v-else class="overflow-x-auto">
           <table class="w-full text-left text-sm">
-            <thead class="text-gray-300 border-b border-gray-700">
+            <thead class="text-zinc-300 border-b border-zinc-700">
               <tr>
                 <th class="py-2 pr-4">Experiment</th>
                 <th class="py-2 pr-4">Phase</th>
@@ -93,29 +93,27 @@
               <tr
                 v-for="exp in visibleExperiments"
                 :key="exp.metadata.uid"
-                class="border-b border-gray-700/70"
+                class="border-b border-zinc-700/70"
               >
                 <td class="py-3 pr-4">
-                  <div class="font-medium text-pink-300">
+                  <div class="font-medium text-fuchsia-300">
                     {{ exp.metadata.name }}
                   </div>
-                  <div class="text-xs text-gray-500">
+                  <div class="text-xs text-zinc-500">
                     {{ exp.metadata.namespace }}
                   </div>
                 </td>
                 <td class="py-3 pr-4">
-                  <span
-                    class="px-2 py-1 text-xs rounded bg-blue-900 text-blue-200"
-                  >
+                  <span class="px-2 py-1 text-xs bg-sky-950 text-sky-200">
                     {{ exp.status?.phase || "Unknown" }}
                   </span>
                 </td>
-                <td class="py-3 pr-4 font-mono text-xs text-gray-400">
+                <td class="py-3 pr-4 font-mono text-xs text-zinc-400">
                   {{ exp.status?.workspacePath || "—" }}
                 </td>
                 <td class="py-3 pr-4">
                   <button
-                    class="border border-gray-700 px-3 py-1 font-mono text-xs text-gray-300 hover:border-pink-400 hover:text-white"
+                    class="border border-zinc-700 px-3 py-1 font-mono text-xs text-zinc-300 hover:border-fuchsia-400 hover:text-white"
                     @click="openIde(exp)"
                   >
                     Open IDE
@@ -137,28 +135,28 @@
         v-if="activeTab === 'resources'"
         class="grid gap-4 md:grid-cols-2"
       >
-        <div class="bg-gray-900/60 p-4 rounded border border-gray-700">
+        <div class="bg-zinc-950 p-4 border border-zinc-700">
           <h2 class="text-xl font-semibold mb-3">Benchmark Suites</h2>
           <div
             v-if="benchmarkSuites.length === 0"
-            class="text-sm text-gray-500"
+            class="text-sm text-zinc-500"
           >
             No benchmark suites found.
           </div>
           <div
             v-for="suite in benchmarkSuites"
             :key="suite.metadata.uid"
-            class="py-3 border-b border-gray-800 last:border-b-0"
+            class="py-3 border-b border-zinc-800 last:border-b-0"
           >
             <div class="flex justify-between gap-4">
-              <span class="text-pink-300 font-medium">{{
+              <span class="text-fuchsia-300 font-medium">{{
                 suite.metadata.name
               }}</span>
-              <span class="text-xs text-gray-400">{{
+              <span class="text-xs text-zinc-400">{{
                 suite.spec?.taxonomy || "unknown"
               }}</span>
             </div>
-            <div class="text-xs text-gray-500 mt-1">
+            <div class="text-xs text-zinc-500 mt-1">
               version {{ suite.spec?.suiteVersion || "—" }} · tasks
               {{ suite.status?.taskCount ?? suite.spec?.tasks?.length ?? 0 }} ·
               ready {{ suite.status?.ready ?? false }}
@@ -166,28 +164,28 @@
           </div>
         </div>
 
-        <div class="bg-gray-900/60 p-4 rounded border border-gray-700">
+        <div class="bg-zinc-950 p-4 border border-zinc-700">
           <h2 class="text-xl font-semibold mb-3">Runtime Profiles</h2>
           <div
             v-if="runtimeProfiles.length === 0"
-            class="text-sm text-gray-500"
+            class="text-sm text-zinc-500"
           >
             No runtime profiles found.
           </div>
           <div
             v-for="profile in runtimeProfiles"
             :key="profile.metadata.uid"
-            class="py-3 border-b border-gray-800 last:border-b-0"
+            class="py-3 border-b border-zinc-800 last:border-b-0"
           >
             <div class="flex justify-between gap-4">
-              <span class="text-pink-300 font-medium">{{
+              <span class="text-fuchsia-300 font-medium">{{
                 profile.metadata.name
               }}</span>
-              <span class="text-xs text-gray-400">{{
+              <span class="text-xs text-zinc-400">{{
                 profile.spec?.image || "runtime"
               }}</span>
             </div>
-            <div class="text-xs text-gray-500 mt-1">
+            <div class="text-xs text-zinc-500 mt-1">
               {{ profile.metadata.namespace }}
             </div>
           </div>
@@ -196,22 +194,22 @@
 
       <section
         v-if="activeTab === 'attention'"
-        class="bg-gray-900/60 p-4 rounded border border-yellow-900/70"
+        class="bg-zinc-950 p-4 border border-yellow-900/70"
       >
         <h2 class="text-xl font-semibold mb-3">Attention</h2>
-        <div v-if="attentionItems.length === 0" class="text-sm text-gray-500">
+        <div v-if="attentionItems.length === 0" class="text-sm text-zinc-500">
           No resources currently need attention.
         </div>
         <div
           v-for="item in attentionItems"
           :key="item.key"
-          class="py-3 border-b border-gray-800 last:border-b-0"
+          class="py-3 border-b border-zinc-800 last:border-b-0"
         >
           <div class="flex justify-between gap-4">
             <span class="text-yellow-300 font-medium">{{ item.name }}</span>
-            <span class="text-xs text-gray-400">{{ item.phase }}</span>
+            <span class="text-xs text-zinc-400">{{ item.phase }}</span>
           </div>
-          <div class="text-xs text-gray-500 mt-1">
+          <div class="text-xs text-zinc-500 mt-1">
             {{ item.kind }} · {{ item.namespace }}
           </div>
         </div>
@@ -221,22 +219,22 @@
         v-if="activeTab === 'configurations'"
         class="grid gap-4 md:grid-cols-2"
       >
-        <div class="bg-gray-900/60 p-4 rounded border border-gray-700">
+        <div class="bg-zinc-950 p-4 border border-zinc-700">
           <h2 class="text-xl font-semibold mb-3">Configurations</h2>
-          <div class="space-y-2 font-mono text-xs text-gray-400">
-            <div class="flex justify-between border-b border-gray-800 pb-2">
+          <div class="space-y-2 font-mono text-xs text-zinc-400">
+            <div class="flex justify-between border-b border-zinc-800 pb-2">
               <span>Benchmark suites</span
               ><span class="text-white">{{ benchmarkSuites.length }}</span>
             </div>
-            <div class="flex justify-between border-b border-gray-800 pb-2">
+            <div class="flex justify-between border-b border-zinc-800 pb-2">
               <span>Runtime profiles</span
               ><span class="text-white">{{ runtimeProfiles.length }}</span>
             </div>
-            <div class="flex justify-between border-b border-gray-800 pb-2">
+            <div class="flex justify-between border-b border-zinc-800 pb-2">
               <span>Benchmark runs</span
               ><span class="text-white">{{ benchmarkRuns.length }}</span>
             </div>
-            <div class="flex justify-between border-b border-gray-800 pb-2">
+            <div class="flex justify-between border-b border-zinc-800 pb-2">
               <span>Experiment templates</span
               ><span class="text-white">{{ experimentTemplates.length }}</span>
             </div>
@@ -247,37 +245,35 @@
           </div>
         </div>
 
-        <div
-          class="bg-gray-900/60 p-4 rounded border border-gray-700 md:col-span-2"
-        >
+        <div class="bg-zinc-950 p-4 border border-zinc-700 md:col-span-2">
           <div class="mb-4 flex items-start justify-between gap-4">
             <div>
               <h2 class="text-xl font-semibold">Experiment Templates</h2>
-              <p class="mt-1 text-sm text-gray-500">
+              <p class="mt-1 text-sm text-zinc-500">
                 Launch controls are generated from the CRD spec. Nothing runs
                 until an explicit dispatch creates an Experiment.
               </p>
             </div>
             <span
-              class="border border-gray-700 px-3 py-2 font-mono text-xs text-gray-400"
+              class="border border-zinc-700 px-3 py-2 font-mono text-xs text-zinc-400"
               >{{ experimentTemplates.length }} template(s)</span
             >
           </div>
           <div
             v-if="experimentTemplates.length === 0"
-            class="border border-dashed border-gray-700 p-4 text-sm text-gray-500"
+            class="border border-dashed border-zinc-700 p-4 text-sm text-zinc-500"
           >
             No experiment templates found.
           </div>
           <div
             v-for="template in experimentTemplates"
             :key="template.metadata?.uid || template.metadata?.name"
-            class="mb-4 border border-gray-800 bg-black/40 p-4 last:mb-0"
+            class="mb-4 border border-zinc-800 bg-zinc-950 p-4 last:mb-0"
           >
             <div class="mb-4 flex flex-wrap items-start justify-between gap-4">
               <div>
                 <div
-                  class="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500"
+                  class="font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-500"
                 >
                   {{ template.metadata?.namespace || "default" }}/{{
                     template.metadata?.name
@@ -288,7 +284,7 @@
                     template.spec?.dashboard?.title || template.metadata?.name
                   }}
                 </h3>
-                <p class="mt-1 text-sm text-gray-500">
+                <p class="mt-1 text-sm text-zinc-500">
                   Objective:
                   {{ template.spec?.objective?.metric || "metric" }} /
                   {{ template.spec?.objective?.goal || "maximize" }} · Runtime:
@@ -296,7 +292,7 @@
                 </p>
               </div>
               <span
-                class="border border-pink-900 px-3 py-2 font-mono text-xs text-pink-200"
+                class="border border-fuchsia-900 px-3 py-2 font-mono text-xs text-fuchsia-200"
                 >{{ template.spec?.source?.git?.url || "no source" }}</span
               >
             </div>
@@ -304,30 +300,30 @@
             <div class="grid gap-4 lg:grid-cols-2">
               <div class="space-y-3">
                 <h4
-                  class="font-mono text-xs uppercase tracking-[0.18em] text-gray-400"
+                  class="font-mono text-xs uppercase tracking-[0.18em] text-zinc-400"
                 >
                   Controls
                 </h4>
                 <label
                   v-for="control in templateControls(template)"
                   :key="control.name"
-                  class="block border border-gray-800 bg-black p-3"
+                  class="block border border-zinc-800 bg-black p-3"
                 >
                   <span
-                    class="mb-1 flex items-center justify-between gap-3 font-mono text-xs text-gray-300"
+                    class="mb-1 flex items-center justify-between gap-3 font-mono text-xs text-zinc-300"
                   >
                     <span>{{ control.name }}</span>
-                    <span class="text-gray-600">{{ control.type }}</span>
+                    <span class="text-zinc-600">{{ control.type }}</span>
                   </span>
                   <input
-                    class="w-full rounded-none border border-gray-700 bg-black px-3 py-2 font-mono text-sm text-white outline-none focus:border-white"
+                    class="w-full-none border border-zinc-700 bg-black px-3 py-2 font-mono text-sm text-white outline-none focus:border-white"
                     :type="control.inputType"
                     :value="control.defaultValue"
                     readonly
                   />
                   <span
                     v-if="control.description"
-                    class="mt-2 block text-xs text-gray-500"
+                    class="mt-2 block text-xs text-zinc-500"
                     >{{ control.description }}</span
                   >
                 </label>
@@ -336,11 +332,11 @@
               <div class="space-y-3">
                 <div>
                   <h4
-                    class="font-mono text-xs uppercase tracking-[0.18em] text-gray-400"
+                    class="font-mono text-xs uppercase tracking-[0.18em] text-zinc-400"
                   >
                     Embedded Metrics
                   </h4>
-                  <p class="mt-1 text-xs text-gray-500">
+                  <p class="mt-1 text-xs text-zinc-500">
                     Goals and baselines declared in the template, so the run can
                     prove improvement.
                   </p>
@@ -348,34 +344,34 @@
                 <div
                   v-for="metric in templateMetrics(template)"
                   :key="metric.name"
-                  class="border border-gray-800 bg-black p-3"
+                  class="border border-zinc-800 bg-black p-3"
                 >
                   <div class="flex items-center justify-between gap-3">
                     <span class="font-mono text-sm text-white">{{
                       metric.label
                     }}</span>
                     <span
-                      class="border border-gray-700 px-2 py-1 font-mono text-[10px] text-gray-400"
+                      class="border border-zinc-700 px-2 py-1 font-mono text-[10px] text-zinc-400"
                       >{{ metric.goal }}</span
                     >
                   </div>
                   <div
-                    class="mt-2 grid grid-cols-2 gap-2 font-mono text-xs text-gray-500"
+                    class="mt-2 grid grid-cols-2 gap-2 font-mono text-xs text-zinc-500"
                   >
                     <span
                       >baseline:
-                      <span class="text-gray-200">{{
+                      <span class="text-zinc-200">{{
                         metric.baseline
                       }}</span></span
                     >
                     <span
                       >unit:
-                      <span class="text-gray-200">{{ metric.unit }}</span></span
+                      <span class="text-zinc-200">{{ metric.unit }}</span></span
                     >
                   </div>
                   <p
                     v-if="metric.description"
-                    class="mt-2 text-xs text-gray-500"
+                    class="mt-2 text-xs text-zinc-500"
                   >
                     {{ metric.description }}
                   </p>
@@ -386,20 +382,17 @@
         </div>
       </section>
 
-      <section
-        id="metrics"
-        class="bg-gray-900/60 p-4 rounded border border-gray-700"
-      >
+      <section id="metrics" class="bg-zinc-950 p-4 border border-zinc-700">
         <div class="flex items-center justify-between gap-4">
           <div>
             <h2 class="text-xl font-semibold mb-1">Metrics debugging</h2>
-            <p class="text-sm text-gray-500">
+            <p class="text-sm text-zinc-500">
               Use embedded Grafana panels for metric chart debugging instead of
               custom chart code.
             </p>
           </div>
           <a
-            class="border border-gray-700 px-3 py-2 font-mono text-xs text-gray-300 hover:border-white hover:text-white"
+            class="border border-zinc-700 px-3 py-2 font-mono text-xs text-zinc-300 hover:border-white hover:text-white"
             href="/grafana/d/athena-athena-experiment-debugging"
             target="_blank"
             rel="noreferrer"
@@ -411,10 +404,10 @@
     </main>
 
     <footer
-      class="sticky bottom-0 mt-auto z-40 border-t border-gray-800 bg-black/95 px-4 py-3 backdrop-blur"
+      class="sticky bottom-0 mt-auto z-40 border-t border-zinc-800 bg-black/95 px-4 py-3 backdrop-blur"
     >
       <div
-        class="mx-auto flex max-w-6xl items-center justify-between gap-4 font-mono text-xs text-gray-500"
+        class="mx-auto flex max-w-6xl items-center justify-between gap-4 font-mono text-xs text-zinc-500"
       >
         <span>athena console</span>
         <button
