@@ -1,3 +1,9 @@
+# NON-DEPLOYABLE CONCEPT SKETCH.
+# This file is not a valid Athena CR and must not be applied to Kubernetes.
+# Migrate useful ideas into research.nixlab.io/v1alpha1 BenchmarkSuite,
+# BenchmarkRun, MetricSource, RuntimeProfile, and ResearchCampaign resources
+# before using them as product behavior.
+#
 # Example Auto-RL ResearchCampaign for Chemistry/Biology (e.g., Drug Discovery)
 # This YAML defines a ResearchCampaign for automatically designing and
 # optimizing drug candidates using reinforcement learning.

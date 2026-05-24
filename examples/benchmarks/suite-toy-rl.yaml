@@ -5,7 +5,7 @@ metadata:
 spec:
   taxonomy: rlTraining
   suiteVersion: "2026-05-20"
-  description: Deterministic toy RL canary for Athena benchmark controller development.
+  description: Development-only supervised workload canary for Athena benchmark controller development.
   targetRefPolicy:
     allowedKinds:
       - Experiment
@@ -17,13 +17,17 @@ spec:
         costTier: cheap
         device: cpu
       metrics:
-        primary: reward_mean
-        goal: maximize
+        primary: val_bpb
+        goal: minimize
         required:
-          - reward_mean
-          - reward_std
-          - wall_clock_seconds
-          - reproducibility_hash
+          - val_bpb
+          - training_seconds
+          - total_seconds
+          - peak_vram_mb
+          - mfu_percent
+          - total_tokens
+          - num_steps
+          - num_params
       budget:
         maxWallClock: 5m
         maxGpuHours: 0

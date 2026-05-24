@@ -2,12 +2,13 @@
   "name": "n-autoresearch",
   "version": "0.1.0",
   "private": true,
-  "description": "Autonomous ML research infrastructure on iii-engine",
+  "description": "Kubernetes-native autonomous ML/RL research platform",
   "license": "Apache-2.0",
   "scripts": {
-    "dev:orchestrator": "uv run python workers/orchestrator/orchestrator.py",
-    "dev:gpu": "cd workers/gpu && cargo run --release",
-    "prepare:data": "uv run experiments/prepare.py",
-    "train": "uv run experiments/train.py"
+    "build:k8s": "nix build .#k8s-manifests",
+    "build:helm": "nix build .#helm-chart",
+    "fmt:nix": "nix fmt",
+    "workload:sync": "uv sync",
+    "workload:smoke": "uv run experiments/train.py"
   }
 }

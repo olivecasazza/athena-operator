@@ -2,7 +2,7 @@
 name = "n-autoresearch-gpu"
 version = "0.1.0"
 edition = "2021"
-description = "GPU training worker for n-autoresearch"
+description = "Legacy iii GPU worker; Athena uses Kubernetes Jobs and the operator"
 license = "MIT"
 
 [dependencies]

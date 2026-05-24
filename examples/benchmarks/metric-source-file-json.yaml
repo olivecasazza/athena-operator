@@ -7,20 +7,35 @@ spec:
   path: metrics.json
   format: json
   metrics:
-    - name: reward_mean
-      path: $.reward_mean
+    - name: val_bpb
+      path: $.val_bpb
       type: number
       required: true
-    - name: reward_std
-      path: $.reward_std
+    - name: training_seconds
+      path: $.training_seconds
       type: number
       required: true
-    - name: wall_clock_seconds
-      path: $.wall_clock_seconds
+    - name: total_seconds
+      path: $.total_seconds
       type: number
       required: true
-    - name: reproducibility_hash
-      path: $.reproducibility_hash
-      type: string
+    - name: peak_vram_mb
+      path: $.peak_vram_mb
+      type: number
       required: true
-  timestampPath: $.created_at
+    - name: mfu_percent
+      path: $.mfu_percent
+      type: number
+      required: true
+    - name: total_tokens
+      path: $.total_tokens
+      type: integer
+      required: true
+    - name: num_steps
+      path: $.num_steps
+      type: integer
+      required: true
+    - name: num_params
+      path: $.num_params
+      type: integer
+      required: true

@@ -1,3 +1,8 @@
+//! Legacy iii GPU worker.
+//!
+//! Do not extend this path for Athena behavior. Durable orchestration, state,
+//! metrics, scheduling, and status belong in Kubernetes CRDs and the Athena operator.
+
 use iii_sdk::{register_worker, InitOptions, OtelConfig};
 use serde_json::json;
 use std::sync::Arc;

@@ -333,54 +333,54 @@
                 </label>
               </div>
 
-              <div class="space-y-3">
-                <div>
-                  <h4
-                    class="font-mono text-xs uppercase tracking-[0.18em] text-gray-400"
-                  >
-                    Embedded Metrics
-                  </h4>
-                  <p class="mt-1 text-xs text-gray-500">
-                    Goals and baselines declared in the template, so the run can
-                    prove improvement.
-                  </p>
-                </div>
-                <div
-                  v-for="metric in templateMetrics(template)"
-                  :key="metric.name"
-                  class="border border-gray-800 bg-black p-3"
-                >
-                  <div class="flex items-center justify-between gap-3">
-                    <span class="font-mono text-sm text-white">{{
-                      metric.label
-                    }}</span>
-                    <span
-                      class="border border-gray-700 px-2 py-1 font-mono text-[10px] text-gray-400"
-                      >{{ metric.goal }}</span
+                <div class="space-y-3">
+                  <div>
+                    <h4
+                      class="font-mono text-xs uppercase tracking-[0.18em] text-gray-400"
                     >
+                      Embedded Metrics
+                    </h4>
+                    <p class="mt-1 text-xs text-gray-500">
+                      Goals and baselines declared in the template, so the run can
+                      prove improvement.
+                    </p>
                   </div>
                   <div
-                    class="mt-2 grid grid-cols-2 gap-2 font-mono text-xs text-gray-500"
+                    v-for="metric in templateMetrics(template)"
+                    :key="metric.name"
+                    class="border border-gray-800 bg-black p-3"
                   >
-                    <span
-                      >baseline:
-                      <span class="text-gray-200">{{
-                        metric.baseline
-                      }}</span></span
+                    <div class="flex items-center justify-between gap-3">
+                      <span class="font-mono text-sm text-white">{{
+                        metric.label || metric.name
+                      }}</span>
+                      <span
+                        class="border border-gray-700 px-2 py-1 font-mono text-[10px] text-gray-400"
+                        >{{ metric.goal }}</span
+                      >
+                    </div>
+                    <div
+                      class="mt-2 grid grid-cols-2 gap-2 font-mono text-xs text-gray-500"
                     >
-                    <span
-                      >unit:
-                      <span class="text-gray-200">{{ metric.unit }}</span></span
+                      <span
+                        >baseline:
+                        <span class="text-gray-200">{{
+                          metric.baseline
+                        }}</span></span
+                      >
+                      <span
+                        >unit:
+                        <span class="text-gray-200">{{ metric.unit }}</span></span
+                      >
+                    </div>
+                    <p
+                      v-if="metric.description"
+                      class="mt-2 text-xs text-gray-500"
                     >
+                      {{ metric.description }}
+                    </p>
                   </div>
-                  <p
-                    v-if="metric.description"
-                    class="mt-2 text-xs text-gray-500"
-                  >
-                    {{ metric.description }}
-                  </p>
                 </div>
-              </div>
             </div>
           </div>
         </div>

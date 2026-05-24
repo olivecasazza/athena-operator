@@ -1,3 +1,6 @@
+# Legacy local iii runtime configuration.
+# Athena product state and orchestration must be modeled with Kubernetes CRDs,
+# controllers, Jobs, status, metrics, and GitOps artifacts instead.
 workers:
   - name: iii-worker-manager
     config:
