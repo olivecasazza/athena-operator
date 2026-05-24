@@ -16,13 +16,14 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::ResourceExt;
 use kube::runtime::controller::Action;
 use serde_json::json;
 use tracing::{info, warn};
 
 use crate::Context;
+use crate::metrics;
 use crate::telemetry;
 
 #[derive(Debug, thiserror::Error)]
@@ -70,9 +71,34 @@ pub async fn reconcile(experiment: Arc<Experiment>, ctx: Arc<Context>) -> Result
         ensure_experiment_job(&experiment, ctx.clone(), ns, name).await?;
     }
 
+    update_experiment_metrics(ctx.clone(), ns).await?;
     telemetry::record_reconcile(ns, campaign, &phase_label, "ok", started_at.elapsed());
 
     Ok(Action::requeue(Duration::from_secs(30)))
+}
+
+async fn update_experiment_metrics(ctx: Arc<Context>, ns: &str) -> Result<(), Error> {
+    let experiments: Api<Experiment> = Api::namespaced(ctx.client.clone(), ns);
+    let mut counts: BTreeMap<(String, String), f64> = BTreeMap::new();
+
+    for experiment in experiments.list(&ListParams::default()).await? {
+        let campaign = experiment.spec.campaign_ref.clone();
+        let phase = experiment
+            .status
+            .as_ref()
+            .map(|status| format!("{:?}", status.phase))
+            .unwrap_or_else(|| "Pending".to_string());
+        *counts.entry((campaign, phase)).or_insert(0.0) += 1.0;
+    }
+
+    metrics::EXPERIMENTS_TOTAL.reset();
+    for ((campaign, phase), count) in counts {
+        metrics::EXPERIMENTS_TOTAL
+            .with_label_values(&[ns, campaign.as_str(), phase.as_str()])
+            .set(count);
+    }
+
+    Ok(())
 }
 
 async fn ensure_experiment_job(
