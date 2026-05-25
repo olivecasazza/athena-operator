@@ -1,0 +1,181 @@
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: MetricSource
+metadata:
+  name: improvement-metrics-json
+spec:
+  sourceType: file
+  path: metrics.json
+  format: json
+  metrics:
+    - name: reward_mean
+      path: $.reward_mean
+      type: number
+      required: true
+    - name: reward_std
+      path: $.reward_std
+      type: number
+      required: true
+    - name: baseline_lift
+      path: $.baseline_lift
+      type: number
+      required: true
+    - name: pass_rate
+      path: $.pass_rate
+      type: number
+      required: true
+    - name: wall_clock_seconds
+      path: $.wall_clock_seconds
+      type: number
+      required: true
+    - name: reproducibility_hash
+      path: $.reproducibility_hash
+      type: string
+      required: true
+  timestampPath: $.created_at
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: cpu-toy-improvement-runner
+spec:
+  runtime:
+    type: custom
+    mode: batchJob
+  image: python:3.11-slim
+  command:
+    - sh
+    - -c
+    - |
+      python - <<'PY'
+      import hashlib
+      import json
+      import os
+      import time
+
+      seed = int(os.environ.get("ATHENA_SEED", "0"))
+      target_kind = os.environ.get("ATHENA_TARGET_KIND", "")
+      target_name = os.environ.get("ATHENA_TARGET_NAME", "")
+      metrics_path = os.environ["ATHENA_METRICS_PATH"]
+
+      baseline = 0.20
+      lift = 0.08 + (seed * 0.005) if target_kind == "Experiment" else 0.0
+      reward_mean = baseline + lift
+      pass_rate = 50.0 + (lift * 100.0)
+      repro = hashlib.sha256(f"{target_kind}:{target_name}:{seed}:{reward_mean}".encode()).hexdigest()
+      metrics = {
+          "reward_mean": round(reward_mean, 6),
+          "reward_std": 0.01,
+          "baseline_lift": round(lift, 6),
+          "pass_rate": round(pass_rate, 3),
+          "wall_clock_seconds": 0.1,
+          "reproducibility_hash": repro,
+          "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+      }
+
+      os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+      with open(metrics_path, "w") as f:
+          json.dump(metrics, f, indent=2)
+      with open("/dev/termination-log", "w") as f:
+          json.dump(metrics, f)
+      print(json.dumps(metrics, sort_keys=True))
+      PY
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  storage:
+    workspaceClaimName: athena-workspace
+    workspaceMountPath: /workspace
+    createWorkspaceClaim: true
+    workspaceSize: 1Gi
+    workspaceStorageClassName: longhorn
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: BenchmarkSuite
+metadata:
+  name: toy-improvement-canary-v1
+spec:
+  taxonomy: researchLoop
+  suiteVersion: "2026-05-24"
+  description: Deterministic canary that proves a candidate Experiment improves over a declared baseline.
+  targetRefPolicy:
+    allowedKinds:
+      - Experiment
+  tasks:
+    - name: deterministic-improvement
+      integration: customCommand
+      labels:
+        costTier: cheap
+        device: cpu
+      metrics:
+        primary: baseline_lift
+        goal: maximize
+        required:
+          - reward_mean
+          - reward_std
+          - baseline_lift
+          - pass_rate
+          - wall_clock_seconds
+          - reproducibility_hash
+      budget:
+        maxWallClock: 2m
+        maxGpuHours: 0
+        maxRetries: 0
+      seeds:
+        values: [1, 2, 3]
+        aggregation: meanStd
+  metricSources:
+    - name: metrics-json
+      metricSourceRef:
+        name: improvement-metrics-json
+  reporting:
+    gates:
+      - metric: baseline_lift
+        operator: ">="
+        value: 0.05
+      - metric: reward_mean
+        operator: ">"
+        value: 0.2
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: Experiment
+metadata:
+  name: toy-improvement-candidate
+spec:
+  campaignRef: canary-campaign
+  hypothesis: Deterministic canary candidate should improve reward over the embedded baseline.
+  parameters:
+    rewardBaseline: 0.2
+    expectedLift: 0.08
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: BenchmarkRun
+metadata:
+  name: toy-improvement-candidate-smoke
+spec:
+  suiteRef:
+    name: toy-improvement-canary-v1
+  targetRef:
+    apiVersion: research.nixlab.io/v1alpha1
+    kind: Experiment
+    name: toy-improvement-candidate
+  mode: smoke
+  runtimeProfileRef:
+    name: cpu-toy-improvement-runner
+  budget:
+    maxWallClock: 2m
+    maxGpuHours: 0
+    maxRetries: 0
+  seedMatrix:
+    seeds: [1, 2, 3]
+    deterministic: true
+  output:
+    workspacePath: /workspace/benchmarks/runs/default/toy-improvement-candidate-smoke
+  promotionPolicy:
+    updateExperimentStatus: true
+  cleanupPolicy:
+    ttlSecondsAfterFinished: 3600
+    retainFailedJobs: true

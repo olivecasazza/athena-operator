@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: autoresearch-workspace
+  name: athena-workspace
   namespace: default
 spec:
   accessModes:

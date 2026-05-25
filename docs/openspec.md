@@ -18,7 +18,7 @@ Acceptance criteria:
 - New first-class CRDs exist for `BenchmarkSuite`, `BenchmarkRun`, and `MetricSource`.
 - Benchmark execution supports RL training, LLM capability evals, autonomous research-loop evals, and operator/runtime health suites.
 - Every benchmark run writes immutable artifacts and structured metrics to the SeaweedFS workspace.
-- Athena Console can list, watch, compare, and report benchmark results using the Go BFF and Vue UI.
+- Athena Console can list, watch, compare, and report benchmark results using the Rust/Iced workbench.
 - Prometheus/Grafana/Loki observability is available from the first implementation phase, not bolted on later.
 - hp01-hp03 GPU workers are schedulable targets for training/eval jobs, each with one Quadro RTX 4000 8GB GPU.
 
@@ -35,8 +35,7 @@ Relevant code:
 - `operator/crates/athena-api/src/runtime_profile.rs`: current `RuntimeProfile` API.
 - `operator/crates/athena/src/reconciler.rs`: current experiment reconciliation/job generation.
 - `operator/crates/athena/src/metrics.rs`: current Prometheus exporter.
-- `athena-console/api/main.go`: Go BFF; currently reads `experiments` from `research.nixlab.io/v1alpha1`.
-- `athena-console/web/src/App.vue`: current Vue single-page experiment list.
+- `operator/crates/athena-console/src/main.rs`: Rust/Iced console using typed Athena CRD APIs.
 - `examples/canary.yaml` and `canary-test.yaml`: current canary resources.
 
 Non-goals for this step:
@@ -975,50 +974,32 @@ Integrity status must distinguish:
 
 ## 12. Athena Console requirements
 
-Console architecture remains Go BFF plus Vue UI.
+Console architecture is a Rust/Iced local workbench built from the same `athena-api`
+CRD types as the operator. It uses the user's kubeconfig through the Rust `kube`
+client and must not maintain authoritative product state outside Kubernetes.
 
-### 12.1 Go BFF endpoints
+### 12.1 Rust/Iced workbench
 
-Implement in `athena-console/api/main.go` or split into package files when it grows.
+Implement in `operator/crates/athena-console`.
 
-Read endpoints:
+Read surfaces:
 
-- `GET /api/experiments`
-- `GET /api/experiments/{namespace}/{name}`
-- `GET /api/campaigns`
-- `GET /api/campaigns/{namespace}/{name}`
-- `GET /api/benchmark-suites`
-- `GET /api/benchmark-suites/{namespace}/{name}`
-- `GET /api/benchmark-runs`
-- `GET /api/benchmark-runs/{namespace}/{name}`
-- `GET /api/benchmark-runs/{namespace}/{name}/report`
-- `GET /api/metric-sources`
-- `GET /api/runtime-profiles`
-
-Comparison/report endpoints:
-
-- `GET /api/compare?run=<ns/name>&baseline=<ns/name>` returns normalized metric deltas, gate results, and artifact links.
-- `GET /api/campaigns/{namespace}/{name}/leaderboard` returns ranked experiments with benchmark summaries.
-- `GET /api/benchmarks/{namespace}/{suite}/history` returns time series of aggregate metrics.
-
-Watch endpoints using SSE:
-
-- `GET /api/watch/experiments`
-- `GET /api/watch/campaigns`
-- `GET /api/watch/benchmark-runs`
-- `GET /api/watch/benchmark-suites`
+- Experiments across namespaces, with phase filter, status message, workspace, logs, metrics, and Job/Pod references.
+- ExperimentTemplates, with parameter schema, defaults, runtime profile, source, objective, and metric contract.
+- ResearchCampaigns and campaign leaderboards.
+- BenchmarkSuites and BenchmarkRuns, including aggregate metrics, gates, reproducibility hashes, artifacts, and report links.
+- MetricSources and RuntimeProfiles.
 
 Implementation requirements:
 
-- Use Kubernetes informers or watch APIs server-side; browser must never hold kubeconfig or service account tokens.
-- Normalize unstructured CRDs into typed JSON DTOs before returning to Vue.
-- Include `resourceVersion` and namespace/name in every response.
-- Do not expose secret refs, holdout answers, or hidden dataset paths.
-- Apply namespace scoping, pagination/limits, redaction, and watch reconnect handling. SSE endpoints must respect backpressure and resume from resourceVersion where possible.
+- Use typed CRD APIs from `athena-api` and the Kubernetes watch/list APIs.
+- Include `resourceVersion`, namespace/name, labels, owner refs, and conditions in detail views.
+- Never synthesize authoritative benchmark, campaign, experiment, or runtime status client-side.
+- Do not expose secret refs, holdout answers, hidden dataset paths, or private benchmark answers.
+- Writes must create/update Kubernetes specs only. Status remains controller-owned.
+- The Nix app must provide reproducible packaged and autoreloading dev entrypoints.
 
-### 12.2 Vue UI views
-
-Implement in `athena-console/web/src/App.vue` initially, then split into components once routing is added.
+### 12.2 Iced UI views
 
 Required views:
 
@@ -1170,22 +1151,21 @@ Tasks:
 5. Compute campaign aggregate metrics: time-to-best, duplicate hypothesis rate, failed run rate, GPU-hours.
 6. Write promotion/rejection status with integrity reasons.
 
-### Phase 5: Console BFF and UI
+### Phase 5: Rust/Iced Console UI
 
 Files to touch:
 
-- `athena-console/api/main.go`
-- `athena-console/api/` new helper files as needed
-- `athena-console/web/src/App.vue`
-- `athena-console/web/src/components/` create after App grows too large
-- `athena-console/web/src/lib/` for API/SSE/chart helpers if needed
+- `operator/crates/athena-console/src/main.rs`
+- `operator/crates/athena-console/src/` helper modules as the workbench grows
+- `operator/crates/athena-api/src/*` when console-visible API contracts need additive changes
+- `flake.nix` for native and dev app wiring
 
 Tasks:
 
-1. Add typed BFF DTOs for benchmark suites, runs, metric sources, campaigns, and runtime profiles.
-2. Add read endpoints listed in section 12.
-3. Add SSE watch endpoints using Kubernetes watch/informer APIs.
-4. Add comparison and leaderboard endpoints.
+1. Add typed workbench views for benchmark suites, runs, metric sources, campaigns, and runtime profiles.
+2. Use Kubernetes list/watch APIs through `kube` and shared `athena-api` types.
+3. Add live watch/subscription updates without browser-side tokens or local status synthesis.
+4. Add comparison and leaderboard views.
 5. Add Overview, Suite list, Run list, Run detail, Campaign leaderboard, Compare Report, and Runtime Health views.
 6. Add charts for reward, KL, entropy, pass@k, held-out score, GPU-hours, time-to-best, failed run rate, and duplicate hypothesis rate.
 7. Verify UI updates from SSE without refresh.
@@ -1241,11 +1221,9 @@ If the operator has a CRD generation command, run it and fail the task if genera
 For console changes:
 
 ```bash
-cd /home/olive/Repositories/n-autoresearch/athena-console/api
-go test ./...
-
-cd /home/olive/Repositories/n-autoresearch/athena-console/web
-npm test -- --run || npm run build
+cd /home/olive/Repositories/n-autoresearch/operator
+cargo check -p athena-console
+nix build .#athena-console
 ```
 
 For docs-only changes to this file, verify:

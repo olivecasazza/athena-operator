@@ -7,7 +7,7 @@ Start here:
 - openspec.md — Athena benchmark/operator build spec
 - experiments/ — train/eval scripts used by experiment workers
 - operator/ — Rust kube-rs Athena operator
-- athena-console/ — Go BFF + Vue console
+- operator/crates/athena-console/ — Rust/Iced local Athena console
 - workers/ — legacy iii orchestrator and GPU workers (kept for impl reference)
 - examples/ — example manifests and canary resources
 - config/ — local/runtime config files

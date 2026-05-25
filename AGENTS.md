@@ -36,7 +36,7 @@ Do not add or preserve durable product behavior in ad-hoc scripts, local files, 
 - `docs/openspec.md` is the build spec for Athena architecture, CRD/API shape, benchmark behavior, observability, and rollout order.
 - `README.md` and `docs/README.md` provide overview and usage context.
 - `operator/` contains the Rust kube-rs operator and CRD API crates.
-- `athena-console/` contains the Go BFF and Vue console for watching and comparing Athena resources.
+- `operator/crates/athena-console/` contains the Rust/Iced console for watching and comparing Athena resources through local kubeconfig.
 - `nix/athena/` and `modules/k8s/` define Nix-rendered Helm/Kubernetes deployment artifacts.
 - `examples/` contains example Athena custom resources and canaries.
 - `experiments/` contains stateless train/eval workload code invoked by Kubernetes-managed `Experiment` or `BenchmarkRun` Jobs. It must not own scheduling, durable state, status, promotion decisions, benchmark comparison, or orchestration.
@@ -98,7 +98,7 @@ Do not add or preserve durable product behavior in ad-hoc scripts, local files, 
 - Dashboards and alerts must use owned metrics with low-cardinality labels, not log scraping.
 - CR status must include logs, metrics, report, and artifact links when configured.
 - Runtime health canaries must cover controller metrics, workspace access, logs, and GPU scheduling where relevant.
-- Athena Console reads Kubernetes resources through the Go BFF; browser code must never hold kubeconfig or service account tokens.
+- Athena Console reads Kubernetes resources through the Rust `kube` client using local kubeconfig. It must still treat Kubernetes resources as the product API and must not write authoritative status.
 - BFF responses must redact secrets, hidden holdout details, private dataset paths, and private benchmark answers.
 - Watch/live updates must use Kubernetes watch/informers/SSE and include `resourceVersion`.
 - Console views must reflect CR status rather than recomputing authoritative benchmark or campaign state client-side.
@@ -131,7 +131,7 @@ Do not add or preserve durable product behavior in ad-hoc scripts, local files, 
 
 - For CRD/operator changes, run the relevant Rust checks/tests when practical and verify generated CRDs/manifests if affected.
 - For Nix/deployment changes, run `nix fmt` and relevant `nix build` checks when practical.
-- For console changes, run the relevant Go/Vue checks when present and practical.
+- For console changes, run the relevant Rust/Iced checks when present and practical.
 - For Python workload/runner code under `experiments/`, run local smoke tests only when the task explicitly concerns workload behavior. Do not use local runs to create or infer authoritative `Experiment`, `BenchmarkRun`, `ResearchCampaign`, or metric status.
 - Do not modify legacy worker code under `workers/orchestrator/` or `workers/gpu/` unless explicitly asked to remove, quarantine, or migrate it into Athena Kubernetes-native components. If such work touches legacy code, run the smallest relevant checks and report pre-existing failures separately.
 - Do not fix unrelated failures; report them clearly.

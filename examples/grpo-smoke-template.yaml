@@ -1,3 +1,4 @@
+---
 # Athena UI-ready GRPO smoke template.
 #
 # This is intentionally small enough for a console-launched experiment:
@@ -35,6 +36,9 @@ spec:
   storage:
     workspaceClaimName: "athena-workspace"
     workspaceMountPath: "/workspace"
+    createWorkspaceClaim: true
+    workspaceSize: 10Gi
+    workspaceStorageClassName: longhorn
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: ExperimentTemplate
