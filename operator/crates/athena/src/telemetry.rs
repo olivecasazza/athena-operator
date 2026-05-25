@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use opentelemetry::{KeyValue, global, trace::{TraceContextExt, TracerProvider}};
+use opentelemetry::{
+    KeyValue, global,
+    trace::{TraceContextExt, TracerProvider},
+};
 use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{Resource, metrics::SdkMeterProvider, trace::SdkTracerProvider};
 use opentelemetry_semantic_conventions::resource::{SERVICE_NAME, SERVICE_VERSION};
@@ -84,7 +87,11 @@ pub fn init_telemetry() -> anyhow::Result<(Option<SdkTracerProvider>, SharedTele
     let fmt_layer = tracing_subscriber::fmt::layer().json();
 
     if let Some(endpoint) = &config.otlp_endpoint {
-        let resource = telemetry_resource(&config.service_name, config.observability_level, config.protobuf_enabled);
+        let resource = telemetry_resource(
+            &config.service_name,
+            config.observability_level,
+            config.protobuf_enabled,
+        );
         let span_exporter = SpanExporter::builder()
             .with_tonic()
             .with_endpoint(endpoint.clone())
@@ -124,29 +131,41 @@ pub fn init_telemetry() -> anyhow::Result<(Option<SdkTracerProvider>, SharedTele
     }
 }
 
-fn telemetry_resource(service_name: &str, observability_level: u8, protobuf_enabled: bool) -> Resource {
+fn telemetry_resource(
+    service_name: &str,
+    observability_level: u8,
+    protobuf_enabled: bool,
+) -> Resource {
     Resource::builder()
         .with_attributes([
             KeyValue::new(SERVICE_NAME, service_name.to_string()),
             KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
             KeyValue::new("athena.observability.level", observability_level as i64),
-            KeyValue::new("athena.telemetry.protocol", if protobuf_enabled { "otlp/protobuf" } else { "otlp" }),
+            KeyValue::new(
+                "athena.telemetry.protocol",
+                if protobuf_enabled {
+                    "otlp/protobuf"
+                } else {
+                    "otlp"
+                },
+            ),
         ])
         .build()
 }
 
-pub static RECONCILE_TOTAL: once_cell::sync::Lazy<IntCounterVec> = once_cell::sync::Lazy::new(|| {
-    let counter = IntCounterVec::new(
-        Opts::new(
-            "athena_operator_reconcile_total",
-            "Total Experiment reconcile attempts by namespace, campaign, phase, and result",
-        ),
-        &["namespace", "campaign", "phase", "result"],
-    )
-    .unwrap();
-    REGISTRY.register(Box::new(counter.clone())).unwrap();
-    counter
-});
+pub static RECONCILE_TOTAL: once_cell::sync::Lazy<IntCounterVec> =
+    once_cell::sync::Lazy::new(|| {
+        let counter = IntCounterVec::new(
+            Opts::new(
+                "athena_operator_reconcile_total",
+                "Total Experiment reconcile attempts by namespace, campaign, phase, and result",
+            ),
+            &["namespace", "campaign", "phase", "result"],
+        )
+        .unwrap();
+        REGISTRY.register(Box::new(counter.clone())).unwrap();
+        counter
+    });
 
 pub static ACTION_TOTAL: once_cell::sync::Lazy<IntCounterVec> = once_cell::sync::Lazy::new(|| {
     let counter = IntCounterVec::new(
@@ -161,33 +180,39 @@ pub static ACTION_TOTAL: once_cell::sync::Lazy<IntCounterVec> = once_cell::sync:
     counter
 });
 
-pub static ACTION_DURATION_SECONDS: once_cell::sync::Lazy<HistogramVec> = once_cell::sync::Lazy::new(|| {
-    let histogram = HistogramVec::new(
-        HistogramOpts::new(
-            "athena_operator_agent_action_duration_seconds",
-            "Athena operator agent action duration in seconds",
+pub static ACTION_DURATION_SECONDS: once_cell::sync::Lazy<HistogramVec> =
+    once_cell::sync::Lazy::new(|| {
+        let histogram = HistogramVec::new(
+            HistogramOpts::new(
+                "athena_operator_agent_action_duration_seconds",
+                "Athena operator agent action duration in seconds",
+            )
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
+            ]),
+            &["namespace", "experiment", "action", "result"],
         )
-        .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]),
-        &["namespace", "experiment", "action", "result"],
-    )
-    .unwrap();
-    REGISTRY.register(Box::new(histogram.clone())).unwrap();
-    histogram
-});
+        .unwrap();
+        REGISTRY.register(Box::new(histogram.clone())).unwrap();
+        histogram
+    });
 
-pub static RECONCILE_DURATION_SECONDS: once_cell::sync::Lazy<HistogramVec> = once_cell::sync::Lazy::new(|| {
-    let histogram = HistogramVec::new(
-        HistogramOpts::new(
-            "athena_operator_reconcile_duration_seconds",
-            "Experiment reconcile duration in seconds",
+pub static RECONCILE_DURATION_SECONDS: once_cell::sync::Lazy<HistogramVec> =
+    once_cell::sync::Lazy::new(|| {
+        let histogram = HistogramVec::new(
+            HistogramOpts::new(
+                "athena_operator_reconcile_duration_seconds",
+                "Experiment reconcile duration in seconds",
+            )
+            .buckets(vec![
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ]),
+            &["namespace", "campaign", "phase", "result"],
         )
-        .buckets(vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]),
-        &["namespace", "campaign", "phase", "result"],
-    )
-    .unwrap();
-    REGISTRY.register(Box::new(histogram.clone())).unwrap();
-    histogram
-});
+        .unwrap();
+        REGISTRY.register(Box::new(histogram.clone())).unwrap();
+        histogram
+    });
 
 pub fn init_metrics() {
     once_cell::sync::Lazy::force(&RECONCILE_TOTAL);
@@ -196,7 +221,13 @@ pub fn init_metrics() {
     once_cell::sync::Lazy::force(&ACTION_DURATION_SECONDS);
 }
 
-pub fn record_reconcile(namespace: &str, campaign: &str, phase: &str, result: &str, duration: Duration) {
+pub fn record_reconcile(
+    namespace: &str,
+    campaign: &str,
+    phase: &str,
+    result: &str,
+    duration: Duration,
+) {
     let labels = [namespace, campaign, phase, result];
     RECONCILE_TOTAL.with_label_values(&labels).inc();
     RECONCILE_DURATION_SECONDS
@@ -204,7 +235,13 @@ pub fn record_reconcile(namespace: &str, campaign: &str, phase: &str, result: &s
         .observe(duration.as_secs_f64());
 }
 
-pub fn record_action(namespace: &str, experiment: &str, action: &str, result: &str, duration: Duration) {
+pub fn record_action(
+    namespace: &str,
+    experiment: &str,
+    action: &str,
+    result: &str,
+    duration: Duration,
+) {
     let labels = [namespace, experiment, action, result];
     ACTION_TOTAL.with_label_values(&labels).inc();
     ACTION_DURATION_SECONDS

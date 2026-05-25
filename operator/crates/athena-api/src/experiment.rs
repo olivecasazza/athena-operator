@@ -129,8 +129,30 @@ pub struct ExperimentMetrics {
     pub best: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<ExperimentMetricSeries>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_updated: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentMetricSeries {
+    pub tag: String,
+    pub iteration: i64,
+    pub objective: String,
+    pub goal: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<ExperimentMetricPoint>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentMetricPoint {
+    pub name: String,
+    pub value: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]

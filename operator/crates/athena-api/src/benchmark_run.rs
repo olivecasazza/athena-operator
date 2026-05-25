@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use crate::common::{
     ArtifactUris, Budget, Condition, LocalObjectReference, MetricAggregate, TypedObjectReference,
 };
+use crate::experiment::ExperimentMetricSeries;
 
 #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, JsonSchema)]
 #[kube(
@@ -122,6 +123,8 @@ pub struct BenchmarkRunStatus {
     pub task_results: Vec<TaskResultSummary>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub aggregate_metrics: BTreeMap<String, MetricAggregate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metric_series: Vec<ExperimentMetricSeries>,
     #[serde(default)]
     pub cost: BenchmarkRunCost,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -162,6 +165,8 @@ pub struct TaskResultSummary {
     pub phase: BenchmarkRunPhase,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metrics: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metric_series: Vec<ExperimentMetricSeries>,
     #[serde(default)]
     pub artifacts: ArtifactUris,
     #[serde(default, skip_serializing_if = "Option::is_none")]

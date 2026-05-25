@@ -33,39 +33,17 @@ def check_operator_has_otel_tracing_and_metrics_wiring():
     assert "record_reconcile" in reconciler
 
 
-def check_console_api_has_otel_http_trace_propagation_and_metrics():
-    go_mod = read("athena-console/api/go.mod")
-    assert "go.opentelemetry.io/otel" in go_mod
-    assert "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp" in go_mod
+def check_console_is_rust_iced_kube_workbench():
+    cargo = read("operator/Cargo.toml")
+    assert "crates/athena-console" in cargo
+    assert "iced" in cargo
 
-    main_go = read("athena-console/api/main.go")
-    telemetry_go = read("athena-console/api/telemetry.go")
-    assert "initTelemetry" in main_go
-    assert "instrumentHandlerFunc" in main_go
-    assert "otelhttp.NewHandler" in telemetry_go
-    assert "TraceContext{}" in telemetry_go
-    assert "otel.Meter" in telemetry_go
-    assert "http.server.request.duration" in telemetry_go
-    assert "trace_id" in telemetry_go
-
-
-def check_frontend_has_browser_otel_and_trace_header_injection():
-    package_json = read("athena-console/web/package.json")
-    assert "@opentelemetry/api" in package_json
-    assert "@opentelemetry/sdk-trace-web" in package_json
-    assert "@opentelemetry/exporter-trace-otlp-http" in package_json
-
-    telemetry_ts = read("athena-console/web/src/telemetry.ts")
-    assert "WebTracerProvider" in telemetry_ts
-    assert "OTLPTraceExporter" in telemetry_ts
-    assert "TraceContextPropagator" in telemetry_ts
-    assert "VITE_OTEL_EXPORTER_OTLP_ENDPOINT" in telemetry_ts
-    assert "injectTraceHeaders" in telemetry_ts
-
-    app_vue = read("athena-console/web/src/App.vue")
-    assert "startUiSpan" in app_vue
-    assert "injectTraceHeaders" in app_vue
-    assert "traceparent" in telemetry_ts
+    console = read("operator/crates/athena-console/src/main.rs")
+    assert "iced::application" in console
+    assert "Client::try_default" in console
+    assert "Api::<Experiment>::all" in console
+    assert "Api::<ExperimentTemplate>::all" in console
+    assert "PhaseFilter" in console
 
 
 def check_canary_experiment_exports_otel_spans_and_trace_metrics():
@@ -85,8 +63,7 @@ def check_canary_experiment_exports_otel_spans_and_trace_metrics():
 if __name__ == "__main__":
     checks = [
         check_operator_has_otel_tracing_and_metrics_wiring,
-        check_console_api_has_otel_http_trace_propagation_and_metrics,
-        check_frontend_has_browser_otel_and_trace_header_injection,
+        check_console_is_rust_iced_kube_workbench,
         check_canary_experiment_exports_otel_spans_and_trace_metrics,
     ]
     for check in checks:

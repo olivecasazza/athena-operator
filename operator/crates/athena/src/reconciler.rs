@@ -4,22 +4,24 @@ use std::time::Duration;
 use std::time::Instant;
 
 use athena_api::experiment::{
-    Experiment, ExperimentEnvironment, ExperimentPhase, ExperimentStatus,
+    Experiment, ExperimentCondition, ExperimentEnvironment, ExperimentMetricPoint,
+    ExperimentMetricSeries, ExperimentMetrics, ExperimentPhase, ExperimentStatus,
 };
 use athena_api::experiment_template::ExperimentTemplate;
 use athena_api::research_campaign::ResearchCampaign;
 use athena_api::runtime_profile::{ExecutionMode, RuntimeProfile};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec, ResourceRequirements,
-    Volume, VolumeMount,
+    Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
+    PersistentVolumeClaimVolumeSource, Pod, PodSpec, PodTemplateSpec, ResourceRequirements, Volume,
+    VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::ResourceExt;
+use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
-use serde_json::json;
+use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::Context;
@@ -65,11 +67,20 @@ pub async fn reconcile(experiment: Arc<Experiment>, ctx: Arc<Context>) -> Result
     tracing::Span::current().record("trace_id", tracing::field::display(&trace_id));
     tracing::Span::current().record("span_id", tracing::field::display(&span_id));
 
-    info!(name, namespace = ns, campaign, ?phase, trace_id, span_id, "reconciling Experiment");
+    info!(
+        name,
+        namespace = ns,
+        campaign,
+        ?phase,
+        trace_id,
+        span_id,
+        "reconciling Experiment"
+    );
 
-    if phase == ExperimentPhase::Pending {
+    if matches!(phase, ExperimentPhase::Pending | ExperimentPhase::Preparing) {
         ensure_experiment_job(&experiment, ctx.clone(), ns, name).await?;
     }
+    reconcile_experiment_status(&experiment, ctx.clone(), ns, name).await?;
 
     update_experiment_metrics(ctx.clone(), ns).await?;
     telemetry::record_reconcile(ns, campaign, &phase_label, "ok", started_at.elapsed());
@@ -138,13 +149,16 @@ async fn ensure_experiment_job(
         })?;
 
     if profile.spec.runtime.mode != ExecutionMode::BatchJob {
-        return Err(Error::UnsupportedRuntimeMode(template.spec.runtime_profile_ref.clone()));
+        return Err(Error::UnsupportedRuntimeMode(
+            template.spec.runtime_profile_ref.clone(),
+        ));
     }
 
     let job_name = format!("exp-{}", name);
     let workspace_path = format!("/workspace/runs/{}/{}", experiment.spec.campaign_ref, name);
-    let metrics_path = template.spec.metrics.parser.path.clone();
+    let metrics_path = resolve_metrics_path(&workspace_path, &template.spec.metrics.parser.path);
     let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
+    let workspace_claim = ensure_workspace_claim(ctx.clone(), ns, &profile).await?;
     if jobs.get_opt(&job_name).await?.is_none() {
         jobs.create(
             &PostParams::default(),
@@ -161,7 +175,6 @@ async fn ensure_experiment_job(
         .await?;
     }
 
-    let experiments: Api<Experiment> = Api::namespaced(ctx.client.clone(), ns);
     let status = ExperimentStatus {
         phase: ExperimentPhase::Running,
         workspace_path: Some(workspace_path.clone()),
@@ -177,9 +190,535 @@ async fn ensure_experiment_job(
             job_name: Some(job_name),
             ..Default::default()
         }),
-        message: Some("created Kubernetes Job for batch runtime".to_string()),
+        message: Some(workspace_claim.message.clone()),
+        conditions: Some(vec![workspace_claim.condition]),
         ..Default::default()
     };
+    patch_experiment_status(ctx, ns, name, status).await?;
+
+    Ok(())
+}
+
+struct WorkspaceClaimStatus {
+    message: String,
+    condition: ExperimentCondition,
+}
+
+async fn ensure_workspace_claim(
+    ctx: Arc<Context>,
+    ns: &str,
+    profile: &RuntimeProfile,
+) -> Result<WorkspaceClaimStatus, Error> {
+    let storage = &profile.spec.storage;
+    if !storage.create_workspace_claim {
+        return Ok(WorkspaceClaimStatus {
+            message: format!(
+                "workspace PVC {} is expected to exist in namespace {ns}",
+                storage.workspace_claim_name
+            ),
+            condition: condition(
+                "WorkspaceClaimReady",
+                "Unknown",
+                "WorkspaceClaimExternallyManaged",
+                format!(
+                    "workspace PVC {} is externally managed and must exist in namespace {ns}",
+                    storage.workspace_claim_name
+                ),
+            ),
+        });
+    }
+
+    let claims: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), ns);
+    if claims
+        .get_opt(&storage.workspace_claim_name)
+        .await?
+        .is_some()
+    {
+        return Ok(WorkspaceClaimStatus {
+            message: format!(
+                "workspace PVC {}/{} already exists; Kubernetes Job is ready to use it",
+                ns, storage.workspace_claim_name
+            ),
+            condition: workspace_ready_condition(
+                ns,
+                &storage.workspace_claim_name,
+                "WorkspaceClaimExists",
+            ),
+        });
+    }
+
+    let mut requests = BTreeMap::new();
+    requests.insert(
+        "storage".to_string(),
+        Quantity(storage.workspace_size.clone()),
+    );
+
+    let labels = BTreeMap::from([
+        (
+            "app.kubernetes.io/name".to_string(),
+            "athena-workspace".to_string(),
+        ),
+        (
+            "athena.nixlab.io/runtime-profile".to_string(),
+            profile.name_any(),
+        ),
+    ]);
+
+    claims
+        .create(
+            &PostParams::default(),
+            &PersistentVolumeClaim {
+                metadata: ObjectMeta {
+                    name: Some(storage.workspace_claim_name.clone()),
+                    namespace: Some(ns.to_string()),
+                    labels: Some(labels),
+                    ..Default::default()
+                },
+                spec: Some(PersistentVolumeClaimSpec {
+                    access_modes: Some(storage.workspace_access_modes.clone()),
+                    resources: Some(VolumeResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    storage_class_name: storage.workspace_storage_class_name.clone(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    Ok(WorkspaceClaimStatus {
+        message: format!(
+            "created workspace PVC {}/{} before creating the Kubernetes Job",
+            ns, storage.workspace_claim_name
+        ),
+        condition: workspace_ready_condition(
+            ns,
+            &storage.workspace_claim_name,
+            "WorkspaceClaimCreated",
+        ),
+    })
+}
+
+fn workspace_ready_condition(ns: &str, claim_name: &str, reason: &str) -> ExperimentCondition {
+    condition(
+        "WorkspaceClaimReady",
+        "True",
+        reason,
+        format!("workspace PVC {ns}/{claim_name} exists for the experiment Job"),
+    )
+}
+
+fn resolve_metrics_path(workspace_path: &str, metrics_path: &str) -> String {
+    if metrics_path.starts_with('/') {
+        metrics_path.to_string()
+    } else {
+        format!("{workspace_path}/{metrics_path}")
+    }
+}
+
+async fn reconcile_experiment_status(
+    experiment: &Experiment,
+    ctx: Arc<Context>,
+    ns: &str,
+    name: &str,
+) -> Result<(), Error> {
+    let current = experiment.status.clone().unwrap_or_default();
+    let job_name = current
+        .job_name
+        .clone()
+        .unwrap_or_else(|| format!("exp-{}", name));
+    let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
+    let Some(job) = jobs.get_opt(&job_name).await? else {
+        if experiment.status.is_some() {
+            patch_experiment_status(
+                ctx,
+                ns,
+                name,
+                ExperimentStatus {
+                    phase: ExperimentPhase::Error,
+                    job_name: Some(job_name.clone()),
+                    workspace_path: current.workspace_path,
+                    logs_link: current.logs_link,
+                    metrics_link: current.metrics_link,
+                    metrics: current.metrics,
+                    decision: current.decision,
+                    environment: current.environment,
+                    resources: current.resources,
+                    metrics_detail: current.metrics_detail,
+                    artifacts: current.artifacts,
+                    cost: current.cost,
+                    dashboard: current.dashboard,
+                    message: Some(format!("expected Kubernetes Job {job_name} was not found")),
+                    conditions: Some(vec![condition(
+                        "JobObserved",
+                        "False",
+                        "JobMissing",
+                        format!("expected Kubernetes Job {job_name} was not found"),
+                    )]),
+                },
+            )
+            .await?;
+        }
+        return Ok(());
+    };
+
+    let pods = pods_for_job(ctx.clone(), ns, &job).await?;
+    let terminal_metrics = pods.iter().find_map(termination_metrics_json);
+    let (phase, message, conditions) = status_from_job_and_pods(&job, &pods);
+    let pod_names: Vec<String> = pods
+        .iter()
+        .filter_map(|pod| pod.metadata.name.clone())
+        .collect();
+    let node_names: Vec<String> = pods
+        .iter()
+        .filter_map(|pod| pod.spec.as_ref()?.node_name.clone())
+        .collect();
+    let mut environment = current.environment.unwrap_or_default();
+    environment.namespace = Some(ns.to_string());
+    environment.job_name = Some(job_name.clone());
+    if !pod_names.is_empty() {
+        environment.pod_names = Some(pod_names);
+    }
+    if !node_names.is_empty() {
+        environment.node_names = Some(node_names);
+    }
+
+    let (metrics, metrics_detail) = merge_terminal_metrics(
+        current.metrics,
+        current.metrics_detail,
+        current.workspace_path.as_deref(),
+        terminal_metrics.as_ref(),
+    );
+
+    patch_experiment_status(
+        ctx,
+        ns,
+        name,
+        ExperimentStatus {
+            phase,
+            job_name: Some(job_name),
+            workspace_path: current.workspace_path,
+            logs_link: current.logs_link,
+            metrics_link: current.metrics_link,
+            metrics,
+            decision: current.decision,
+            message: Some(message),
+            environment: Some(environment),
+            resources: current.resources,
+            metrics_detail,
+            artifacts: current.artifacts,
+            cost: current.cost,
+            conditions: Some(conditions),
+            dashboard: current.dashboard,
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn pods_for_job(ctx: Arc<Context>, ns: &str, job: &Job) -> Result<Vec<Pod>, Error> {
+    let job_name = job.name_any();
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let list = pods
+        .list(&ListParams::default().labels(&format!(
+            "batch.kubernetes.io/job-name={job_name}"
+        )))
+        .await?;
+    let Some(job_uid) = job.metadata.uid.as_deref() else {
+        return Ok(list.items);
+    };
+
+    Ok(list
+        .items
+        .into_iter()
+        .filter(|pod| {
+            pod.metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get("batch.kubernetes.io/controller-uid"))
+                .map(|uid| uid == job_uid)
+                .unwrap_or(false)
+        })
+        .collect())
+}
+
+fn termination_metrics_json(pod: &Pod) -> Option<Value> {
+    pod.status
+        .as_ref()?
+        .container_statuses
+        .as_ref()?
+        .iter()
+        .filter_map(|status| {
+            status
+                .state
+                .as_ref()?
+                .terminated
+                .as_ref()?
+                .message
+                .as_deref()
+        })
+        .find_map(|message| serde_json::from_str::<Value>(message).ok())
+}
+
+fn merge_terminal_metrics(
+    current_metrics: BTreeMap<String, Value>,
+    current_detail: Option<ExperimentMetrics>,
+    workspace_path: Option<&str>,
+    raw: Option<&Value>,
+) -> (BTreeMap<String, Value>, Option<ExperimentMetrics>) {
+    let Some(raw) = raw else {
+        return (current_metrics, current_detail);
+    };
+
+    let mut metrics = current_metrics;
+    for name in [
+        "val_bpb",
+        "val_bpb_initial",
+        "val_bpb_delta",
+        "baseline_val_bpb",
+        "optimizer_steps",
+        "peak_vram_mb",
+        "training_seconds",
+        "num_params",
+        "improved",
+        "experiment_iteration",
+        "experiment_tag",
+        "parent_experiment_id",
+    ] {
+        if let Some(value) = raw.get(name) {
+            metrics.insert(name.to_string(), value.clone());
+        }
+    }
+
+    let latest = json!({
+        "val_bpb": raw.get("val_bpb"),
+        "val_bpb_initial": raw.get("val_bpb_initial"),
+        "val_bpb_delta": raw.get("val_bpb_delta"),
+        "baseline_val_bpb": raw.get("baseline_val_bpb"),
+        "experiment_tag": raw.get("experiment_tag"),
+        "experiment_iteration": raw.get("experiment_iteration"),
+        "parent_experiment_id": raw.get("parent_experiment_id"),
+    });
+    let series = metric_series(raw);
+    let mut detail = current_detail.unwrap_or_default();
+    detail.objective_name = Some("val_bpb".to_string());
+    detail.objective_goal = Some("minimize".to_string());
+    detail.latest = Some(latest.clone());
+    detail.best = Some(latest);
+    detail.metrics_path = workspace_path.map(|path| format!("{path}/metrics.json"));
+    detail.series = series;
+    detail.last_updated = Some(chrono::Utc::now().to_rfc3339());
+
+    (metrics, Some(detail))
+}
+
+fn metric_series(raw: &Value) -> Vec<ExperimentMetricSeries> {
+    let Some(series) = raw.get("metric_series") else {
+        return Vec::new();
+    };
+    let tag = series
+        .get("tag")
+        .and_then(Value::as_str)
+        .unwrap_or("canary")
+        .to_string();
+    let iteration = series
+        .get("iteration")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let objective = series
+        .get("objective")
+        .and_then(Value::as_str)
+        .unwrap_or("val_bpb")
+        .to_string();
+    let goal = series
+        .get("goal")
+        .and_then(Value::as_str)
+        .unwrap_or("minimize")
+        .to_string();
+    let points = series
+        .get("points")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|point| {
+            Some(ExperimentMetricPoint {
+                name: point.get("name")?.as_str()?.to_string(),
+                value: point.get("value")?.as_f64()?,
+                step: point.get("step").and_then(Value::as_i64),
+            })
+        })
+        .collect();
+
+    vec![ExperimentMetricSeries {
+        tag,
+        iteration,
+        objective,
+        goal,
+        points,
+    }]
+}
+
+fn status_from_job_and_pods(
+    job: &Job,
+    pods: &[Pod],
+) -> (ExperimentPhase, String, Vec<ExperimentCondition>) {
+    if job_condition_is_true(job, "Complete") {
+        return (
+            ExperimentPhase::Succeeded,
+            "Kubernetes Job completed successfully".to_string(),
+            vec![condition(
+                "Completed",
+                "True",
+                "JobComplete",
+                "Kubernetes Job completed successfully",
+            )],
+        );
+    }
+
+    if job_condition_is_true(job, "Failed") {
+        return (
+            ExperimentPhase::Failed,
+            "Kubernetes Job failed".to_string(),
+            vec![condition(
+                "Failed",
+                "True",
+                "JobFailed",
+                "Kubernetes Job failed",
+            )],
+        );
+    }
+
+    if let Some((reason, message)) = first_unschedulable_pod(pods) {
+        return (
+            ExperimentPhase::Preparing,
+            message.clone(),
+            vec![condition("Scheduled", "False", reason, message)],
+        );
+    }
+
+    if pods
+        .iter()
+        .any(|pod| pod.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
+    {
+        return (
+            ExperimentPhase::Running,
+            "Kubernetes Job has a running Pod".to_string(),
+            vec![condition(
+                "Running",
+                "True",
+                "PodRunning",
+                "Kubernetes Job has a running Pod",
+            )],
+        );
+    }
+
+    if pods
+        .iter()
+        .any(|pod| pod.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Pending"))
+    {
+        return (
+            ExperimentPhase::Preparing,
+            "Kubernetes Job Pod is pending".to_string(),
+            vec![condition(
+                "Scheduled",
+                "Unknown",
+                "PodPending",
+                "Kubernetes Job Pod is pending",
+            )],
+        );
+    }
+
+    if job
+        .status
+        .as_ref()
+        .and_then(|status| status.active)
+        .unwrap_or_default()
+        > 0
+    {
+        return (
+            ExperimentPhase::Running,
+            "Kubernetes Job is active".to_string(),
+            vec![condition(
+                "Running",
+                "True",
+                "JobActive",
+                "Kubernetes Job is active",
+            )],
+        );
+    }
+
+    (
+        ExperimentPhase::Preparing,
+        "Kubernetes Job has been created and is waiting for Pods".to_string(),
+        vec![condition(
+            "Scheduled",
+            "Unknown",
+            "WaitingForPods",
+            "Kubernetes Job has been created and is waiting for Pods",
+        )],
+    )
+}
+
+fn job_condition_is_true(job: &Job, condition_type: &str) -> bool {
+    job.status
+        .as_ref()
+        .and_then(|status| status.conditions.as_ref())
+        .map(|conditions| {
+            conditions
+                .iter()
+                .any(|condition| condition.type_ == condition_type && condition.status == "True")
+        })
+        .unwrap_or(false)
+}
+
+fn first_unschedulable_pod(pods: &[Pod]) -> Option<(String, String)> {
+    pods.iter()
+        .filter_map(|pod| pod.status.as_ref()?.conditions.as_ref())
+        .flat_map(|conditions| conditions.iter())
+        .find(|condition| {
+            condition.type_ == "PodScheduled"
+                && condition.status == "False"
+                && condition.reason.as_deref() == Some("Unschedulable")
+        })
+        .map(|condition| {
+            (
+                condition
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "Unschedulable".to_string()),
+                condition
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "Pod is unschedulable".to_string()),
+            )
+        })
+}
+
+fn condition(
+    condition_type: impl Into<String>,
+    status: impl Into<String>,
+    reason: impl Into<String>,
+    message: impl Into<String>,
+) -> ExperimentCondition {
+    ExperimentCondition {
+        condition_type: Some(condition_type.into()),
+        status: Some(status.into()),
+        reason: Some(reason.into()),
+        message: Some(message.into()),
+        last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+    }
+}
+
+async fn patch_experiment_status(
+    ctx: Arc<Context>,
+    ns: &str,
+    name: &str,
+    status: ExperimentStatus,
+) -> Result<(), Error> {
+    let experiments: Api<Experiment> = Api::namespaced(ctx.client.clone(), ns);
     experiments
         .patch_status(
             name,
@@ -187,7 +726,6 @@ async fn ensure_experiment_job(
             &Patch::Merge(&json!({ "status": status })),
         )
         .await?;
-
     Ok(())
 }
 
@@ -195,16 +733,28 @@ fn build_job(
     experiment: &Experiment,
     profile: &RuntimeProfile,
     job_name: &str,
-    _workspace_path: &str,
+    workspace_path: &str,
     metrics_path: &str,
     namespace: &str,
     experiment_name: &str,
 ) -> Job {
     let labels = BTreeMap::from([
-        ("app.kubernetes.io/name".to_string(), "athena-experiment".to_string()),
-        ("athena.nixlab.io/campaign".to_string(), experiment.spec.campaign_ref.clone()),
-        ("athena.nixlab.io/experiment".to_string(), experiment_name.to_string()),
-        ("athena.nixlab.io/runtime-profile".to_string(), profile.name_any()),
+        (
+            "app.kubernetes.io/name".to_string(),
+            "athena-experiment".to_string(),
+        ),
+        (
+            "athena.nixlab.io/campaign".to_string(),
+            experiment.spec.campaign_ref.clone(),
+        ),
+        (
+            "athena.nixlab.io/experiment".to_string(),
+            experiment_name.to_string(),
+        ),
+        (
+            "athena.nixlab.io/runtime-profile".to_string(),
+            profile.name_any(),
+        ),
     ]);
     let spec_json = serde_json::to_string(&experiment.spec).unwrap_or_else(|_| "{}".to_string());
 
@@ -260,6 +810,11 @@ fn build_job(
                                 ..Default::default()
                             },
                             EnvVar {
+                                name: "ATHENA_WORKSPACE_PATH".to_string(),
+                                value: Some(workspace_path.to_string()),
+                                ..Default::default()
+                            },
+                            EnvVar {
                                 name: "ATHENA_METRICS_PATH".to_string(),
                                 value: Some(metrics_path.to_string()),
                                 ..Default::default()
@@ -309,7 +864,9 @@ fn build_job(
     }
 }
 
-fn resource_requirements(resources: &athena_api::runtime_profile::ResourceProfile) -> ResourceRequirements {
+fn resource_requirements(
+    resources: &athena_api::runtime_profile::ResourceProfile,
+) -> ResourceRequirements {
     ResourceRequirements {
         limits: quantity_map(&resources.limits),
         requests: quantity_map(&resources.requests),
@@ -333,12 +890,22 @@ fn quantity_map(values: &BTreeMap<String, String>) -> Option<BTreeMap<String, Qu
 pub fn error_policy(experiment: Arc<Experiment>, err: &Error, _ctx: Arc<Context>) -> Action {
     let name = experiment.metadata.name.as_deref().unwrap_or("unknown");
     warn!(name, %err, "error reconciling experiment, retrying");
-    let ns = experiment.metadata.namespace.as_deref().unwrap_or("default");
+    let ns = experiment
+        .metadata
+        .namespace
+        .as_deref()
+        .unwrap_or("default");
     let phase = experiment
         .status
         .as_ref()
         .map(|s| format!("{:?}", s.phase))
         .unwrap_or_else(|| "Pending".to_string());
-    telemetry::record_reconcile(ns, &experiment.spec.campaign_ref, &phase, "error", Duration::ZERO);
+    telemetry::record_reconcile(
+        ns,
+        &experiment.spec.campaign_ref,
+        &phase,
+        "error",
+        Duration::ZERO,
+    );
     Action::requeue(Duration::from_secs(30))
 }

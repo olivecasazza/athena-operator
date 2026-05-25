@@ -85,6 +85,17 @@ pub struct ResourceProfile {
 pub struct StorageProfile {
     pub workspace_claim_name: String,
     pub workspace_mount_path: String,
+    #[serde(default = "default_create_workspace_claim")]
+    pub create_workspace_claim: bool,
+    #[serde(
+        default = "default_workspace_access_modes",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub workspace_access_modes: Vec<String>,
+    #[serde(default = "default_workspace_size")]
+    pub workspace_size: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_storage_class_name: Option<String>,
 }
 
 impl Default for StorageProfile {
@@ -92,8 +103,24 @@ impl Default for StorageProfile {
         Self {
             workspace_claim_name: "athena-workspace".to_string(),
             workspace_mount_path: "/workspace".to_string(),
+            create_workspace_claim: true,
+            workspace_access_modes: default_workspace_access_modes(),
+            workspace_size: default_workspace_size(),
+            workspace_storage_class_name: None,
         }
     }
+}
+
+fn default_create_workspace_claim() -> bool {
+    true
+}
+
+fn default_workspace_access_modes() -> Vec<String> {
+    vec!["ReadWriteOnce".to_string()]
+}
+
+fn default_workspace_size() -> String {
+    "20Gi".to_string()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]

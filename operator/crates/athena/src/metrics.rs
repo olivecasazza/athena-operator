@@ -15,8 +15,20 @@ pub static EXPERIMENTS_TOTAL: Lazy<GaugeVec> = Lazy::new(|| {
     gauge
 });
 
+pub static BENCHMARK_RUNS_TOTAL: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "benchmark_runs_total",
+        "Count of Athena benchmark runs by suite and phase",
+    )
+    .namespace("athena");
+    let gauge = GaugeVec::new(opts, &["namespace", "suite", "phase"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
 pub fn init() {
     Lazy::force(&EXPERIMENTS_TOTAL);
+    Lazy::force(&BENCHMARK_RUNS_TOTAL);
 }
 
 async fn metrics_handler() -> impl IntoResponse {
