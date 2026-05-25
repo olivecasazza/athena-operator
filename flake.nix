@@ -233,6 +233,7 @@
                   pkgs.fontconfig
                   pkgs.gcc
                   pkgs.helix
+                  pkgs.jujutsu
                   pkgs.lapce
                   pkgs.neovim
                   pkgs.nerd-fonts.monaspace
@@ -266,6 +267,8 @@
                 echo "Athena dev shell active (repo-local via direnv)."
                 echo "Bead editor: $BEAD_EDITOR"
                 echo "Set ATHENA_USE_B9S=1 to prefer b9s when installed."
+                echo "Bead manager: jj"
+                echo "Try: jj status"
                 echo "Run: cd operator && cargo run --release -p athena-console"
                 echo "Live-reload: nix run .#athena-console-dev"
               '';
