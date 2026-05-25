@@ -7,7 +7,7 @@ let
     chart = {
       name = "athena";
       description = "Athena Kubernetes Research Operator Template";
-      version = "0.1.10";
+      version = "0.1.11";
       appVersion = "0.1.10";
     };
 
@@ -260,7 +260,9 @@ let
   tablePanel = id: title: expr: gridPos: {
     inherit id title gridPos;
     type = "table";
-    targets = [ (prometheusTarget expr "{{`{{`}}namespace{{`}}`}} {{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}") ];
+    targets = [
+      (prometheusTarget expr "{{`{{`}}namespace{{`}}`}} {{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}")
+    ];
   };
 
   dashboardJson = dashboard: builtins.toJSON (dashboardDefaults // dashboard);
@@ -634,7 +636,7 @@ let
         selector.matchLabels = selectorLabels;
         endpoints = [
           {
-            port = deployment.operator.metricsPort;
+            port = "metrics";
             interval = deployment.observability.metrics.serviceMonitor.interval;
           }
         ];
@@ -673,9 +675,33 @@ let
     imagePullSecrets = [ { name = "ghcr-pull"; } ];
   };
 
+  operatorDeployment = builtins.elemAt k8sObjects 1;
+  operatorContainer = builtins.elemAt operatorDeployment.spec.template.spec.containers 0;
+  operatorClusterRoleBinding = builtins.elemAt k8sObjects 5;
+  helmDeployment = lib.recursiveUpdate operatorDeployment {
+    spec.template.spec.containers = [
+      (
+        operatorContainer
+        // {
+          image = "{{ .Values.image.repository }}:{{ .Values.image.tag }}";
+          imagePullPolicy = "{{ .Values.image.pullPolicy }}";
+        }
+      )
+    ];
+  };
+  helmOperatorClusterRoleBinding = lib.recursiveUpdate operatorClusterRoleBinding {
+    subjects = [
+      {
+        kind = "ServiceAccount";
+        name = deployment.operator.serviceAccountName;
+        namespace = "{{ .Release.Namespace }}";
+      }
+    ];
+  };
+
   helmTemplates = pkgs: {
     deployment = renderObjects pkgs "deployment.yaml" [
-      (builtins.elemAt k8sObjects 1)
+      helmDeployment
     ];
     service = renderObjects pkgs "service.yaml" [
       (builtins.elemAt k8sObjects 2)
@@ -688,7 +714,7 @@ let
       (builtins.elemAt k8sObjects 0)
       (builtins.elemAt k8sObjects 3)
       (builtins.elemAt k8sObjects 4)
-      (builtins.elemAt k8sObjects 5)
+      helmOperatorClusterRoleBinding
       (builtins.elemAt k8sObjects 6)
     ];
   };
@@ -736,8 +762,15 @@ let
       installPhase = ''
         mkdir -p $out
         cp ${renderObjects pkgs "athena-manifests.yaml" k8sObjects} $out/athena-manifests.yaml
+        cp ${../../examples/canary/canary.yaml} canary.yaml
         cp ${../../examples/grpo-smoke-template.yaml} grpo-smoke-template.yaml
-        cat $out/athena-manifests.yaml grpo-smoke-template.yaml > $out/manifests-merged.yaml
+        cp ${../../examples/benchmarks/improvement-canary.yaml} improvement-canary.yaml
+        cat \
+          $out/athena-manifests.yaml \
+          canary.yaml \
+          grpo-smoke-template.yaml \
+          improvement-canary.yaml \
+          > $out/manifests-merged.yaml
         mv $out/manifests-merged.yaml $out/athena-manifests.yaml
       '';
     };

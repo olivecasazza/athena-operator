@@ -16,6 +16,8 @@ image:
   pullPolicy: IfNotPresent
   repository: ghcr.io/olivecasazza/athena-operator
   tag: ''
+imagePullSecrets:
+- name: ghcr-pull
 metrics:
   enabled: true
   port: 8080

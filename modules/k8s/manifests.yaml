@@ -5,8 +5,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.8
-    helm.sh/chart: athena-0.1.8
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.11
   name: athena-operator
 ---
 apiVersion: apps/v1
@@ -16,8 +16,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.8
-    helm.sh/chart: athena-0.1.8
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.11
   name: athena
 spec:
   replicas: 1
@@ -63,8 +63,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.8
-    helm.sh/chart: athena-0.1.8
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.11
   name: athena-metrics
 spec:
   ports:
@@ -84,8 +84,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.8
-    helm.sh/chart: athena-0.1.8
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.11
   name: athena-admin
 rules:
   - apiGroups:
@@ -135,8 +135,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.8
-    helm.sh/chart: athena-0.1.8
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.11
   name: athena-operator-role
 rules:
   - apiGroups:
@@ -237,13 +237,13 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.8
-    helm.sh/chart: athena-0.1.8
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.11
   name: athena
 spec:
   endpoints:
     - interval: 15s
-      port: 8080
+      port: metrics
   selector:
     matchLabels:
       app.kubernetes.io/instance: athena
@@ -256,8 +256,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.8
-    helm.sh/chart: athena-0.1.8
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.11
   name: athena-athena-overview
   namespace: monitoring
 spec:
@@ -274,8 +274,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.8
-    helm.sh/chart: athena-0.1.8
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.11
   name: athena-athena-operator-telemetry
   namespace: monitoring
 spec:
@@ -292,8 +292,8 @@ metadata:
     app.kubernetes.io/instance: athena
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
-    app.kubernetes.io/version: 0.1.8
-    helm.sh/chart: athena-0.1.8
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.11
   name: athena-athena-experiment-debugging
   namespace: monitoring
 spec:
@@ -302,6 +302,185 @@ spec:
     matchLabels:
       dashboards: grafana
   json: '{"panels":[{"gridPos":{"h":8,"w":24,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment actions","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action,result))","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment action p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}campaign{{`}}`}} {{`{{`}}phase{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment reconciles","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\",namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{`{{`}}namespace{{`}}`}} {{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Latest Athena dynamic samples","type":"table"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Experiment Debugging","uid":"athena-experiment-debugging"}'
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: athena-workspace
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: longhorn
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: hp-8gb-canary
+spec:
+  runtime:
+    type: pytorch
+    mode: batchJob
+  image: "python:3.11-slim"
+  command:
+    - sh
+    - -c
+    - |
+      set -eu;
+      echo '[canary] runtime image smoke';
+      python - <<'PY'
+      import json
+      import os
+      import pathlib
+      import time
+
+      metrics_path = os.environ.get("ATHENA_METRICS_PATH") or "/workspace/metrics.json"
+      path = pathlib.Path(metrics_path)
+      if not path.is_absolute():
+          path = pathlib.Path(os.environ.get("ATHENA_WORKSPACE_PATH", "/workspace")) / path
+      path.parent.mkdir(parents=True, exist_ok=True)
+
+      experiment = json.loads(os.environ.get("ATHENA_EXPERIMENT_SPEC", "{}"))
+      params = experiment.get("parameters", {})
+      baseline = float(params.get("baselineValBpb", 8.5))
+      iteration = int(params.get("experimentIteration", 0))
+      val_bpb = 1.0
+      metrics = {
+          "status": "completed",
+          "optimizer_steps": 1,
+          "val_bpb": val_bpb,
+          "val_bpb_delta": baseline - val_bpb,
+          "baseline_val_bpb": baseline,
+          "training_seconds": 0.1,
+          "peak_vram_mb": 0.0,
+          "experiment_iteration": iteration,
+          "experiment_tag": params.get("experimentTag", "karpathy-canary"),
+          "parent_experiment_id": params.get("parentExperimentId"),
+          "timestamp": time.time(),
+      }
+      path.write_text(json.dumps(metrics, indent=2))
+      print(path)
+      print(json.dumps(metrics, indent=2))
+      PY
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      nvidia.com/gpu: "1"
+  storage:
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+    createWorkspaceClaim: true
+    workspaceSize: 10Gi
+    workspaceStorageClassName: longhorn
+  scheduling:
+    nodeSelector:
+      kubernetes.io/hostname: contra
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: canary-template
+spec:
+  runtimeProfileRef: hp-8gb-canary
+  source:
+    git:
+      url: "https://github.com/olivecasazza/n-autoresearch"
+      ref: "main"
+  objective:
+    metric: "val_bpb"
+    goal: "minimize"
+  metrics:
+    parser:
+      type: "file"
+      path: "metrics.json"
+  defaults:
+    experimentTag: "karpathy-canary"
+    experimentIteration: 2
+    parentExperimentId: "canary-run-01"
+    baselineValBpb: 8.5
+  parameterSchema:
+    depth:
+      type: integer
+      default: 2
+    deviceBatchSize:
+      type: integer
+      default: 4
+    totalBatchSize:
+      type: integer
+      default: 1024
+    timeBudget:
+      type: integer
+      default: 15
+    experimentTag:
+      type: string
+      default: "karpathy-canary"
+      description: "Logical Karpathy-style experiment tag used to compare a series of runs."
+    experimentIteration:
+      type: integer
+      default: 2
+      description: "Monotonic iteration ID within experimentTag."
+    parentExperimentId:
+      type: string
+      default: "canary-run-01"
+      description: "Previous/baseline Experiment ID used for lineage."
+    baselineValBpb:
+      type: number
+      default: 8.5
+      description: "Previous best validation BPB; lower final val_bpb is an improvement."
+  dashboard:
+    title: "Canary Run Dashboard"
+    metrics:
+      val_bpb:
+        label: "Validation BPB"
+        goal: minimize
+        description: "Final validation BPB for this iteration."
+      val_bpb_delta:
+        label: "BPB improvement"
+        goal: maximize
+        baseline: 0
+        description: "baselineValBpb - val_bpb; positive means this iteration improved."
+      experiment_iteration:
+        label: "Iteration"
+      peak_vram_mb:
+        label: "Peak VRAM (MB)"
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: canary-campaign
+spec:
+  templateRef: canary-template
+  concurrency: 1
+  budget:
+    maxExperiments: 1
+    maxDuration: "10m"
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: Experiment
+metadata:
+  name: canary-run-02
+spec:
+  campaignRef: canary-campaign
+  hypothesis: "Canary test using minimal depth and 15s budget to exercise operator and autoscaler."
+  parameters:
+    depth: 2
+    deviceBatchSize: 4
+    totalBatchSize: 1024
+    timeBudget: 15
+    experimentTag: "karpathy-canary"
+    experimentIteration: 2
+    parentExperimentId: "canary-run-01"
+    baselineValBpb: 8.5
+---
 # Athena UI-ready GRPO smoke template.
 #
 # This is intentionally small enough for a console-launched experiment:
@@ -339,6 +518,9 @@ spec:
   storage:
     workspaceClaimName: "athena-workspace"
     workspaceMountPath: "/workspace"
+    createWorkspaceClaim: true
+    workspaceSize: 10Gi
+    workspaceStorageClassName: longhorn
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: ExperimentTemplate
@@ -408,3 +590,184 @@ spec:
         goal: maximize
         baseline: 50
         description: "Share of validation prompts solved after the tiny training run."
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: MetricSource
+metadata:
+  name: improvement-metrics-json
+spec:
+  sourceType: file
+  path: metrics.json
+  format: json
+  metrics:
+    - name: reward_mean
+      path: $.reward_mean
+      type: number
+      required: true
+    - name: reward_std
+      path: $.reward_std
+      type: number
+      required: true
+    - name: baseline_lift
+      path: $.baseline_lift
+      type: number
+      required: true
+    - name: pass_rate
+      path: $.pass_rate
+      type: number
+      required: true
+    - name: wall_clock_seconds
+      path: $.wall_clock_seconds
+      type: number
+      required: true
+    - name: reproducibility_hash
+      path: $.reproducibility_hash
+      type: string
+      required: true
+  timestampPath: $.created_at
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: cpu-toy-improvement-runner
+spec:
+  runtime:
+    type: custom
+    mode: batchJob
+  image: python:3.11-slim
+  command:
+    - sh
+    - -c
+    - |
+      python - <<'PY'
+      import hashlib
+      import json
+      import os
+      import time
+
+      seed = int(os.environ.get("ATHENA_SEED", "0"))
+      target_kind = os.environ.get("ATHENA_TARGET_KIND", "")
+      target_name = os.environ.get("ATHENA_TARGET_NAME", "")
+      metrics_path = os.environ["ATHENA_METRICS_PATH"]
+
+      baseline = 0.20
+      lift = 0.08 + (seed * 0.005) if target_kind == "Experiment" else 0.0
+      reward_mean = baseline + lift
+      pass_rate = 50.0 + (lift * 100.0)
+      repro = hashlib.sha256(f"{target_kind}:{target_name}:{seed}:{reward_mean}".encode()).hexdigest()
+      metrics = {
+          "reward_mean": round(reward_mean, 6),
+          "reward_std": 0.01,
+          "baseline_lift": round(lift, 6),
+          "pass_rate": round(pass_rate, 3),
+          "wall_clock_seconds": 0.1,
+          "reproducibility_hash": repro,
+          "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+      }
+
+      os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+      with open(metrics_path, "w") as f:
+          json.dump(metrics, f, indent=2)
+      with open("/dev/termination-log", "w") as f:
+          json.dump(metrics, f)
+      print(json.dumps(metrics, sort_keys=True))
+      PY
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  storage:
+    workspaceClaimName: athena-workspace
+    workspaceMountPath: /workspace
+    createWorkspaceClaim: true
+    workspaceSize: 1Gi
+    workspaceStorageClassName: longhorn
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: BenchmarkSuite
+metadata:
+  name: toy-improvement-canary-v1
+spec:
+  taxonomy: researchLoop
+  suiteVersion: "2026-05-24"
+  description: Deterministic canary that proves a candidate Experiment improves over a declared baseline.
+  targetRefPolicy:
+    allowedKinds:
+      - Experiment
+  tasks:
+    - name: deterministic-improvement
+      integration: customCommand
+      labels:
+        costTier: cheap
+        device: cpu
+      metrics:
+        primary: baseline_lift
+        goal: maximize
+        required:
+          - reward_mean
+          - reward_std
+          - baseline_lift
+          - pass_rate
+          - wall_clock_seconds
+          - reproducibility_hash
+      budget:
+        maxWallClock: 2m
+        maxGpuHours: 0
+        maxRetries: 0
+      seeds:
+        values: [1, 2, 3]
+        aggregation: meanStd
+  metricSources:
+    - name: metrics-json
+      metricSourceRef:
+        name: improvement-metrics-json
+  reporting:
+    gates:
+      - metric: baseline_lift
+        operator: ">="
+        value: 0.05
+      - metric: reward_mean
+        operator: ">"
+        value: 0.2
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: Experiment
+metadata:
+  name: toy-improvement-candidate
+spec:
+  campaignRef: canary-campaign
+  hypothesis: Deterministic canary candidate should improve reward over the embedded baseline.
+  parameters:
+    rewardBaseline: 0.2
+    expectedLift: 0.08
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: BenchmarkRun
+metadata:
+  name: toy-improvement-candidate-smoke
+spec:
+  suiteRef:
+    name: toy-improvement-canary-v1
+  targetRef:
+    apiVersion: research.nixlab.io/v1alpha1
+    kind: Experiment
+    name: toy-improvement-candidate
+  mode: smoke
+  runtimeProfileRef:
+    name: cpu-toy-improvement-runner
+  budget:
+    maxWallClock: 2m
+    maxGpuHours: 0
+    maxRetries: 0
+  seedMatrix:
+    seeds: [1, 2, 3]
+    deterministic: true
+  output:
+    workspacePath: /workspace/benchmarks/runs/default/toy-improvement-candidate-smoke
+  promotionPolicy:
+    updateExperimentStatus: true
+  cleanupPolicy:
+    ttlSecondsAfterFinished: 3600
+    retainFailedJobs: true

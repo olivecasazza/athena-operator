@@ -164,14 +164,40 @@
                   },
                   "storage": {
                     "default": {
+                      "createWorkspaceClaim": true,
+                      "workspaceAccessModes": [
+                        "ReadWriteOnce"
+                      ],
                       "workspaceClaimName": "athena-workspace",
-                      "workspaceMountPath": "/workspace"
+                      "workspaceMountPath": "/workspace",
+                      "workspaceSize": "20Gi"
                     },
                     "properties": {
+                      "createWorkspaceClaim": {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      "workspaceAccessModes": {
+                        "default": [
+                          "ReadWriteOnce"
+                        ],
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
                       "workspaceClaimName": {
                         "type": "string"
                       },
                       "workspaceMountPath": {
+                        "type": "string"
+                      },
+                      "workspaceSize": {
+                        "default": "20Gi",
+                        "type": "string"
+                      },
+                      "workspaceStorageClassName": {
+                        "nullable": true,
                         "type": "string"
                       }
                     },
@@ -786,7 +812,6 @@
                           ],
                           "type": "object"
                         },
-                        "default": {},
                         "type": "object"
                       },
                       "title": {
@@ -889,6 +914,57 @@
                       "objectiveName": {
                         "nullable": true,
                         "type": "string"
+                      },
+                      "series": {
+                        "items": {
+                          "properties": {
+                            "goal": {
+                              "type": "string"
+                            },
+                            "iteration": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "objective": {
+                              "type": "string"
+                            },
+                            "points": {
+                              "items": {
+                                "properties": {
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "step": {
+                                    "format": "int64",
+                                    "nullable": true,
+                                    "type": "integer"
+                                  },
+                                  "value": {
+                                    "format": "double",
+                                    "type": "number"
+                                  }
+                                },
+                                "required": [
+                                  "name",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "tag": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "goal",
+                            "iteration",
+                            "objective",
+                            "tag"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
                       }
                     },
                     "type": "object"
@@ -1848,6 +1924,57 @@
                     "nullable": true,
                     "type": "string"
                   },
+                  "metricSeries": {
+                    "items": {
+                      "properties": {
+                        "goal": {
+                          "type": "string"
+                        },
+                        "iteration": {
+                          "format": "int64",
+                          "type": "integer"
+                        },
+                        "objective": {
+                          "type": "string"
+                        },
+                        "points": {
+                          "items": {
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "step": {
+                                "format": "int64",
+                                "nullable": true,
+                                "type": "integer"
+                              },
+                              "value": {
+                                "format": "double",
+                                "type": "number"
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "value"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "tag": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "goal",
+                        "iteration",
+                        "objective",
+                        "tag"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
                   "metricsLink": {
                     "nullable": true,
                     "type": "string"
@@ -1917,6 +2044,57 @@
                         "gpuType": {
                           "nullable": true,
                           "type": "string"
+                        },
+                        "metricSeries": {
+                          "items": {
+                            "properties": {
+                              "goal": {
+                                "type": "string"
+                              },
+                              "iteration": {
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "objective": {
+                                "type": "string"
+                              },
+                              "points": {
+                                "items": {
+                                  "properties": {
+                                    "name": {
+                                      "type": "string"
+                                    },
+                                    "step": {
+                                      "format": "int64",
+                                      "nullable": true,
+                                      "type": "integer"
+                                    },
+                                    "value": {
+                                      "format": "double",
+                                      "type": "number"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                },
+                                "type": "array"
+                              },
+                              "tag": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "goal",
+                              "iteration",
+                              "objective",
+                              "tag"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
                         },
                         "metrics": {
                           "additionalProperties": {

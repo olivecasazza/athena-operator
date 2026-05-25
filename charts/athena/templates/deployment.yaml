@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: athena
     app.kubernetes.io/version: 0.1.10
-    helm.sh/chart: athena-0.1.10
+    helm.sh/chart: athena-0.1.11
   name: athena
 spec:
   replicas: 1
@@ -28,8 +28,8 @@ spec:
               value: athena:admin
             - name: ATHENA_OPERATOR_GROUP
               value: athena:operator
-          image: {{ printf "%s:%s" .Values.image.repository (.Values.image.tag | default "latest") | quote }}
-          imagePullPolicy: IfNotPresent
+          image: '{{ .Values.image.repository }}:{{ .Values.image.tag }}'
+          imagePullPolicy: '{{ .Values.image.pullPolicy }}'
           name: athena
           ports:
             - containerPort: 8080
@@ -41,8 +41,6 @@ spec:
             requests:
               cpu: 100m
               memory: 128Mi
-      {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        - name: ghcr-pull
       serviceAccountName: athena-operator
