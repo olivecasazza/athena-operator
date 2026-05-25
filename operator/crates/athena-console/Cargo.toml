@@ -1,0 +1,13 @@
+[package]
+name = "athena-console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+athena-api.workspace = true
+anyhow.workspace = true
+iced.workspace = true
+kube.workspace = true
+tokio.workspace = true

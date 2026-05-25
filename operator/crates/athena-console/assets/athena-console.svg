@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Athena Console">
+  <rect width="256" height="256" fill="#000000"/>
+  <rect x="18" y="18" width="220" height="220" fill="none" stroke="#e4e4e7" stroke-width="8"/>
+  <path d="M128 38 222 218H184L164 178H92L72 218H34L128 38Zm-20 106h40l-20-43-20 43Z" fill="#f472b6"/>
+  <path d="M58 58h54v16H58V58Zm86 0h54v16h-54V58ZM58 182h54v16H58v-16Zm86 0h54v16h-54v-16Z" fill="#93c5fd"/>
+  <path d="M82 122h92v12H82v-12Z" fill="#e4e4e7"/>
+</svg>
