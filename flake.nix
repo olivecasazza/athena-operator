@@ -232,7 +232,9 @@
                   pkgs.cargo
                   pkgs.fontconfig
                   pkgs.gcc
+                  pkgs.helix
                   pkgs.lapce
+                  pkgs.neovim
                   pkgs.nerd-fonts.monaspace
                   pkgs.pkg-config
                   pkgs.rustc
@@ -249,7 +251,18 @@
                 export LD_LIBRARY_PATH="${consoleLibPath}:''${LD_LIBRARY_PATH:-}"
                 export ATHENA_REPO_ROOT="$PWD"
 
+                if command -v b9s >/dev/null 2>&1; then
+                  export BEAD_EDITOR="b9s"
+                elif command -v hx >/dev/null 2>&1; then
+                  export BEAD_EDITOR="hx"
+                else
+                  export BEAD_EDITOR="nvim"
+                fi
+                export EDITOR="''${EDITOR:-$BEAD_EDITOR}"
+                export VISUAL="''${VISUAL:-$BEAD_EDITOR}"
+
                 echo "Athena dev shell active (repo-local via direnv)."
+                echo "Bead editor: $BEAD_EDITOR"
                 echo "Run: cd operator && cargo run --release -p athena-console"
                 echo "Live-reload: nix run .#athena-console-dev"
               '';
