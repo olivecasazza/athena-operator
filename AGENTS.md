@@ -127,6 +127,19 @@ Do not add or preserve durable product behavior in ad-hoc scripts, local files, 
 - Run workload-only local smoke tests only when explicitly relevant: `uv run experiments/train.py`
 - Do not use local Python scripts as Athena orchestration, status, benchmark, campaign, or deployment paths.
 
+## Jujutsu / Beads
+
+- Use `jj` for small, issue-scoped "bead" changes when the user wants work tracked as independent items.
+- Keep one user-visible problem per bead. If a change fixes multiple unrelated issues, split it before export.
+- Initialize colocated mode once per worktree with `jj git init --colocate` when needed.
+- Inspect current work with `jj status`, `jj diff`, and `jj log`.
+- Name the current bead with `jj describe -m "<scope>: <change>"`.
+- Start the next bead with `jj new`, then immediately give it a description.
+- Jump back to an earlier bead with `jj edit <change-id>`.
+- If a bead is too broad, use `jj split`. If it should fold into its parent, use `jj squash`.
+- When the stack is ready to materialize as git commits, run `jj git export`.
+- Do not use `jj` to hide unrelated changes. Keep the same discipline as with git: minimal diffs, no destructive resets, and no rewriting work the user did not ask to change.
+
 ## Validation
 
 - For CRD/operator changes, run the relevant Rust checks/tests when practical and verify generated CRDs/manifests if affected.
