@@ -251,7 +251,9 @@
                 export LD_LIBRARY_PATH="${consoleLibPath}:''${LD_LIBRARY_PATH:-}"
                 export ATHENA_REPO_ROOT="$PWD"
 
-                if command -v b9s >/dev/null 2>&1; then
+                if [ -n "''${BEAD_EDITOR:-}" ]; then
+                  true
+                elif [ "''${ATHENA_USE_B9S:-0}" = "1" ] && command -v b9s >/dev/null 2>&1; then
                   export BEAD_EDITOR="b9s"
                 elif command -v hx >/dev/null 2>&1; then
                   export BEAD_EDITOR="hx"
@@ -263,6 +265,7 @@
 
                 echo "Athena dev shell active (repo-local via direnv)."
                 echo "Bead editor: $BEAD_EDITOR"
+                echo "Set ATHENA_USE_B9S=1 to prefer b9s when installed."
                 echo "Run: cd operator && cargo run --release -p athena-console"
                 echo "Live-reload: nix run .#athena-console-dev"
               '';
