@@ -1,0 +1,7 @@
+issue_prefix: ac
+issue-prefix: ac
+dolt.auto-start: false
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+
+sync.remote: "git+ssh://git@github.com/olivecasazza/athena-operator.git"
