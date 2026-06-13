@@ -21,6 +21,35 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           craneLib = crane.mkLib pkgs;
+          mardiGras = pkgs.buildGoModule rec {
+            pname = "mardi-gras";
+            version = "0.22.0";
+            src = pkgs.fetchFromGitHub {
+              owner = "quietpublish";
+              repo = "mardi-gras";
+              rev = "v${version}";
+              hash = "sha256-JBiig+kI2X6SZhEb5mAiacLiMI5nIU0klWlBCBFshMo=";
+            };
+            vendorHash = "sha256-FuXR6Cq+BLJ7h5UqFEDJ/BVlWIUpye7GOpiqbhjv6aM=";
+            subPackages = [ "cmd/mg" ];
+            ldflags = [ "-s" "-w" ];
+            postInstall = ''
+              ln -s "$out/bin/mg" "$out/bin/mardi-gras"
+            '';
+          };
+          perles = pkgs.buildGoModule rec {
+            pname = "perles";
+            version = "0.8.6";
+            src = pkgs.fetchFromGitHub {
+              owner = "zjrosen";
+              repo = "perles";
+              rev = "v${version}";
+              hash = "sha256-rSXRxdK9Z5crYyABlyrc3xASikvyaPRQOzU9UyiJJc4=";
+            };
+            vendorHash = "sha256-Z90bsgXyfrz0Wurj0cJG4J5ZoCBp5ED51tVWby5xaOs=";
+            ldflags = [ "-s" "-w" ];
+            doCheck = false;
+          };
           athena = mkDeployment pkgs.lib;
           consoleLibPath = pkgs.lib.makeLibraryPath [
             pkgs.atk
@@ -227,22 +256,27 @@
 
           devShells = {
             default = pkgs.mkShell {
-              packages =
-                [
-                  pkgs.cargo
-                  pkgs.fontconfig
-                  pkgs.gcc
-                  pkgs.helix
-                  pkgs.jujutsu
-                  pkgs.lapce
-                  pkgs.neovim
-                  pkgs.nerd-fonts.monaspace
+              packages = [
+                pkgs.cargo
+                pkgs.curl
+                pkgs.fontconfig
+                pkgs.gcc
+                pkgs.go
+                pkgs.helix
+                pkgs.jujutsu
+                pkgs.lapce
+                pkgs.neovim
+                pkgs.nerd-fonts.monaspace
+                  pkgs.nodejs
+                  mardiGras
+                  perles
                   pkgs.pkg-config
-                  pkgs.rustc
-                  pkgs.watchexec
-                  pkgs.xdg-utils
-                ]
-                ++ consoleBuildInputs;
+                pkgs.rustc
+                pkgs.uv
+                pkgs.watchexec
+                pkgs.xdg-utils
+              ]
+              ++ consoleBuildInputs;
 
               shellHook = ''
                 export KUBECONFIG="''${KUBECONFIG:-$HOME/.kube/config}"
@@ -252,23 +286,7 @@
                 export LD_LIBRARY_PATH="${consoleLibPath}:''${LD_LIBRARY_PATH:-}"
                 export ATHENA_REPO_ROOT="$PWD"
 
-                if [ -n "''${BEAD_EDITOR:-}" ]; then
-                  true
-                elif [ "''${ATHENA_USE_B9S:-0}" = "1" ] && command -v b9s >/dev/null 2>&1; then
-                  export BEAD_EDITOR="b9s"
-                elif command -v hx >/dev/null 2>&1; then
-                  export BEAD_EDITOR="hx"
-                else
-                  export BEAD_EDITOR="nvim"
-                fi
-                export EDITOR="''${EDITOR:-$BEAD_EDITOR}"
-                export VISUAL="''${VISUAL:-$BEAD_EDITOR}"
-
                 echo "Athena dev shell active (repo-local via direnv)."
-                echo "Bead editor: $BEAD_EDITOR"
-                echo "Set ATHENA_USE_B9S=1 to prefer b9s when installed."
-                echo "Bead manager: jj"
-                echo "Try: jj status"
                 echo "Run: cd operator && cargo run --release -p athena-console"
                 echo "Live-reload: nix run .#athena-console-dev"
               '';
