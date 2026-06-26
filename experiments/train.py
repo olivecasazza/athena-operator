@@ -13,6 +13,20 @@ import math
 import time
 from dataclasses import dataclass, asdict
 
+# Athena live metrics: stores training metrics to Prometheus during the run so
+# they surface live in Grafana. Safe no-op when not running under the operator.
+try:
+    from athena_metrics import metrics as _athena_metrics_factory
+
+    _athm = _athena_metrics_factory()
+except Exception:
+
+    class _NoMetrics:
+        def store(self, *args, **kwargs):
+            pass
+
+    _athm = _NoMetrics()
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -545,6 +559,14 @@ while True:
 
     print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
 
+    # Live metrics for Grafana. No per-step label (Prometheus' own scrape
+    # timestamps form the time series); a separate gauge tracks the step.
+    _athm.store("train_loss", debiased_smooth_loss)
+    _athm.store("mfu_percent", mfu)
+    _athm.store("tokens_per_sec", tok_per_sec)
+    _athm.store("learning_rate_mult", lrm)
+    _athm.store("step", step)
+
     if step == 0:
         gc.collect()
         gc.freeze()
@@ -580,3 +602,11 @@ print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
 print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
+
+# Final live values (best-effort; metrics.json / stdout above stay the
+# authoritative summary since a final scrape may race the pod exit).
+_athm.store("val_bpb", val_bpb)
+_athm.store("mfu_percent", steady_state_mfu)
+_athm.store("peak_vram_mb", peak_vram_mb)
+_athm.store("total_tokens_m", total_tokens / 1e6)
+_athm.store("num_steps", step)

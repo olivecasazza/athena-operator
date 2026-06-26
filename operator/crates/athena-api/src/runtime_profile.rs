@@ -36,6 +36,62 @@ pub struct RuntimeProfileSpec {
     pub scheduling: SchedulingProfile,
     #[serde(default)]
     pub policy: RuntimePolicy,
+    #[serde(default)]
+    pub metrics_endpoint: MetricsEndpoint,
+}
+
+/// Live metrics integration for experiment Jobs.
+///
+/// The operator injects the scrape `port`/`path` and (optionally) a Prometheus
+/// query URL into each experiment pod, so training code can transparently
+/// *store* metrics (expose them for scrape) and *retrieve* them for live
+/// display (query Prometheus) during a run. A chart-rendered `PodMonitor`
+/// selects pods labelled `app.kubernetes.io/name=athena-experiment` and scrapes
+/// `port`; the cluster Prometheus discovers it (empty podMonitorSelector).
+///
+/// `metrics.json` in the workspace remains the authoritative final summary;
+/// Prometheus is additive live data, not a replacement. Retrieval that feeds a
+/// control-flow decision must read authoritative CR status / artifacts instead.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsEndpoint {
+    /// Expose live metrics for scraping (default true).
+    #[serde(default = "default_metrics_enabled")]
+    pub enabled: bool,
+    /// Port the experiment exposes Prometheus-text metrics on.
+    #[serde(default = "default_metrics_port")]
+    pub port: i32,
+    /// HTTP path the metrics are served at.
+    #[serde(default = "default_metrics_path")]
+    pub path: String,
+    /// Prometheus HTTP query base URL injected for in-job display retrieval
+    /// (e.g. `http://prometheus-operated.monitoring.svc:9090`). When unset the
+    /// retrieve-for-display path is disabled in the job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prometheus_query_url: Option<String>,
+}
+
+impl Default for MetricsEndpoint {
+    fn default() -> Self {
+        Self {
+            enabled: default_metrics_enabled(),
+            port: default_metrics_port(),
+            path: default_metrics_path(),
+            prometheus_query_url: None,
+        }
+    }
+}
+
+fn default_metrics_enabled() -> bool {
+    true
+}
+
+fn default_metrics_port() -> i32 {
+    9108
+}
+
+fn default_metrics_path() -> String {
+    "/metrics".to_string()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]

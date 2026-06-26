@@ -80,6 +80,14 @@ spec:
       - key: node-role.kubernetes.io/control-plane
         operator: Exists
         effect: NoSchedule
+  # This smoke canary exits fast and does not run the athena_metrics helper, so
+  # it opts OUT of live scraping to avoid a down PodMonitor target. Real
+  # training profiles leave metricsEndpoint at its default (enabled: true) and
+  # use experiments/athena_metrics.py to expose /metrics on :9108; set
+  # prometheusQueryUrl there to also enable in-job display retrieval, e.g.
+  #   prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+  metricsEndpoint:
+    enabled: false
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: ExperimentTemplate

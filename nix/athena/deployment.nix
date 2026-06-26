@@ -456,6 +456,28 @@ let
               h = 8;
             }
           )
+          # Live training curve emitted by the workload via athena_metrics.store
+          # and scraped by the athena-experiment PodMonitor during the run.
+          (timeseriesPanel 5 "Live training loss"
+            ''athena_train_loss{namespace=~"$namespace",experiment=~"$experiment"}''
+            "{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} train_loss"
+            {
+              x = 0;
+              y = 24;
+              w = 12;
+              h = 8;
+            }
+          )
+          (timeseriesPanel 6 "Live throughput / MFU"
+            ''athena_mfu_percent{namespace=~"$namespace",experiment=~"$experiment"}''
+            "{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} mfu%"
+            {
+              x = 12;
+              y = 24;
+              w = 12;
+              h = 8;
+            }
+          )
         ];
       };
     }
@@ -642,6 +664,31 @@ let
         ];
       };
     }
+    # Live experiment-metrics scrape. Experiment Job pods expose a Prometheus
+    # endpoint on the "metrics" container port (injected by the operator from
+    # RuntimeProfile.metricsEndpoint); this PodMonitor scrapes every such pod so
+    # training metrics land in Prometheus during the run and surface in the
+    # Experiment Debugging dashboard. The job emits experiment/campaign labels
+    # on each series, so no relabeling is needed here.
+    {
+      apiVersion = "monitoring.coreos.com/v1";
+      kind = "PodMonitor";
+      metadata = {
+        name = "${fullname}-experiments";
+        inherit labels;
+      };
+      spec = {
+        selector.matchLabels = {
+          "app.kubernetes.io/name" = "athena-experiment";
+        };
+        podMetricsEndpoints = [
+          {
+            port = "metrics";
+            interval = deployment.observability.metrics.serviceMonitor.interval;
+          }
+        ];
+      };
+    }
   ]
   ++ grafanaDashboardsResources;
 
@@ -759,19 +806,17 @@ let
       version = deployment.chart.version;
       dontUnpack = true;
       nativeBuildInputs = [ pkgs.yq-go ];
+      # Emit a single merged manifest FILE as $out (operator/CRDs/observability
+      # objects + example canaries). The generate-k8s-manifests pre-commit hook
+      # does `cp -L result-k8s modules/k8s/manifests.yaml`, so $out must be a
+      # file, not a directory.
       installPhase = ''
-        mkdir -p $out
-        cp ${renderObjects pkgs "athena-manifests.yaml" k8sObjects} $out/athena-manifests.yaml
-        cp ${../../examples/canary/canary.yaml} canary.yaml
-        cp ${../../examples/grpo-smoke-template.yaml} grpo-smoke-template.yaml
-        cp ${../../examples/benchmarks/improvement-canary.yaml} improvement-canary.yaml
         cat \
-          $out/athena-manifests.yaml \
-          canary.yaml \
-          grpo-smoke-template.yaml \
-          improvement-canary.yaml \
-          > $out/manifests-merged.yaml
-        mv $out/manifests-merged.yaml $out/athena-manifests.yaml
+          ${renderObjects pkgs "athena-manifests.yaml" k8sObjects} \
+          ${../../examples/canary/canary.yaml} \
+          ${../../examples/grpo-smoke-template.yaml} \
+          ${../../examples/benchmarks/improvement-canary.yaml} \
+          > $out
       '';
     };
 in

@@ -7,12 +7,12 @@ use athena_api::experiment::{
     Experiment, ExperimentCondition, ExperimentEnvironment, ExperimentMetricPoint,
     ExperimentMetricSeries, ExperimentMetrics, ExperimentPhase, ExperimentStatus,
 };
-use athena_api::experiment_template::ExperimentTemplate;
+use athena_api::experiment_template::{ExperimentTemplate, ObjectiveGoal};
 use athena_api::research_campaign::ResearchCampaign;
 use athena_api::runtime_profile::{ExecutionMode, RuntimeProfile};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
+    Container, ContainerPort, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
     PersistentVolumeClaimVolumeSource, Pod, PodSpec, PodTemplateSpec, ResourceRequirements, Volume,
     VolumeMount, VolumeResourceRequirements,
 };
@@ -185,6 +185,14 @@ async fn ensure_experiment_job(
         )),
         metrics_link: Some("https://grafana.casazza.io/d/athena-athena-experiment-debugging/athena-experiment-debugging".to_string()),
         dashboard: template.spec.dashboard.clone(),
+        // Seed the objective from the authoritative ExperimentTemplate (already
+        // fetched above) so status shows the right metric/goal even before any
+        // metrics arrive, and for workloads that emit no metric_series header.
+        metrics_detail: Some(ExperimentMetrics {
+            objective_name: Some(template.spec.objective.metric.clone()),
+            objective_goal: Some(objective_goal_str(&template.spec.objective.goal).to_string()),
+            ..Default::default()
+        }),
         environment: Some(ExperimentEnvironment {
             namespace: Some(ns.to_string()),
             job_name: Some(job_name),
@@ -308,6 +316,15 @@ fn workspace_ready_condition(ns: &str, claim_name: &str, reason: &str) -> Experi
         reason,
         format!("workspace PVC {ns}/{claim_name} exists for the experiment Job"),
     )
+}
+
+/// Canonical lowercase string for an objective goal, matching the `goal` value
+/// workloads emit in their `metric_series` header.
+fn objective_goal_str(goal: &ObjectiveGoal) -> &'static str {
+    match goal {
+        ObjectiveGoal::Minimize => "minimize",
+        ObjectiveGoal::Maximize => "maximize",
+    }
 }
 
 fn resolve_metrics_path(workspace_path: &str, metrics_path: &str) -> String {
@@ -473,39 +490,36 @@ fn merge_terminal_metrics(
         return (current_metrics, current_detail);
     };
 
+    // Copy every top-level scalar field the workload emitted, keeping the
+    // operator domain-agnostic: a TSP run reports `tour_length`, a finance run
+    // `sharpe_ratio`, an ML run `val_bpb`, etc. (Previously a hardcoded ML
+    // allowlist silently dropped any metric whose name it didn't recognize.)
     let mut metrics = current_metrics;
-    for name in [
-        "val_bpb",
-        "val_bpb_initial",
-        "val_bpb_delta",
-        "baseline_val_bpb",
-        "optimizer_steps",
-        "peak_vram_mb",
-        "training_seconds",
-        "num_params",
-        "improved",
-        "experiment_iteration",
-        "experiment_tag",
-        "parent_experiment_id",
-    ] {
-        if let Some(value) = raw.get(name) {
-            metrics.insert(name.to_string(), value.clone());
-        }
+    let scalars: serde_json::Map<String, Value> = raw
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter(|(_, v)| v.is_number() || v.is_string() || v.is_boolean())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (name, value) in &scalars {
+        metrics.insert(name.clone(), value.clone());
     }
 
-    let latest = json!({
-        "val_bpb": raw.get("val_bpb"),
-        "val_bpb_initial": raw.get("val_bpb_initial"),
-        "val_bpb_delta": raw.get("val_bpb_delta"),
-        "baseline_val_bpb": raw.get("baseline_val_bpb"),
-        "experiment_tag": raw.get("experiment_tag"),
-        "experiment_iteration": raw.get("experiment_iteration"),
-        "parent_experiment_id": raw.get("parent_experiment_id"),
-    });
+    // The full scalar snapshot is the "latest" sample; the workload owns which
+    // metrics it reports, so don't cherry-pick field names.
+    let latest = Value::Object(scalars);
     let series = metric_series(raw);
     let mut detail = current_detail.unwrap_or_default();
-    detail.objective_name = Some("val_bpb".to_string());
-    detail.objective_goal = Some("minimize".to_string());
+    // Objective name/goal come from the workload's own metric_series header,
+    // not a hardcoded `val_bpb`/`minimize`. Leave any prior value untouched if
+    // the workload emitted no series.
+    if let Some(first) = series.first() {
+        detail.objective_name = Some(first.objective.clone());
+        detail.objective_goal = Some(first.goal.clone());
+    }
     detail.latest = Some(latest.clone());
     detail.best = Some(latest);
     detail.metrics_path = workspace_path.map(|path| format!("{path}/metrics.json"));
@@ -757,6 +771,7 @@ fn build_job(
         ),
     ]);
     let spec_json = serde_json::to_string(&experiment.spec).unwrap_or_else(|_| "{}".to_string());
+    let metrics_endpoint = &profile.spec.metrics_endpoint;
 
     Job {
         metadata: ObjectMeta {
@@ -819,7 +834,48 @@ fn build_job(
                                 value: Some(metrics_path.to_string()),
                                 ..Default::default()
                             },
+                            // Live metrics integration. The job exposes a
+                            // Prometheus-text endpoint on ATHENA_METRICS_PORT
+                            // (scraped by the athena-experiment PodMonitor) for
+                            // transparent store, and queries ATHENA_PROMETHEUS_URL
+                            // for live display-retrieve. metrics.json stays the
+                            // authoritative final summary.
+                            EnvVar {
+                                name: "ATHENA_METRICS_PORT".to_string(),
+                                value: Some(metrics_endpoint.port.to_string()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "ATHENA_METRICS_SCRAPE_PATH".to_string(),
+                                value: Some(metrics_endpoint.path.clone()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "ATHENA_METRICS_ENABLED".to_string(),
+                                value: Some(metrics_endpoint.enabled.to_string()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "ATHENA_PROMETHEUS_URL".to_string(),
+                                value: Some(
+                                    metrics_endpoint
+                                        .prometheus_query_url
+                                        .clone()
+                                        .unwrap_or_default(),
+                                ),
+                                ..Default::default()
+                            },
                         ]),
+                        ports: if metrics_endpoint.enabled {
+                            Some(vec![ContainerPort {
+                                name: Some("metrics".to_string()),
+                                container_port: metrics_endpoint.port,
+                                protocol: Some("TCP".to_string()),
+                                ..Default::default()
+                            }])
+                        } else {
+                            None
+                        },
                         resources: Some(resource_requirements(&profile.spec.resources)),
                         volume_mounts: Some(vec![VolumeMount {
                             name: "workspace".to_string(),
@@ -908,4 +964,53 @@ pub fn error_policy(experiment: Arc<Experiment>, err: &Error, _ctx: Arc<Context>
         Duration::ZERO,
     );
     Action::requeue(Duration::from_secs(30))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A generic (non-ML) workload's metrics must survive ingestion: the operator
+    // is domain-agnostic, so an arbitrary scalar like `tour_length` has to land in
+    // status.metrics and the objective must come from the workload's own series.
+    #[test]
+    fn generic_metric_survives_and_objective_from_series() {
+        let raw = json!({
+            "status": "completed",
+            "tour_length": 4.23,
+            "improvement_pct": 12.5,
+            "reproducibility_hash": "abc",
+            "metric_series": {
+                "objective": "tour_length",
+                "goal": "minimize",
+                "points": [{"name": "tour_length", "value": 4.23, "step": 0}],
+            },
+        });
+        let (metrics, detail) =
+            merge_terminal_metrics(BTreeMap::new(), None, Some("/workspace/runs/x"), Some(&raw));
+
+        assert_eq!(metrics.get("tour_length"), Some(&json!(4.23)));
+        assert_eq!(metrics.get("improvement_pct"), Some(&json!(12.5)));
+        // metric_series is an object, not a scalar — it must not be copied flat.
+        assert!(!metrics.contains_key("metric_series"));
+
+        let detail = detail.expect("detail present");
+        assert_eq!(detail.objective_name.as_deref(), Some("tour_length"));
+        assert_eq!(detail.objective_goal.as_deref(), Some("minimize"));
+    }
+
+    // Backward compatibility: the original ML workload's val_bpb still flows.
+    #[test]
+    fn ml_metric_still_ingested() {
+        let raw = json!({
+            "val_bpb": 2.34,
+            "metric_series": {"objective": "val_bpb", "goal": "minimize", "points": []},
+        });
+        let (metrics, detail) = merge_terminal_metrics(BTreeMap::new(), None, None, Some(&raw));
+        assert_eq!(metrics.get("val_bpb"), Some(&json!(2.34)));
+        assert_eq!(
+            detail.unwrap().objective_name.as_deref(),
+            Some("val_bpb")
+        );
+    }
 }

@@ -63,6 +63,38 @@
                   "image": {
                     "type": "string"
                   },
+                  "metricsEndpoint": {
+                    "default": {
+                      "enabled": true,
+                      "path": "/metrics",
+                      "port": 9108
+                    },
+                    "description": "Live metrics integration for experiment Jobs.\n\nThe operator injects the scrape `port`/`path` and (optionally) a Prometheus query URL into each experiment pod, so training code can transparently *store* metrics (expose them for scrape) and *retrieve* them for live display (query Prometheus) during a run. A chart-rendered `PodMonitor` selects pods labelled `app.kubernetes.io/name=athena-experiment` and scrapes `port`; the cluster Prometheus discovers it (empty podMonitorSelector).\n\n`metrics.json` in the workspace remains the authoritative final summary; Prometheus is additive live data, not a replacement. Retrieval that feeds a control-flow decision must read authoritative CR status / artifacts instead.",
+                    "properties": {
+                      "enabled": {
+                        "default": true,
+                        "description": "Expose live metrics for scraping (default true).",
+                        "type": "boolean"
+                      },
+                      "path": {
+                        "default": "/metrics",
+                        "description": "HTTP path the metrics are served at.",
+                        "type": "string"
+                      },
+                      "port": {
+                        "default": 9108,
+                        "description": "Port the experiment exposes Prometheus-text metrics on.",
+                        "format": "int32",
+                        "type": "integer"
+                      },
+                      "prometheusQueryUrl": {
+                        "description": "Prometheus HTTP query base URL injected for in-job display retrieval (e.g. `http://prometheus-operated.monitoring.svc:9090`). When unset the retrieve-for-display path is disabled in the job.",
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
                   "policy": {
                     "default": {
                       "allowCommandOverride": false,

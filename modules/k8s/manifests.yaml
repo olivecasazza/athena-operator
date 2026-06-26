@@ -249,6 +249,24 @@ spec:
       app.kubernetes.io/instance: athena
       app.kubernetes.io/name: athena
 ---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    app.kubernetes.io/instance: athena
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: athena
+    app.kubernetes.io/version: 0.1.10
+    helm.sh/chart: athena-0.1.11
+  name: athena-experiments
+spec:
+  podMetricsEndpoints:
+    - interval: 15s
+      port: metrics
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: athena-experiment
+---
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDashboard
 metadata:
@@ -301,7 +319,7 @@ spec:
   instanceSelector:
     matchLabels:
       dashboards: grafana
-  json: '{"panels":[{"gridPos":{"h":8,"w":24,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment actions","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action,result))","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment action p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}campaign{{`}}`}} {{`{{`}}phase{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment reconciles","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\",namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{`{{`}}namespace{{`}}`}} {{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Latest Athena dynamic samples","type":"table"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Experiment Debugging","uid":"athena-experiment-debugging"}'
+  json: '{"panels":[{"gridPos":{"h":8,"w":24,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment actions","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action,result))","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment action p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}campaign{{`}}`}} {{`{{`}}phase{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment reconciles","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\",namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{`{{`}}namespace{{`}}`}} {{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Latest Athena dynamic samples","type":"table"},{"gridPos":{"h":8,"w":12,"x":0,"y":24},"id":5,"targets":[{"datasource":{"type":"prometheus"},"expr":"athena_train_loss{namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} train_loss"}],"title":"Live training loss","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":24},"id":6,"targets":[{"datasource":{"type":"prometheus"},"expr":"athena_mfu_percent{namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} mfu%"}],"title":"Live throughput / MFU","type":"timeseries"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Experiment Debugging","uid":"athena-experiment-debugging"}'
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -384,6 +402,14 @@ spec:
       - key: node-role.kubernetes.io/control-plane
         operator: Exists
         effect: NoSchedule
+  # This smoke canary exits fast and does not run the athena_metrics helper, so
+  # it opts OUT of live scraping to avoid a down PodMonitor target. Real
+  # training profiles leave metricsEndpoint at its default (enabled: true) and
+  # use experiments/athena_metrics.py to expose /metrics on :9108; set
+  # prometheusQueryUrl there to also enable in-job display retrieval, e.g.
+  #   prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+  metricsEndpoint:
+    enabled: false
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: ExperimentTemplate
