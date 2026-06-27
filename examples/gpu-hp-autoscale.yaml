@@ -1,0 +1,78 @@
+# GPU experiment profile that drives hephaestus bare-metal autoscaling.
+#
+# How the scaling works (athena consumes hephaestus):
+#   1. An Experiment using this RuntimeProfile creates a Job pod that requests
+#      nvidia.com/gpu and selects nvidia.com/gpu.product=Quadro-RTX-4000.
+#   2. When no hp node is powered on, that pod is unschedulable. The
+#      cluster-autoscaler (hephaestus externalgrpc provider) sees the pending
+#      GPU pod, matches it to the hpc-workers node-group template (which
+#      advertises nvidia.com/gpu capacity + nvidia.com/gpu.product), and scales
+#      the pool up -> hephaestus IPMI-powers-on an hp ProLiant.
+#   3. The node joins (tainted nvidia.com/gpu=true:NoSchedule, which this
+#      profile tolerates) and the pod schedules. When idle, the autoscaler
+#      scales the pool back to zero and powers the node off.
+#
+# The product label is the ONLY selector that matches BOTH the CA template and
+# the real node, and it pins to hp's RTX 4000 specifically (not seir's RTX 5000)
+# so GPU demand here always drives the autoscaled pool. Keep it exact:
+# nvidia.com/gpu.product == MetalMachine spec.hardware.gpu.product.
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: gpu-hp-rtx4000
+  namespace: apps
+spec:
+  runtime:
+    type: pytorch
+    mode: batchJob
+  image: "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime"
+  command:
+    - sh
+    - -c
+    - >-
+      python experiments/train.py
+  resources:
+    requests:
+      cpu: "2"
+      memory: "8Gi"
+      nvidia.com/gpu: "1"
+    limits:
+      memory: "16Gi"
+      nvidia.com/gpu: "1"
+  scheduling:
+    # Matches the hephaestus hpc-workers CA template AND the real hp node label;
+    # pins to the autoscaled RTX 4000 pool.
+    nodeSelector:
+      nvidia.com/gpu.product: Quadro-RTX-4000
+    # hp nodes register with nvidia.com/gpu=true:NoSchedule; tolerate it so the
+    # pod can land once hephaestus powers a node on.
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+  storage:
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+    createWorkspaceClaim: true
+    workspaceSize: 20Gi
+    workspaceStorageClassName: longhorn
+  # Live metrics: default-on. The job exposes /metrics on :9108 (scraped by the
+  # athena-experiment PodMonitor) and can query Prometheus for live display.
+  metricsEndpoint:
+    prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: gpu-hp-train
+  namespace: apps
+spec:
+  runtimeProfileRef: gpu-hp-rtx4000
+  source:
+    git:
+      url: "https://github.com/olivecasazza/athena-operator"
+      ref: "main"
+  metrics:
+    parser:
+      type: file
+      path: metrics.json

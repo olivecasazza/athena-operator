@@ -1,4 +1,5 @@
 mod benchmark_reconciler;
+mod campaign_reconciler;
 mod crd;
 pub mod metrics;
 mod reconciler;
@@ -8,6 +9,7 @@ use std::sync::Arc;
 
 use athena_api::benchmark_run::BenchmarkRun;
 use athena_api::experiment::Experiment;
+use athena_api::research_campaign::ResearchCampaign;
 use futures::StreamExt;
 use kube::{
     Api, Client,
@@ -44,7 +46,8 @@ async fn main() -> anyhow::Result<()> {
         client: client.clone(),
     });
     let experiments: Api<Experiment> = Api::all(client.clone());
-    let benchmark_runs: Api<BenchmarkRun> = Api::all(client);
+    let benchmark_runs: Api<BenchmarkRun> = Api::all(client.clone());
+    let campaigns: Api<ResearchCampaign> = Api::all(client);
 
     let experiment_controller = Controller::new(experiments, Config::default())
         .shutdown_on_signal()
@@ -61,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         .run(
             benchmark_reconciler::reconcile,
             benchmark_reconciler::error_policy,
-            ctx,
+            ctx.clone(),
         )
         .for_each(|res| async move {
             match res {
@@ -70,7 +73,26 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-    futures::future::join(experiment_controller, benchmark_controller).await;
+    let campaign_controller = Controller::new(campaigns, Config::default())
+        .shutdown_on_signal()
+        .run(
+            campaign_reconciler::reconcile,
+            campaign_reconciler::error_policy,
+            ctx,
+        )
+        .for_each(|res| async move {
+            match res {
+                Ok(o) => info!(?o, "reconciled ResearchCampaign"),
+                Err(e) => error!(%e, "ResearchCampaign reconcile error"),
+            }
+        });
+
+    futures::future::join3(
+        experiment_controller,
+        benchmark_controller,
+        campaign_controller,
+    )
+    .await;
 
     if let Some(provider) = tracer_provider {
         if let Err(e) = provider.shutdown() {

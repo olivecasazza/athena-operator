@@ -157,6 +157,7 @@ rules:
       - research.nixlab.io
     resources:
       - benchmarkruns
+      - experiments
     verbs:
       - create
       - update

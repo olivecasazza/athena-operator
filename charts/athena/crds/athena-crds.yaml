@@ -611,10 +611,30 @@
                     "nullable": true,
                     "type": "string"
                   },
+                  "bestObjective": {
+                    "description": "Best objective value observed across succeeded experiments (per the template objective goal). Lets you watch the loop improve over iterations.",
+                    "format": "double",
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "controllerVersion": {
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "failedExperiments": {
                     "format": "uint32",
                     "minimum": 0.0,
                     "type": "integer"
+                  },
+                  "observedGeneration": {
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "phase": {
+                    "description": "Loop phase: Running while generating/evaluating, Completed at budget.",
+                    "nullable": true,
+                    "type": "string"
                   },
                   "runningExperiments": {
                     "format": "uint32",
@@ -622,6 +642,13 @@
                     "type": "integer"
                   },
                   "succeededExperiments": {
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "totalExperiments": {
+                    "default": 0,
+                    "description": "Total experiments the campaign has generated so far.",
                     "format": "uint32",
                     "minimum": 0.0,
                     "type": "integer"

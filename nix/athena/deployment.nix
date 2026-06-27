@@ -111,7 +111,12 @@ let
     }
     {
       apiGroups = [ deployment.api.group ];
-      resources = [ "benchmarkruns" ];
+      # benchmarkruns: promoted from succeeded experiments; experiments: generated
+      # by the ResearchCampaign Auto-RL loop (campaign_reconciler).
+      resources = [
+        "benchmarkruns"
+        "experiments"
+      ];
       verbs = [
         "create"
         "update"

@@ -67,4 +67,18 @@ pub struct ResearchCampaignStatus {
     pub failed_experiments: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_experiment: Option<String>,
+    /// Total experiments the campaign has generated so far.
+    #[serde(default)]
+    pub total_experiments: u32,
+    /// Best objective value observed across succeeded experiments (per the
+    /// template objective goal). Lets you watch the loop improve over iterations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_objective: Option<f64>,
+    /// Loop phase: Running while generating/evaluating, Completed at budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_version: Option<String>,
 }
