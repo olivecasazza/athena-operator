@@ -1,0 +1,54 @@
+[package]
+name = "athena-console-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Dioxus (web/wasm) reimplementation of athena-console on the panel-kit
+# workspace shell. The frontend (lib + default bin) is wasm-only at runtime but
+# host-compilable for `cargo check`; the optional `server` feature pulls a tiny
+# axum + kube backend that serves the JSON snapshot endpoints and the built SPA.
+
+[features]
+# Native backend: axum + kube + athena-api. Off by default so the frontend
+# (and `dx build`) never pulls kube into wasm.
+server = [
+    "dep:axum",
+    "dep:kube",
+    "dep:athena-api",
+    "dep:tokio",
+    "dep:tower-http",
+    "dep:anyhow",
+]
+
+[lib]
+# wasm-bindgen needs an rlib; dx builds the default bin against this lib.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "athena-console-web"
+path = "src/main.rs"
+
+[[bin]]
+name = "console-server"
+path = "src/bin/server.rs"
+required-features = ["server"]
+
+[dependencies]
+# Frontend — unconditional. These all host-compile for `cargo check`; reqwest
+# auto-selects the browser fetch backend on wasm32 and a native backend on host.
+dioxus = { version = "0.6", features = ["web"] }
+panel-kit = { path = "/home/olive/Repositories/panel-kit" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+web-sys = { version = "0.3", features = ["Window", "Location"] }
+
+# Backend — optional, gated behind the `server` feature.
+axum = { workspace = true, optional = true }
+kube = { workspace = true, optional = true }
+athena-api = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+tower-http = { version = "0.6", features = ["fs"], optional = true }
