@@ -109,9 +109,17 @@ pub async fn reconcile(campaign: Arc<ResearchCampaign>, ctx: Arc<Context>) -> Re
     if !at_budget {
         let want = concurrency.saturating_sub(running);
         let budget_left = campaign.spec.budget.max_experiments - total;
+        // Hill-climb from the best experiment's actual parameters, not the
+        // template defaults — find the best experiment to read its params.
+        let best_ctx = best.as_ref().and_then(|(bn, _)| {
+            completed
+                .iter()
+                .find(|e| &e.name_any() == bn)
+                .map(|e| (bn.as_str(), &e.spec.parameters))
+        });
         for i in 0..want.min(budget_left) {
             let idx = total + i;
-            let (params, hypothesis) = next_experiment(&template, best.as_ref(), idx);
+            let (params, hypothesis) = next_experiment(&template, best_ctx, idx);
             let exp = build_experiment(&campaign, &name, &ns, idx, params, hypothesis);
             match experiments.create(&PostParams::default(), &exp).await {
                 Ok(_) => created += 1,
@@ -192,14 +200,25 @@ fn numeric_params(base: &BTreeMap<String, Value>) -> Vec<String> {
 /// bookkeeping params (iteration/parent/tag) the runners read from the spec.
 fn next_experiment(
     template: &ExperimentTemplate,
-    best: Option<&(String, f64)>,
+    best: Option<(&str, &BTreeMap<String, Value>)>,
     idx: u32,
 ) -> (BTreeMap<String, Value>, String) {
+    // Base: template defaults + parameter_schema defaults. For non-baseline
+    // experiments, overlay the best experiment's parameters so the hill-climb
+    // builds on the best-so-far rather than always perturbing the default.
     let mut params: BTreeMap<String, Value> = template.spec.defaults.clone();
-    // Seed any parameter_schema defaults not already in `defaults`.
     for (k, spec) in &template.spec.parameter_schema {
         if let Some(d) = &spec.default {
             params.entry(k.clone()).or_insert_with(|| d.clone());
+        }
+    }
+    if idx > 0 {
+        if let Some((_, best_params)) = best {
+            for (k, v) in best_params.iter() {
+                if k != "experimentIteration" && k != "parentExperimentId" {
+                    params.insert(k.clone(), v.clone());
+                }
+            }
         }
     }
 
@@ -376,16 +395,20 @@ mod tests {
     }
 
     #[test]
-    fn hillclimb_perturbs_numeric_param_from_best() {
+    fn hillclimb_perturbs_from_best_params_not_defaults() {
+        // Default lr is 0.1, but the best experiment has lr=0.5 — the climb must
+        // perturb 0.5 (the best), not 0.1 (the default). This is the bug the live
+        // validation caught.
         let t = template_with_default_lr(0.1);
+        let best: BTreeMap<String, Value> = BTreeMap::from([("lr".to_string(), json!(0.5))]);
         let lr = |p: &BTreeMap<String, Value>| value_as_f64(p.get("lr").unwrap()).unwrap();
-        // idx 1, lap 0 -> factor 1.5 -> ~0.15
-        let (params, hyp) = next_experiment(&t, Some(&("c-000".into(), 1.0)), 1);
-        assert!((lr(&params) - 0.15).abs() < 1e-9, "{:?}", params.get("lr"));
-        assert_eq!(params.get("parentExperimentId"), Some(&json!("c-000")));
+        // idx 1, lap 0 -> factor 1.5 -> 0.5*1.5 = 0.75
+        let (params, hyp) = next_experiment(&t, Some(("c-002", &best)), 1);
+        assert!((lr(&params) - 0.75).abs() < 1e-9, "{:?}", params.get("lr"));
+        assert_eq!(params.get("parentExperimentId"), Some(&json!("c-002")));
         assert!(hyp.contains("perturb lr"), "{hyp}");
-        // idx 2 (lap 1, same single key) -> factor 0.5 -> ~0.05
-        let (params2, _) = next_experiment(&t, Some(&("c-000".into(), 1.0)), 2);
-        assert!((lr(&params2) - 0.05).abs() < 1e-9, "{:?}", params2.get("lr"));
+        // idx 2, lap 1 -> factor 0.5 -> 0.5*0.5 = 0.25
+        let (params2, _) = next_experiment(&t, Some(("c-002", &best)), 2);
+        assert!((lr(&params2) - 0.25).abs() < 1e-9, "{:?}", params2.get("lr"));
     }
 }
