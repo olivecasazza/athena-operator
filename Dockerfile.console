@@ -1,0 +1,42 @@
+# Dioxus (wasm SPA) + axum backend image for the new panel-kit athena-console.
+# Builds the SPA with a version-matched dioxus-cli (0.6, matching the dioxus 0.6
+# lib), the console-server binary, and packages both with kubectl (the server
+# proxies manifest YAML via kubectl using the in-cluster ServiceAccount).
+FROM rust:1.88-slim AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      pkg-config libssl-dev git curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+RUN rustup target add wasm32-unknown-unknown
+# dx MUST match the dioxus 0.6 lib version or the SPA build breaks.
+RUN cargo install dioxus-cli --version 0.6.3 --locked
+
+WORKDIR /app
+COPY . .
+
+# Build the wasm SPA (default bin = the Dioxus frontend).
+WORKDIR /app/operator/crates/athena-console-web
+RUN dx build --platform web --release
+
+# Build the native server (serves the SPA + JSON API).
+WORKDIR /app/operator
+RUN cargo build --release --features server --bin console-server -p athena-console-web
+
+# Collect the built SPA (dx 0.6 emits to target/dx/<app>/release/web/public).
+RUN mkdir -p /out/dist && \
+    SPA_INDEX="$(find /app -type f -name index.html -path '*release*' | head -1)" && \
+    test -n "$SPA_INDEX" && \
+    cp -r "$(dirname "$SPA_INDEX")"/. /out/dist/ && \
+    ls -la /out/dist
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && \
+    curl -fsSL -o /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl" && \
+    chmod +x /usr/local/bin/kubectl && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/operator/target/release/console-server /usr/local/bin/console-server
+COPY --from=builder /out/dist /app/dist
+ENV ATHENA_CONSOLE_DIST=/app/dist
+ENV ATHENA_CONSOLE_ADDR=0.0.0.0:3000
+EXPOSE 3000
+CMD ["console-server"]
