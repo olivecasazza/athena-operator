@@ -26,9 +26,26 @@ pub static BENCHMARK_RUNS_TOTAL: Lazy<GaugeVec> = Lazy::new(|| {
     gauge
 });
 
+/// Per-experiment reported metric values, re-published from each Experiment's
+/// `status.metrics` (which the reconciler ingests from the pod termination
+/// message). This is DURABLE regardless of pod lifetime — short-lived experiment
+/// pods are scraped unreliably on :9108, so the dashboard reads this instead.
+pub static EXPERIMENT_METRIC: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "experiment_metric",
+        "Per-experiment reported metric values (re-exported from status.metrics)",
+    )
+    .namespace("athena");
+    let gauge =
+        GaugeVec::new(opts, &["namespace", "experiment", "campaign", "metric"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
 pub fn init() {
     Lazy::force(&EXPERIMENTS_TOTAL);
     Lazy::force(&BENCHMARK_RUNS_TOTAL);
+    Lazy::force(&EXPERIMENT_METRIC);
 }
 
 async fn metrics_handler() -> impl IntoResponse {

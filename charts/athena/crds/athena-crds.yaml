@@ -1,3 +1,6 @@
+Athena dev shell active (repo-local via direnv).
+Run: cd operator && cargo run --release -p athena-console
+Live-reload: nix run .#athena-console-dev
 ---
 {
   "apiVersion": "apiextensions.k8s.io/v1",
@@ -554,6 +557,16 @@
             "properties": {
               "spec": {
                 "properties": {
+                  "benchmarkRuntimeProfileRef": {
+                    "description": "RuntimeProfile (BatchJob mode) the BenchmarkRun executes in. Required for benchmarking to actually run — an Experiment targetRef is not itself a RuntimeProfile, so the run can't fall back to it.",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "benchmarkSuiteRef": {
+                    "description": "Optional BenchmarkSuite to evaluate each succeeded experiment against. When set, the campaign creates a BenchmarkRun per succeeded experiment (targetRef = the Experiment) and DEFERS the Keep/Discard decision to the benchmark's gate results (via promotionPolicy.updateExperimentStatus) instead of stamping it from the raw training objective.",
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "budget": {
                     "default": {
                       "maxDuration": "24h",

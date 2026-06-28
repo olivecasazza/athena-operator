@@ -92,6 +92,8 @@ async fn update_experiment_metrics(ctx: Arc<Context>, ns: &str) -> Result<(), Er
     let experiments: Api<Experiment> = Api::namespaced(ctx.client.clone(), ns);
     let mut counts: BTreeMap<(String, String), f64> = BTreeMap::new();
 
+    // Rebuild both gauges from scratch each pass so removed experiments drop out.
+    metrics::EXPERIMENT_METRIC.reset();
     for experiment in experiments.list(&ListParams::default()).await? {
         let campaign = experiment.spec.campaign_ref.clone();
         let phase = experiment
@@ -99,6 +101,25 @@ async fn update_experiment_metrics(ctx: Arc<Context>, ns: &str) -> Result<(), Er
             .as_ref()
             .map(|status| format!("{:?}", status.phase))
             .unwrap_or_else(|| "Pending".to_string());
+
+        // Re-publish each experiment's reported metrics as a durable gauge so the
+        // dashboard has data even after the short-lived experiment pod is gone.
+        if let Some(status) = experiment.status.as_ref() {
+            let exp_name = experiment.metadata.name.clone().unwrap_or_default();
+            for (metric, value) in &status.metrics {
+                let v = match value {
+                    serde_json::Value::Number(n) => n.as_f64(),
+                    serde_json::Value::String(s) => s.parse().ok(),
+                    _ => None,
+                };
+                if let Some(v) = v {
+                    metrics::EXPERIMENT_METRIC
+                        .with_label_values(&[ns, exp_name.as_str(), campaign.as_str(), metric])
+                        .set(v);
+                }
+            }
+        }
+
         *counts.entry((campaign, phase)).or_insert(0.0) += 1.0;
     }
 

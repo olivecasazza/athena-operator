@@ -18,6 +18,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use athena_api::benchmark_run::{
+    BenchmarkRun, BenchmarkRunOutput, BenchmarkRunSpec, PromotionPolicy,
+};
+use athena_api::common::{LocalObjectReference, TypedObjectReference};
 use athena_api::experiment::{Experiment, ExperimentDecision, ExperimentPhase, ExperimentSpec};
 use athena_api::experiment_template::{ExperimentTemplate, ObjectiveGoal, ObjectiveSpec};
 use athena_api::research_campaign::ResearchCampaign;
@@ -85,20 +89,40 @@ pub async fn reconcile(campaign: Arc<ResearchCampaign>, ctx: Arc<Context>) -> Re
     }
     let total = exps.items.len() as u32;
 
-    // 3. Evaluate: pick best by objective; stamp decisions.
+    // 3. Evaluate: pick best by objective.
     let best = pick_best(&completed, objective);
-    for e in &completed {
-        let en = e.name_any();
-        let want = if Some(en.as_str()) == best.as_ref().map(|b| b.0.as_str()) {
-            ExperimentDecision::Keep
-        } else {
-            ExperimentDecision::Discard
-        };
-        if e.status.as_ref().and_then(|s| s.decision.clone()).as_ref() != Some(&want) {
-            let patch = json!({ "status": { "decision": want } });
-            experiments
-                .patch_status(&en, &PatchParams::apply(MANAGER), &Patch::Merge(&patch))
-                .await?;
+
+    // 3b. Decision. When a benchmark suite is configured, the campaign does NOT
+    // stamp Keep/Discard from the raw training objective — instead it ensures a
+    // BenchmarkRun per succeeded experiment and lets the benchmark's gate results
+    // drive `status.decision` (via promotionPolicy.updateExperimentStatus). Else,
+    // keep the objective-based decision.
+    if let Some(suite) = campaign.spec.benchmark_suite_ref.as_deref() {
+        for e in &completed {
+            ensure_benchmark_run(
+                &ctx,
+                &ns,
+                &campaign,
+                e,
+                suite,
+                campaign.spec.benchmark_runtime_profile_ref.as_deref(),
+            )
+            .await?;
+        }
+    } else {
+        for e in &completed {
+            let en = e.name_any();
+            let want = if Some(en.as_str()) == best.as_ref().map(|b| b.0.as_str()) {
+                ExperimentDecision::Keep
+            } else {
+                ExperimentDecision::Discard
+            };
+            if e.status.as_ref().and_then(|s| s.decision.clone()).as_ref() != Some(&want) {
+                let patch = json!({ "status": { "decision": want } });
+                experiments
+                    .patch_status(&en, &PatchParams::apply(MANAGER), &Patch::Merge(&patch))
+                    .await?;
+            }
         }
     }
 
@@ -293,6 +317,91 @@ fn build_experiment(
         },
         status: None,
     }
+}
+
+/// Create a BenchmarkRun for a succeeded experiment if one doesn't exist yet.
+/// targetRef points at the Experiment; `updateExperimentStatus` lets the
+/// benchmark write the gate-based Keep/Discard verdict back onto the experiment,
+/// which the campaign loop then reads as the decision.
+async fn ensure_benchmark_run(
+    ctx: &Arc<Context>,
+    ns: &str,
+    campaign: &ResearchCampaign,
+    exp: &Experiment,
+    suite: &str,
+    profile: Option<&str>,
+) -> Result<(), Error> {
+    let exp_name = exp.name_any();
+    let run_name = format!("bench-{exp_name}");
+    let runs: Api<BenchmarkRun> = Api::namespaced(ctx.client.clone(), ns);
+    if runs.get_opt(&run_name).await?.is_some() {
+        return Ok(());
+    }
+
+    let owner = OwnerReference {
+        api_version: "research.nixlab.io/v1alpha1".to_string(),
+        kind: "ResearchCampaign".to_string(),
+        name: campaign.name_any(),
+        uid: campaign.uid().unwrap_or_default(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    };
+
+    let run = BenchmarkRun {
+        metadata: ObjectMeta {
+            name: Some(run_name),
+            namespace: Some(ns.to_string()),
+            labels: Some(BTreeMap::from([(
+                CAMPAIGN_LABEL.to_string(),
+                campaign.name_any(),
+            )])),
+            owner_references: Some(vec![owner]),
+            ..Default::default()
+        },
+        spec: BenchmarkRunSpec {
+            suite_ref: LocalObjectReference {
+                name: suite.to_string(),
+                namespace: None,
+            },
+            target_ref: TypedObjectReference {
+                api_version: "research.nixlab.io/v1alpha1".to_string(),
+                kind: "Experiment".to_string(),
+                name: exp_name.clone(),
+                namespace: Some(ns.to_string()),
+            },
+            mode: Default::default(),
+            suspend: false,
+            task_selector: None,
+            runtime_profile_ref: profile.map(|p| LocalObjectReference {
+                name: p.to_string(),
+                namespace: None,
+            }),
+            budget: Default::default(),
+            seed_matrix: None,
+            output: exp
+                .status
+                .as_ref()
+                .and_then(|s| s.workspace_path.clone())
+                .map(|wp| BenchmarkRunOutput {
+                    workspace_path: Some(wp),
+                }),
+            promotion_policy: PromotionPolicy {
+                update_experiment_status: true,
+                block_on_holdout_failure: false,
+            },
+            cleanup_policy: Default::default(),
+            max_parallel_tasks: None,
+        },
+        status: None,
+    };
+
+    match runs.create(&PostParams::default(), &run).await {
+        Ok(_) => {
+            info!(campaign = %campaign.name_any(), experiment = %exp_name, "created BenchmarkRun")
+        }
+        Err(e) => warn!(%e, experiment = %exp_name, "failed to create BenchmarkRun"),
+    }
+    Ok(())
 }
 
 #[cfg(test)]
