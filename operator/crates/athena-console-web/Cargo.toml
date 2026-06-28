@@ -16,6 +16,7 @@ repository.workspace = true
 server = [
     "dep:axum",
     "dep:kube",
+    "dep:k8s-openapi",
     "dep:athena-api",
     "dep:tokio",
     "dep:tower-http",
@@ -48,6 +49,7 @@ web-sys = { version = "0.3", features = ["Window", "Location"] }
 # Backend — optional, gated behind the `server` feature.
 axum = { workspace = true, optional = true }
 kube = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
 athena-api = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }

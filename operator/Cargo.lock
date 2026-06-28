@@ -221,6 +221,7 @@ dependencies = [
  "athena-api",
  "axum",
  "dioxus",
+ "k8s-openapi",
  "kube",
  "panel-kit",
  "reqwest",
