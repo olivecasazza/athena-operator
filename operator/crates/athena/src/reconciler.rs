@@ -3,18 +3,20 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use athena_api::common::FailureClass;
 use athena_api::experiment::{
-    Experiment, ExperimentCondition, ExperimentEnvironment, ExperimentMetricPoint,
-    ExperimentMetricSeries, ExperimentMetrics, ExperimentPhase, ExperimentStatus,
+    CheckpointRef, Experiment, ExperimentArtifacts, ExperimentCondition, ExperimentEnvironment,
+    ExperimentMetricPoint, ExperimentMetricSeries, ExperimentMetrics, ExperimentPhase,
+    ExperimentStatus,
 };
 use athena_api::experiment_template::{ExperimentTemplate, ObjectiveGoal};
 use athena_api::research_campaign::ResearchCampaign;
 use athena_api::runtime_profile::{ExecutionMode, RuntimeProfile};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
-    PersistentVolumeClaimVolumeSource, Pod, PodSpec, PodTemplateSpec, ResourceRequirements, Volume,
-    VolumeMount, VolumeResourceRequirements,
+    Container, ContainerPort, EnvVar, LocalObjectReference, PersistentVolumeClaim,
+    PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, Pod, PodSpec, PodTemplateSpec,
+    ResourceRequirements, SecretVolumeSource, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -425,9 +427,11 @@ async fn reconcile_experiment_status(
         environment.node_names = Some(node_names);
     }
 
-    let (metrics, metrics_detail) = merge_terminal_metrics(
+    let (metrics, metrics_detail, artifacts, latest_checkpoint) = merge_terminal_metrics(
         current.metrics,
         current.metrics_detail,
+        current.artifacts,
+        current.latest_checkpoint,
         current.workspace_path.as_deref(),
         terminal_metrics.as_ref(),
     );
@@ -448,11 +452,11 @@ async fn reconcile_experiment_status(
             environment: Some(environment),
             resources: current.resources,
             metrics_detail,
-            artifacts: current.artifacts,
+            artifacts,
             cost: current.cost,
             conditions: Some(conditions),
             dashboard: current.dashboard,
-            latest_checkpoint: current.latest_checkpoint,
+            latest_checkpoint,
             checkpoints: current.checkpoints,
         },
     )
@@ -505,26 +509,47 @@ fn termination_metrics_json(pod: &Pod) -> Option<Value> {
         .find_map(|message| serde_json::from_str::<Value>(message).ok())
 }
 
+/// Artifact/checkpoint keys the trainer emits in its termination summary. These
+/// are addresses, not metrics — they must not leak into `status.metrics` (or the
+/// `latest`/`best` scalar snapshot); they are routed to artifacts/latestCheckpoint.
+const ARTIFACT_KEYS: [&str; 3] = ["latest_checkpoint", "best_checkpoint", "onnx_uri"];
+
 fn merge_terminal_metrics(
     current_metrics: BTreeMap<String, Value>,
     current_detail: Option<ExperimentMetrics>,
+    current_artifacts: Option<ExperimentArtifacts>,
+    current_latest_checkpoint: Option<CheckpointRef>,
     workspace_path: Option<&str>,
     raw: Option<&Value>,
-) -> (BTreeMap<String, Value>, Option<ExperimentMetrics>) {
+) -> (
+    BTreeMap<String, Value>,
+    Option<ExperimentMetrics>,
+    Option<ExperimentArtifacts>,
+    Option<CheckpointRef>,
+) {
     let Some(raw) = raw else {
-        return (current_metrics, current_detail);
+        return (
+            current_metrics,
+            current_detail,
+            current_artifacts,
+            current_latest_checkpoint,
+        );
     };
 
     // Copy every top-level scalar field the workload emitted, keeping the
     // operator domain-agnostic: a TSP run reports `tour_length`, a finance run
     // `sharpe_ratio`, an ML run `val_bpb`, etc. (Previously a hardcoded ML
     // allowlist silently dropped any metric whose name it didn't recognize.)
+    // Artifact-address keys are excluded — they are not metrics.
     let mut metrics = current_metrics;
     let scalars: serde_json::Map<String, Value> = raw
         .as_object()
         .map(|obj| {
             obj.iter()
-                .filter(|(_, v)| v.is_number() || v.is_string() || v.is_boolean())
+                .filter(|(k, v)| {
+                    !ARTIFACT_KEYS.contains(&k.as_str())
+                        && (v.is_number() || v.is_string() || v.is_boolean())
+                })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()
         })
@@ -551,7 +576,29 @@ fn merge_terminal_metrics(
     detail.series = series;
     detail.last_updated = Some(chrono::Utc::now().to_rfc3339());
 
-    (metrics, Some(detail))
+    // Route artifact addresses out of metrics and into the typed status fields the
+    // trainer writes on success. Keep any prior value if the workload omitted one.
+    let str_field = |key: &str| raw.get(key).and_then(Value::as_str).map(str::to_string);
+    let latest_checkpoint = str_field("latest_checkpoint")
+        .map(|uri| CheckpointRef {
+            uri,
+            ..Default::default()
+        })
+        .or(current_latest_checkpoint);
+    let mut artifacts = current_artifacts.unwrap_or_default();
+    if let Some(uri) = str_field("onnx_uri") {
+        artifacts.onnx_uri = Some(uri);
+    }
+    if let Some(uri) = str_field("best_checkpoint") {
+        artifacts.best_checkpoint_uri = Some(uri);
+    }
+    // The checkpoint root is the directory the operator injects as
+    // ATHENA_CHECKPOINT_DIR; latestCheckpoint.uri points at a resumable subdir.
+    if let Some(path) = workspace_path {
+        artifacts.checkpoints_uri = Some(format!("{path}/checkpoints"));
+    }
+
+    (metrics, Some(detail), Some(artifacts), latest_checkpoint)
 }
 
 fn metric_series(raw: &Value) -> Vec<ExperimentMetricSeries> {
@@ -615,6 +662,20 @@ fn status_from_job_and_pods(
                 "Kubernetes Job completed successfully",
             )],
         );
+    }
+
+    // A pod lost to preemption / node drain / eviction is infrastructure churn,
+    // not a workload failure. As long as the Job hasn't exhausted its backoff
+    // budget it will recreate the pod, so keep the experiment retryable instead
+    // of stamping Failed.
+    if !job_condition_is_true(job, "Failed") {
+        if let Some((reason, message)) = first_preempted_pod(pods) {
+            return (
+                ExperimentPhase::Running,
+                message.clone(),
+                vec![condition("Retrying", "True", reason, message)],
+            );
+        }
     }
 
     if job_condition_is_true(job, "Failed") {
@@ -713,6 +774,44 @@ fn job_condition_is_true(job: &Job, condition_type: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Detect a pod that was terminated by preemption, node deletion/shutdown, or
+/// eviction. Returns `(reason, message)` where `reason` is the `FailureClass`
+/// recorded on the retry condition. The `DisruptionTarget` pod condition is set
+/// by the control plane for scheduler preemption, taint-manager deletion, node
+/// shutdown, and pod GC; `status.reason` covers older kubelet eviction paths.
+fn first_preempted_pod(pods: &[Pod]) -> Option<(String, String)> {
+    let preempted = format!("{:?}", FailureClass::Preempted);
+    pods.iter().find_map(|pod| {
+        let status = pod.status.as_ref()?;
+        if let Some(disruption) = status.conditions.as_ref().and_then(|conditions| {
+            conditions
+                .iter()
+                .find(|c| c.type_ == "DisruptionTarget" && c.status == "True")
+        }) {
+            let detail = disruption
+                .reason
+                .clone()
+                .or_else(|| disruption.message.clone())
+                .unwrap_or_else(|| "DisruptionTarget".to_string());
+            return Some((
+                preempted.clone(),
+                format!("pod disrupted ({detail}); retrying within backoff budget"),
+            ));
+        }
+        let reason = status.reason.as_deref()?;
+        if matches!(
+            reason,
+            "Evicted" | "NodeLost" | "Shutdown" | "NodeShutdown" | "Terminated" | "Preempted"
+        ) {
+            return Some((
+                preempted.clone(),
+                format!("pod {reason}; retrying within backoff budget"),
+            ));
+        }
+        None
+    })
+}
+
 fn first_unschedulable_pod(pods: &[Pod]) -> Option<(String, String)> {
     pods.iter()
         .filter_map(|pod| pod.status.as_ref()?.conditions.as_ref())
@@ -797,6 +896,149 @@ fn build_job(
     ]);
     let spec_json = serde_json::to_string(&experiment.spec).unwrap_or_else(|_| "{}".to_string());
     let metrics_endpoint = &profile.spec.metrics_endpoint;
+    let checkpoint_dir = format!("{workspace_path}/checkpoints");
+
+    // Operator-managed env first, then checkpointing controls, then the
+    // RuntimeProfile's additive env. Operator vars stay authoritative.
+    let mut container_env = vec![
+        EnvVar {
+            name: "ATHENA_EXPERIMENT_SPEC".to_string(),
+            value: Some(spec_json),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "ATHENA_EXPERIMENT".to_string(),
+            value: Some(experiment_name.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "ATHENA_CAMPAIGN".to_string(),
+            value: Some(experiment.spec.campaign_ref.clone()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "ATHENA_NAMESPACE".to_string(),
+            value: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "ATHENA_WORKSPACE_PATH".to_string(),
+            value: Some(workspace_path.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "ATHENA_METRICS_PATH".to_string(),
+            value: Some(metrics_path.to_string()),
+            ..Default::default()
+        },
+        // Live metrics integration. The job exposes a Prometheus-text endpoint on
+        // ATHENA_METRICS_PORT (scraped by the athena-experiment PodMonitor) for
+        // transparent store, and queries ATHENA_PROMETHEUS_URL for live
+        // display-retrieve. metrics.json stays the authoritative final summary.
+        EnvVar {
+            name: "ATHENA_METRICS_PORT".to_string(),
+            value: Some(metrics_endpoint.port.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "ATHENA_METRICS_SCRAPE_PATH".to_string(),
+            value: Some(metrics_endpoint.path.clone()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "ATHENA_METRICS_ENABLED".to_string(),
+            value: Some(metrics_endpoint.enabled.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "ATHENA_PROMETHEUS_URL".to_string(),
+            value: Some(
+                metrics_endpoint
+                    .prometheus_query_url
+                    .clone()
+                    .unwrap_or_default(),
+            ),
+            ..Default::default()
+        },
+        // Where the trainer writes checkpoints; this is the artifacts.checkpointsUri
+        // root, and latestCheckpoint.uri points at a resumable subdir under it.
+        EnvVar {
+            name: "ATHENA_CHECKPOINT_DIR".to_string(),
+            value: Some(checkpoint_dir),
+            ..Default::default()
+        },
+    ];
+    if let Some(policy) = experiment.spec.checkpoint_policy.as_ref() {
+        if let Some(interval) = policy.interval_seconds {
+            container_env.push(EnvVar {
+                name: "ATHENA_CHECKPOINT_INTERVAL".to_string(),
+                value: Some(interval.to_string()),
+                ..Default::default()
+            });
+        }
+        if let Some(resume_from) = policy.resume_from.as_ref() {
+            container_env.push(EnvVar {
+                name: "ATHENA_RESUME_FROM".to_string(),
+                value: Some(resume_from.clone()),
+                ..Default::default()
+            });
+        }
+    }
+    for var in &profile.spec.env {
+        container_env.push(EnvVar {
+            name: var.name.clone(),
+            value: var.value.clone(),
+            ..Default::default()
+        });
+    }
+
+    // Workspace PVC mount plus any RuntimeProfile secret mounts. Volume names are
+    // index-based so two mounts (or the same secret mounted twice) never collide.
+    let mut volume_mounts = vec![VolumeMount {
+        name: "workspace".to_string(),
+        mount_path: profile.spec.storage.workspace_mount_path.clone(),
+        ..Default::default()
+    }];
+    let mut volumes = vec![Volume {
+        name: "workspace".to_string(),
+        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+            claim_name: profile.spec.storage.workspace_claim_name.clone(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }];
+    for (i, mount) in profile.spec.secret_mounts.iter().enumerate() {
+        let volume_name = format!("secret-{i}");
+        volumes.push(Volume {
+            name: volume_name.clone(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(mount.secret_name.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        volume_mounts.push(VolumeMount {
+            name: volume_name,
+            mount_path: mount.mount_path.clone(),
+            sub_path: mount.sub_path.clone(),
+            ..Default::default()
+        });
+    }
+
+    let image_pull_secrets = if profile.spec.image_pull_secrets.is_empty() {
+        None
+    } else {
+        Some(
+            profile
+                .spec
+                .image_pull_secrets
+                .iter()
+                .map(|s| LocalObjectReference {
+                    name: s.name.clone(),
+                })
+                .collect(),
+        )
+    };
 
     Job {
         metadata: ObjectMeta {
@@ -806,7 +1048,9 @@ fn build_job(
             ..Default::default()
         },
         spec: Some(JobSpec {
-            backoff_limit: Some(0),
+            // Small >0 budget so a pod lost to preemption / node scale-down is
+            // recreated instead of failing the whole experiment.
+            backoff_limit: Some(3),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(labels),
@@ -828,69 +1072,7 @@ fn build_job(
                         } else {
                             Some(profile.spec.args.clone())
                         },
-                        env: Some(vec![
-                            EnvVar {
-                                name: "ATHENA_EXPERIMENT_SPEC".to_string(),
-                                value: Some(spec_json),
-                                ..Default::default()
-                            },
-                            EnvVar {
-                                name: "ATHENA_EXPERIMENT".to_string(),
-                                value: Some(experiment_name.to_string()),
-                                ..Default::default()
-                            },
-                            EnvVar {
-                                name: "ATHENA_CAMPAIGN".to_string(),
-                                value: Some(experiment.spec.campaign_ref.clone()),
-                                ..Default::default()
-                            },
-                            EnvVar {
-                                name: "ATHENA_NAMESPACE".to_string(),
-                                value: Some(namespace.to_string()),
-                                ..Default::default()
-                            },
-                            EnvVar {
-                                name: "ATHENA_WORKSPACE_PATH".to_string(),
-                                value: Some(workspace_path.to_string()),
-                                ..Default::default()
-                            },
-                            EnvVar {
-                                name: "ATHENA_METRICS_PATH".to_string(),
-                                value: Some(metrics_path.to_string()),
-                                ..Default::default()
-                            },
-                            // Live metrics integration. The job exposes a
-                            // Prometheus-text endpoint on ATHENA_METRICS_PORT
-                            // (scraped by the athena-experiment PodMonitor) for
-                            // transparent store, and queries ATHENA_PROMETHEUS_URL
-                            // for live display-retrieve. metrics.json stays the
-                            // authoritative final summary.
-                            EnvVar {
-                                name: "ATHENA_METRICS_PORT".to_string(),
-                                value: Some(metrics_endpoint.port.to_string()),
-                                ..Default::default()
-                            },
-                            EnvVar {
-                                name: "ATHENA_METRICS_SCRAPE_PATH".to_string(),
-                                value: Some(metrics_endpoint.path.clone()),
-                                ..Default::default()
-                            },
-                            EnvVar {
-                                name: "ATHENA_METRICS_ENABLED".to_string(),
-                                value: Some(metrics_endpoint.enabled.to_string()),
-                                ..Default::default()
-                            },
-                            EnvVar {
-                                name: "ATHENA_PROMETHEUS_URL".to_string(),
-                                value: Some(
-                                    metrics_endpoint
-                                        .prometheus_query_url
-                                        .clone()
-                                        .unwrap_or_default(),
-                                ),
-                                ..Default::default()
-                            },
-                        ]),
+                        env: Some(container_env),
                         ports: if metrics_endpoint.enabled {
                             Some(vec![ContainerPort {
                                 name: Some("metrics".to_string()),
@@ -902,21 +1084,11 @@ fn build_job(
                             None
                         },
                         resources: Some(resource_requirements(&profile.spec.resources)),
-                        volume_mounts: Some(vec![VolumeMount {
-                            name: "workspace".to_string(),
-                            mount_path: profile.spec.storage.workspace_mount_path.clone(),
-                            ..Default::default()
-                        }]),
+                        volume_mounts: Some(volume_mounts),
                         ..Default::default()
                     }],
-                    volumes: Some(vec![Volume {
-                        name: "workspace".to_string(),
-                        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                            claim_name: profile.spec.storage.workspace_claim_name.clone(),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }]),
+                    volumes: Some(volumes),
+                    image_pull_secrets,
                     node_selector: if profile.spec.scheduling.node_selector.is_empty() {
                         None
                     } else {
@@ -1011,8 +1183,14 @@ mod tests {
                 "points": [{"name": "tour_length", "value": 4.23, "step": 0}],
             },
         });
-        let (metrics, detail) =
-            merge_terminal_metrics(BTreeMap::new(), None, Some("/workspace/runs/x"), Some(&raw));
+        let (metrics, detail, _artifacts, _checkpoint) = merge_terminal_metrics(
+            BTreeMap::new(),
+            None,
+            None,
+            None,
+            Some("/workspace/runs/x"),
+            Some(&raw),
+        );
 
         assert_eq!(metrics.get("tour_length"), Some(&json!(4.23)));
         assert_eq!(metrics.get("improvement_pct"), Some(&json!(12.5)));
@@ -1024,6 +1202,52 @@ mod tests {
         assert_eq!(detail.objective_goal.as_deref(), Some("minimize"));
     }
 
+    // Artifact-address keys the trainer emits on success must be routed to the
+    // typed status fields, NOT leaked into status.metrics or the latest snapshot.
+    #[test]
+    fn checkpoint_and_artifacts_routed_out_of_metrics() {
+        let raw = json!({
+            "val_bpb": 2.34,
+            "latest_checkpoint": "/workspace/runs/c/e/checkpoints/step-100",
+            "best_checkpoint": "/workspace/runs/c/e/checkpoints/best",
+            "onnx_uri": "gs://bucket/model.onnx",
+            "metric_series": {"objective": "val_bpb", "goal": "minimize", "points": []},
+        });
+        let (metrics, detail, artifacts, checkpoint) = merge_terminal_metrics(
+            BTreeMap::new(),
+            None,
+            None,
+            None,
+            Some("/workspace/runs/c/e"),
+            Some(&raw),
+        );
+
+        // Scalar objective still flows as a metric.
+        assert_eq!(metrics.get("val_bpb"), Some(&json!(2.34)));
+        // Artifact addresses must not pollute metrics or the latest/best snapshot.
+        for key in ["latest_checkpoint", "best_checkpoint", "onnx_uri"] {
+            assert!(!metrics.contains_key(key), "{key} leaked into metrics");
+        }
+        let latest = detail.unwrap().latest.unwrap();
+        for key in ["latest_checkpoint", "best_checkpoint", "onnx_uri"] {
+            assert!(latest.get(key).is_none(), "{key} leaked into latest");
+        }
+
+        let checkpoint = checkpoint.expect("latestCheckpoint present");
+        assert_eq!(checkpoint.uri, "/workspace/runs/c/e/checkpoints/step-100");
+
+        let artifacts = artifacts.expect("artifacts present");
+        assert_eq!(artifacts.onnx_uri.as_deref(), Some("gs://bucket/model.onnx"));
+        assert_eq!(
+            artifacts.best_checkpoint_uri.as_deref(),
+            Some("/workspace/runs/c/e/checkpoints/best")
+        );
+        assert_eq!(
+            artifacts.checkpoints_uri.as_deref(),
+            Some("/workspace/runs/c/e/checkpoints")
+        );
+    }
+
     // Backward compatibility: the original ML workload's val_bpb still flows.
     #[test]
     fn ml_metric_still_ingested() {
@@ -1031,7 +1255,8 @@ mod tests {
             "val_bpb": 2.34,
             "metric_series": {"objective": "val_bpb", "goal": "minimize", "points": []},
         });
-        let (metrics, detail) = merge_terminal_metrics(BTreeMap::new(), None, None, Some(&raw));
+        let (metrics, detail, _artifacts, _checkpoint) =
+            merge_terminal_metrics(BTreeMap::new(), None, None, None, None, Some(&raw));
         assert_eq!(metrics.get("val_bpb"), Some(&json!(2.34)));
         assert_eq!(
             detail.unwrap().objective_name.as_deref(),
