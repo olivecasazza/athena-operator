@@ -38,6 +38,32 @@ pub struct RuntimeProfileSpec {
     pub policy: RuntimePolicy,
     #[serde(default)]
     pub metrics_endpoint: MetricsEndpoint,
+    /// Image pull secrets for private registries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_pull_secrets: Vec<crate::common::LocalObjectReference>,
+    /// Plain name/value environment variables injected into the job container.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<EnvVar>,
+    /// Secrets mounted as files (e.g. a GCS service-account key).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_mounts: Vec<SecretMount>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvVar {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretMount {
+    pub secret_name: String,
+    pub mount_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_path: Option<String>,
 }
 
 /// Live metrics integration for experiment Jobs.

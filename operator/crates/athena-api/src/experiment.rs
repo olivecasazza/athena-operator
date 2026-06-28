@@ -25,6 +25,31 @@ pub struct ExperimentSpec {
     pub parameters: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch: Option<PatchSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_policy: Option<CheckpointPolicy>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_from: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointRef {
+    pub uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_value: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
@@ -74,6 +99,10 @@ pub struct ExperimentStatus {
     pub conditions: Option<Vec<ExperimentCondition>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard: Option<crate::experiment_template::DashboardSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_checkpoint: Option<CheckpointRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<CheckpointRef>,
 }
 
 // --- Denormalized status sub-types ---
@@ -168,6 +197,10 @@ pub struct ExperimentArtifacts {
     pub reports_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onnx_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_checkpoint_uri: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]

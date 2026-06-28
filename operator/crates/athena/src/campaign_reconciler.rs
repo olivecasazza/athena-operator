@@ -314,6 +314,7 @@ fn build_experiment(
             hypothesis,
             parameters,
             patch: None,
+            checkpoint_policy: None,
         },
         status: None,
     }
@@ -426,6 +427,7 @@ mod tests {
                 hypothesis: String::new(),
                 parameters: BTreeMap::new(),
                 patch: None,
+                checkpoint_policy: None,
             },
             status: Some(ExperimentStatus {
                 phase,

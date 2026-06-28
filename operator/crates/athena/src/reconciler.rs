@@ -388,6 +388,8 @@ async fn reconcile_experiment_status(
                     artifacts: current.artifacts,
                     cost: current.cost,
                     dashboard: current.dashboard,
+                    latest_checkpoint: current.latest_checkpoint,
+                    checkpoints: current.checkpoints,
                     message: Some(format!("expected Kubernetes Job {job_name} was not found")),
                     conditions: Some(vec![condition(
                         "JobObserved",
@@ -450,6 +452,8 @@ async fn reconcile_experiment_status(
             cost: current.cost,
             conditions: Some(conditions),
             dashboard: current.dashboard,
+            latest_checkpoint: current.latest_checkpoint,
+            checkpoints: current.checkpoints,
         },
     )
     .await?;
