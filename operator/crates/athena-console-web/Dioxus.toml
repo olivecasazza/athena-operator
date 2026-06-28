@@ -1,0 +1,13 @@
+# dioxus-cli (dx) config for the web build.
+# Build:  dx build --platform web --release   (outputs to ./dist)
+# Serve:  dx serve --platform web             (dev, hot-reload)
+# The console-server bin (cargo run --features server) serves ./dist + the API.
+[application]
+name = "athena-console-web"
+default_platform = "web"
+
+[web.app]
+title = "Athena Console"
+
+[web.watcher]
+reload_html = true

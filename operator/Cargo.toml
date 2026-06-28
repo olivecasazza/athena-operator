@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/athena", "crates/athena-api", "crates/athena-console"]
+members = [
+    "crates/athena",
+    "crates/athena-api",
+    "crates/athena-console",
+    "crates/athena-console-web",
+]
 
 [workspace.package]
 version = "0.1.0"
