@@ -20,10 +20,17 @@ use athena_api::research_campaign::ResearchCampaign;
 use athena_api::runtime_profile::RuntimeProfile;
 use athena_console_web::models::{ClusterSnapshot, ResourceSummary, TemplateSummary};
 use axum::{Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::get};
+use k8s_openapi::api::batch::v1::Job;
 use kube::api::{Api, ListParams};
 use kube::{Client, ResourceExt};
+use std::collections::HashMap;
 use std::process::Command;
 use tower_http::services::ServeDir;
+
+/// k8s `Time` → epoch-millis string (for scoping the Grafana embed).
+fn to_ms(t: &Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>) -> Option<String> {
+    t.as_ref().map(|x| x.0.timestamp_millis().to_string())
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -33,8 +40,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/snapshot", get(snapshot))
-        .route("/api/manifest/{namespace}/{kind}/{name}", get(manifest))
-        .route("/api/template/{namespace}/{name}", get(template))
+        .route("/api/manifest/:namespace/:kind/:name", get(manifest))
+        .route("/api/template/:namespace/:name", get(template))
         .fallback_service(ServeDir::new(dist));
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -91,22 +98,44 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
     let templates_api = Api::<ExperimentTemplate>::all(client.clone());
     let suites_api = Api::<BenchmarkSuite>::all(client.clone());
     let runs_api = Api::<BenchmarkRun>::all(client.clone());
+    let jobs_api = Api::<Job>::all(client.clone());
     let profiles_api = Api::<RuntimeProfile>::all(client);
 
-    let (exp_list, campaign_list, tpl_list, suite_list, run_list, profile_list) = tokio::try_join!(
-        experiments_api.list(&lp),
-        campaigns_api.list(&lp),
-        templates_api.list(&lp),
-        suites_api.list(&lp),
-        runs_api.list(&lp),
-        profiles_api.list(&lp),
-    )?;
+    let (exp_list, campaign_list, tpl_list, suite_list, run_list, profile_list, job_list) =
+        tokio::try_join!(
+            experiments_api.list(&lp),
+            campaigns_api.list(&lp),
+            templates_api.list(&lp),
+            suites_api.list(&lp),
+            runs_api.list(&lp),
+            profiles_api.list(&lp),
+            jobs_api.list(&lp),
+        )?;
+
+    // Run windows from the experiment Jobs (exp-<name>) so the embed can scope its
+    // Grafana time range to when the experiment actually ran.
+    let job_times: HashMap<String, (Option<String>, Option<String>)> = job_list
+        .items
+        .into_iter()
+        .filter_map(|j| {
+            let name = j.metadata.name.clone()?;
+            let st = j.status.as_ref();
+            Some((
+                name,
+                (
+                    st.and_then(|s| to_ms(&s.start_time)),
+                    st.and_then(|s| to_ms(&s.completion_time)),
+                ),
+            ))
+        })
+        .collect();
 
     let experiments = exp_list
         .items
         .into_iter()
         .map(|e| {
             let status = e.status.as_ref();
+            let jt = job_times.get(&format!("exp-{}", e.name_any())).cloned();
             ResourceSummary {
                 namespace: e.namespace().unwrap_or_else(|| "default".to_string()),
                 name: e.name_any(),
@@ -120,6 +149,8 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 workspace_path: status.and_then(|s| s.workspace_path.clone()),
                 logs_link: status.and_then(|s| s.logs_link.clone()),
                 metrics_link: status.and_then(|s| s.metrics_link.clone()),
+                started_at: jt.as_ref().and_then(|(s, _)| s.clone()),
+                ended_at: jt.as_ref().and_then(|(_, en)| en.clone()),
             }
         })
         .collect();
@@ -150,6 +181,9 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 workspace_path: None,
                 logs_link: None,
                 metrics_link: None,
+                // Campaign window: created → now (ended None ⇒ embed uses "now").
+                started_at: to_ms(&c.metadata.creation_timestamp),
+                ended_at: None,
             }
         })
         .collect();
@@ -184,6 +218,8 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             workspace_path: None,
             logs_link: None,
             metrics_link: None,
+            started_at: None,
+            ended_at: None,
         })
         .collect();
 
@@ -212,6 +248,8 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                     .and_then(|o| o.workspace_path.clone()),
                 logs_link: status.and_then(|s| s.logs_link.clone()),
                 metrics_link: status.and_then(|s| s.metrics_link.clone()),
+                started_at: None,
+                ended_at: None,
             }
         })
         .collect();
@@ -235,6 +273,8 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             workspace_path: None,
             logs_link: None,
             metrics_link: None,
+            started_at: None,
+            ended_at: None,
         })
         .collect();
 

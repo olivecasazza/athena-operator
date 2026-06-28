@@ -38,6 +38,12 @@ pub struct ResourceSummary {
     pub logs_link: Option<String>,
     #[serde(default)]
     pub metrics_link: Option<String>,
+    /// Run-window start as epoch-millis string (for scoping the Grafana embed).
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// Run-window end as epoch-millis string; None = still running (use "now").
+    #[serde(default)]
+    pub ended_at: Option<String>,
 }
 
 impl ResourceSummary {
