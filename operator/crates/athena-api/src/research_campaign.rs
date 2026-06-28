@@ -40,6 +40,14 @@ pub struct ResearchCampaignSpec {
     /// RuntimeProfile, so the run can't fall back to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark_runtime_profile_ref: Option<String>,
+
+    /// Population size for population-based training (PBT) strategies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub population_size: Option<u32>,
+
+    /// Perturbation factor applied to hyperparameters during PBT exploit/explore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perturb_factor: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]

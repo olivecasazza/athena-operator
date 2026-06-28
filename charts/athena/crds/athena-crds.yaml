@@ -60,8 +60,46 @@
                     },
                     "type": "array"
                   },
+                  "env": {
+                    "description": "Plain name/value environment variables injected into the job container.",
+                    "items": {
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "nullable": true,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
                   "image": {
                     "type": "string"
+                  },
+                  "imagePullSecrets": {
+                    "description": "Image pull secrets for private registries.",
+                    "items": {
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "namespace": {
+                          "nullable": true,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
                   },
                   "metricsEndpoint": {
                     "default": {
@@ -193,6 +231,29 @@
                       }
                     },
                     "type": "object"
+                  },
+                  "secretMounts": {
+                    "description": "Secrets mounted as files (e.g. a GCS service-account key).",
+                    "items": {
+                      "properties": {
+                        "mountPath": {
+                          "type": "string"
+                        },
+                        "secretName": {
+                          "type": "string"
+                        },
+                        "subPath": {
+                          "nullable": true,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "mountPath",
+                        "secretName"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
                   },
                   "storage": {
                     "default": {
@@ -591,6 +652,19 @@
                     "minimum": 0.0,
                     "type": "integer"
                   },
+                  "perturbFactor": {
+                    "description": "Perturbation factor applied to hyperparameters during PBT exploit/explore.",
+                    "format": "double",
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "populationSize": {
+                    "description": "Population size for population-based training (PBT) strategies.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
                   "strategy": {
                     "default": {
                       "type": "heuristic"
@@ -736,6 +810,28 @@
                   "campaignRef": {
                     "type": "string"
                   },
+                  "checkpointPolicy": {
+                    "nullable": true,
+                    "properties": {
+                      "intervalSeconds": {
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "resumeFrom": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "retain": {
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
                   "hypothesis": {
                     "type": "string"
                   },
@@ -776,11 +872,19 @@
                   "artifacts": {
                     "nullable": true,
                     "properties": {
+                      "bestCheckpointUri": {
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "checkpointsUri": {
                         "nullable": true,
                         "type": "string"
                       },
                       "metricsUri": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "onnxUri": {
                         "nullable": true,
                         "type": "string"
                       },
@@ -798,6 +902,35 @@
                       }
                     },
                     "type": "object"
+                  },
+                  "checkpoints": {
+                    "items": {
+                      "properties": {
+                        "objectiveValue": {
+                          "format": "double",
+                          "nullable": true,
+                          "type": "number"
+                        },
+                        "step": {
+                          "format": "uint64",
+                          "minimum": 0.0,
+                          "nullable": true,
+                          "type": "integer"
+                        },
+                        "timestamp": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "uri": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "uri"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
                   },
                   "conditions": {
                     "items": {
@@ -946,6 +1079,33 @@
                   "jobName": {
                     "nullable": true,
                     "type": "string"
+                  },
+                  "latestCheckpoint": {
+                    "nullable": true,
+                    "properties": {
+                      "objectiveValue": {
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
+                      "step": {
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "timestamp": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "uri": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "uri"
+                    ],
+                    "type": "object"
                   },
                   "logsLink": {
                     "nullable": true,
