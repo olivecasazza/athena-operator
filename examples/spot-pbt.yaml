@@ -1,0 +1,173 @@
+# Spot robotics PBT campaign for athena.
+#
+# WARM-START / PBT FLOW
+# ---------------------
+# This campaign runs Population-Based Training over the Spot Rapier locomotion
+# trainer. athena owns the search loop — each trainer pod runs a SINGLE trial
+# (note `--no-grid` in the command: no in-process Tune grid). athena spawns a
+# population of `populationSize` Experiments, each a Job built from the
+# spot-trainer-gpu RuntimeProfile, with a distinct point in `parameterSchema`
+# (reward weights) injected as parameters.
+#
+# Population-Based Training loop (strategy.type: pbt):
+#   1. Seed the population with `populationSize` Experiments, each perturbing the
+#      reward weights below from their walk-preset defaults.
+#   2. Each Experiment trains for an interval, periodically writing a checkpoint.
+#      The operator honors `checkpointPolicy` and snapshots the workspace
+#      checkpoint dir, retaining the most recent `retain` copies per trial.
+#   3. At each PBT exploit/explore step, low-performers (by `objective.metric`)
+#      are killed and replaced by clones of high-performers WARM-STARTED from the
+#      winner's latest checkpoint, with reward weights re-perturbed.
+#   4. Repeat until `budget.maxExperiments` or `budget.maxDuration` is hit. The
+#      best trial (highest reward_mean) is the campaign result.
+#
+# TRAINER IMAGE CONTRACT (from the trainer track)
+# -----------------------------------------------
+# The image ghcr.io/olivecasazza/spot-rapier-trainer:v23-spread MUST honor two
+# operator-injected env vars (athena sets these per Experiment — do NOT set them
+# manually in the RuntimeProfile env):
+#   - ATHENA_CHECKPOINT_DIR : directory under the RWX workspace the trainer
+#     writes checkpoints to. The operator snapshots/retains from here per
+#     `checkpointPolicy`.
+#   - ATHENA_RESUME_FROM    : path to a parent trial's checkpoint to warm-start
+#     from. Set on exploit/clone; unset on fresh seeds. The trainer must resume
+#     algorithm + optimizer state from it when present.
+# Reward weights perturbed by PBT are injected as parameters (the trainer reads
+# them as the env.py REWARD_PRESETS["walk"] overrides).
+#
+# NOTE ON SCHEMA: `checkpointPolicy`, `imagePullSecrets`, `env`, `secretMounts`,
+# and `strategy.populationSize` are part of the checkpointing+PBT operator track.
+# `env`/`secretMounts` shapes here are conventional k8s-flavored guesses pending
+# that track landing; reconcile field names against the real CRD before applying.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: spot-trainer-gpu
+  namespace: apps
+spec:
+  runtime:
+    type: pytorch
+    mode: batchJob
+  image: "ghcr.io/olivecasazza/spot-rapier-trainer:v23-spread"
+  # Private GHCR image — pull secret lives in the apps namespace.
+  imagePullSecrets:
+    - name: ghcr-pull
+  # Single-trial run: athena owns the search, so no in-process grid/sweep and no
+  # wandb (athena collects metrics via the file parser + PodMonitor instead).
+  command:
+    - python3
+    - train_rapier.py
+    - --behavior
+    - walk
+    - --no-grid
+    - --no-wandb
+  resources:
+    requests:
+      # RLlib env-runners are CPU-bound (physics rollouts), so request generously.
+      cpu: "16"
+      memory: "24Gi"
+      nvidia.com/gpu: "1"
+    limits:
+      memory: "32Gi"
+      nvidia.com/gpu: "1"
+  scheduling:
+    # Pin to hp's autoscaled RTX 4000 pool (see gpu-hp-autoscale.yaml).
+    nodeSelector:
+      nvidia.com/gpu.product: Quadro-RTX-4000
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+  storage:
+    # Shared RWX NFS workspace: PBT clones warm-start from sibling trials'
+    # checkpoints, so every trial must see the same workspace. Claim is
+    # pre-provisioned (createWorkspaceClaim: false).
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+    createWorkspaceClaim: false
+    workspaceAccessModes:
+      - ReadWriteMany
+    workspaceStorageClassName: nfs
+  # GCS service-account key for uploading rerun/checkpoint artifacts.
+  env:
+    - name: GOOGLE_APPLICATION_CREDENTIALS
+      value: /var/run/secrets/gcs/key.json
+    - name: GCS_BUCKET
+      value: nixlab-spot-reruns
+  secretMounts:
+    - secretName: spot-training-sa
+      mountPath: /var/run/secrets/gcs/key.json
+      subPath: key.json
+  # NOTE: checkpointPolicy is an ExperimentSpec field, not a RuntimeProfile one.
+  # The campaign sets each PBT child's checkpointPolicy.resumeFrom = the best
+  # trial's status.latestCheckpoint.uri (warm-start) automatically; checkpoint
+  # cadence uses the trainer's default (ATHENA_CHECKPOINT_INTERVAL is optional).
+  metricsEndpoint:
+    prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: spot-walk
+  namespace: apps
+spec:
+  runtimeProfileRef: spot-trainer-gpu
+  source:
+    git:
+      url: "https://github.com/olivecasazza/spot-src"
+      ref: "main"
+  objective:
+    # Flat metrics.json key the file parser reads (RLlib
+    # env_runners/episode_reward_mean, flattened to metrics/reward_mean).
+    metric: "reward_mean"
+    goal: "maximize"
+  metrics:
+    parser:
+      type: "file"
+      path: "metrics.json"
+  # Reward weights PBT perturbs. Defaults are the env.py REWARD_PRESETS["walk"]
+  # values; PBT explores around these.
+  defaults:
+    velocity: 1.0
+    action_rate: 0.01
+    orientation: 1.0
+  parameterSchema:
+    velocity:
+      type: number
+      description: "Weight on velocity-command tracking reward (forward+lateral)."
+      default: 1.0
+    action_rate:
+      type: number
+      description: "Penalty weight on action delta between steps (smoothness)."
+      default: 0.01
+    orientation:
+      type: number
+      description: "Penalty weight on base roll+yaw deviation (stay upright)."
+      default: 1.0
+  dashboard:
+    title: "Spot Walk PBT"
+    metrics:
+      reward_mean:
+        label: "Episode reward mean"
+        unit: score
+        goal: maximize
+        description: "Primary PBT objective; mean episode reward across env-runners."
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: spot-walk-pbt
+  namespace: apps
+spec:
+  templateRef: spot-walk
+  strategy:
+    type: pbt
+  # PBT knobs (ResearchCampaignSpec, top-level): population to keep running, and
+  # the multiplicative perturbation applied to reward weights per exploit/explore.
+  populationSize: 4
+  perturbFactor: 1.2
+  concurrency: 4
+  budget:
+    maxExperiments: 16
+    maxDuration: "24h"
