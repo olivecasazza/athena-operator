@@ -33,8 +33,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/snapshot", get(snapshot))
-        .route("/api/manifest/{namespace}/{kind}/{name}", get(manifest))
-        .route("/api/template/{namespace}/{name}", get(template))
+        .route("/api/manifest/:namespace/:kind/:name", get(manifest))
+        .route("/api/template/:namespace/:name", get(template))
         .fallback_service(ServeDir::new(dist));
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
