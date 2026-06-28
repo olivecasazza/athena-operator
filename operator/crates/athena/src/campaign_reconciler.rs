@@ -6,9 +6,16 @@
 //!   3. Evaluate succeeded experiments against the objective, pick the best, and
 //!      stamp each one's `status.decision` (Keep on the best, Discard otherwise).
 //!      The experiment reconciler owns phase/metrics; the campaign owns decision.
-//!   4. If under `budget.maxExperiments` and below `concurrency`, generate the
-//!      next experiment(s) via the strategy (heuristic hill-climb from the best:
-//!      baseline from template defaults, then perturb one numeric parameter).
+//!   4. If under `budget.maxExperiments` and below the concurrency target,
+//!      generate the next experiment(s) via the strategy:
+//!        - "heuristic": hill-climb from the best (baseline from template
+//!          defaults, then perturb one numeric parameter per child).
+//!        - "pbt": population-based training. Each child warm-starts weights
+//!          from the best succeeded experiment's `status.latestCheckpoint`
+//!          (`spec.checkpointPolicy.resumeFrom`), inherits the best's
+//!          hyperparameters, and explores by perturbing every numeric param by
+//!          `spec.perturbFactor` (up or 1/factor down). Concurrency target is
+//!          `spec.populationSize` when set, else `spec.concurrency`.
 //!   5. Update campaign status (counts, bestExperiment, bestObjective, phase).
 //!
 //! Experiments are created with an ownerReference to the campaign (so they are
@@ -22,7 +29,9 @@ use athena_api::benchmark_run::{
     BenchmarkRun, BenchmarkRunOutput, BenchmarkRunSpec, PromotionPolicy,
 };
 use athena_api::common::{LocalObjectReference, TypedObjectReference};
-use athena_api::experiment::{Experiment, ExperimentDecision, ExperimentPhase, ExperimentSpec};
+use athena_api::experiment::{
+    CheckpointPolicy, Experiment, ExperimentDecision, ExperimentPhase, ExperimentSpec,
+};
 use athena_api::experiment_template::{ExperimentTemplate, ObjectiveGoal, ObjectiveSpec};
 use athena_api::research_campaign::ResearchCampaign;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -38,6 +47,8 @@ const MANAGER: &str = "athena-campaign";
 const CAMPAIGN_LABEL: &str = "athena.nixlab.io/campaign";
 /// Multiplicative step for the hill-climb perturbation of a numeric parameter.
 const STEP: f64 = 0.5;
+/// Default PBT perturbation factor: explore at 1.2x up / ~0.83x (1/1.2) down.
+const PBT_FACTOR: f64 = 1.2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -127,24 +138,50 @@ pub async fn reconcile(campaign: Arc<ResearchCampaign>, ctx: Arc<Context>) -> Re
     }
 
     // 4. Generate next experiments within budget + concurrency.
+    // PBT runs a population at once: its concurrency target is populationSize
+    // when set, falling back to spec.concurrency. Heuristic uses concurrency.
+    let is_pbt = campaign.spec.strategy.strategy_type == "pbt";
     let at_budget = total >= campaign.spec.budget.max_experiments;
-    let concurrency = campaign.spec.concurrency.max(1);
+    let concurrency = if is_pbt {
+        campaign
+            .spec
+            .population_size
+            .unwrap_or(campaign.spec.concurrency)
+            .max(1)
+    } else {
+        campaign.spec.concurrency.max(1)
+    };
     let mut created = 0u32;
     if !at_budget {
         let want = concurrency.saturating_sub(running);
         let budget_left = campaign.spec.budget.max_experiments - total;
-        // Hill-climb from the best experiment's actual parameters, not the
-        // template defaults — find the best experiment to read its params.
-        let best_ctx = best.as_ref().and_then(|(bn, _)| {
-            completed
-                .iter()
-                .find(|e| &e.name_any() == bn)
-                .map(|e| (bn.as_str(), &e.spec.parameters))
-        });
+        // The best succeeded experiment is the seed for both strategies: its
+        // params drive perturbation and (for PBT) its latest checkpoint warm-
+        // starts the children's weights.
+        let best_exp: Option<&Experiment> = best
+            .as_ref()
+            .and_then(|(bn, _)| completed.iter().find(|e| &e.name_any() == bn).copied());
+        let best_ctx = best
+            .as_ref()
+            .zip(best_exp)
+            .map(|((bn, _), e)| (bn.as_str(), &e.spec.parameters));
+        // PBT explore factor (guard against non-positive overrides).
+        let perturb_factor = match campaign.spec.perturb_factor {
+            Some(f) if f > 0.0 => f,
+            _ => PBT_FACTOR,
+        };
         for i in 0..want.min(budget_left) {
             let idx = total + i;
-            let (params, hypothesis) = next_experiment(&template, best_ctx, idx);
-            let exp = build_experiment(&campaign, &name, &ns, idx, params, hypothesis);
+            let (params, hypothesis, checkpoint_policy) = if is_pbt {
+                let (params, hypothesis) =
+                    pbt_experiment(&template, best_ctx, perturb_factor, idx);
+                (params, hypothesis, pbt_checkpoint_policy(best_exp))
+            } else {
+                let (params, hypothesis) = next_experiment(&template, best_ctx, idx);
+                (params, hypothesis, None)
+            };
+            let exp =
+                build_experiment(&campaign, &name, &ns, idx, params, hypothesis, checkpoint_policy);
             match experiments.create(&PostParams::default(), &exp).await {
                 Ok(_) => created += 1,
                 Err(e) => warn!(%e, idx, "failed to create experiment"),
@@ -281,6 +318,88 @@ fn next_experiment(
     (params, hypothesis)
 }
 
+/// Build a PBT child's parameter set + hypothesis.
+///
+/// Population-based training: every child *exploits* the best (inherits its
+/// hyperparameters) and then *explores* by perturbing each numeric parameter by
+/// `perturb_factor` (up) or `1/perturb_factor` (down). Weights are warm-started
+/// separately via [`pbt_checkpoint_policy`]. Direction alternates per parameter
+/// and per child so concurrently-spawned children diverge. With no successful
+/// parent yet this is a cold start from the template defaults.
+fn pbt_experiment(
+    template: &ExperimentTemplate,
+    best: Option<(&str, &BTreeMap<String, Value>)>,
+    perturb_factor: f64,
+    idx: u32,
+) -> (BTreeMap<String, Value>, String) {
+    // Base: template defaults + parameter_schema defaults (the param space).
+    let mut params: BTreeMap<String, Value> = template.spec.defaults.clone();
+    for (k, spec) in &template.spec.parameter_schema {
+        if let Some(d) = &spec.default {
+            params.entry(k.clone()).or_insert_with(|| d.clone());
+        }
+    }
+
+    let hypothesis = match best {
+        None => "pbt cold start: no successful parent yet".to_string(),
+        Some((best_name, best_params)) => {
+            // Exploit: inherit the best's hyperparameters.
+            for (k, v) in best_params.iter() {
+                if k != "experimentIteration" && k != "parentExperimentId" {
+                    params.insert(k.clone(), v.clone());
+                }
+            }
+            // Explore: perturb every numeric param up or 1/factor down.
+            let down = 1.0 / perturb_factor;
+            let keys = numeric_params(&params);
+            let mut perturbed = Vec::new();
+            for (j, key) in keys.iter().enumerate() {
+                if let Some(cur) = params.get(key).and_then(value_as_f64) {
+                    let up = (idx as usize + j) % 2 == 0;
+                    let factor = if up { perturb_factor } else { down };
+                    let next = cur * factor;
+                    params.insert(
+                        key.clone(),
+                        serde_json::Number::from_f64(next)
+                            .map(Value::Number)
+                            .unwrap_or(Value::Null),
+                    );
+                    perturbed.push(format!("{key} x{factor:.4}"));
+                }
+            }
+            if perturbed.is_empty() {
+                format!("pbt exploit from {best_name} (no numeric params to perturb)")
+            } else {
+                format!("pbt exploit+explore from {best_name}: {}", perturbed.join(", "))
+            }
+        }
+    };
+
+    params.insert("experimentIteration".into(), json!(idx));
+    params.insert(
+        "parentExperimentId".into(),
+        best.map(|(n, _)| json!(n)).unwrap_or(Value::Null),
+    );
+    (params, hypothesis)
+}
+
+/// Warm-start policy for a PBT child: resume weights from the best succeeded
+/// experiment's latest checkpoint. None when there is no best, no checkpoint
+/// yet, or no usable URI — i.e. a cold start.
+fn pbt_checkpoint_policy(best_exp: Option<&Experiment>) -> Option<CheckpointPolicy> {
+    let uri = best_exp?
+        .status
+        .as_ref()?
+        .latest_checkpoint
+        .as_ref()?
+        .uri
+        .clone();
+    Some(CheckpointPolicy {
+        resume_from: Some(uri),
+        ..Default::default()
+    })
+}
+
 fn build_experiment(
     campaign: &ResearchCampaign,
     campaign_name: &str,
@@ -288,6 +407,7 @@ fn build_experiment(
     idx: u32,
     parameters: BTreeMap<String, Value>,
     hypothesis: String,
+    checkpoint_policy: Option<CheckpointPolicy>,
 ) -> Experiment {
     let exp_name = format!("{campaign_name}-{idx:03}");
     let owner = OwnerReference {
@@ -314,7 +434,7 @@ fn build_experiment(
             hypothesis,
             parameters,
             patch: None,
-            checkpoint_policy: None,
+            checkpoint_policy,
         },
         status: None,
     }
@@ -408,7 +528,8 @@ async fn ensure_benchmark_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use athena_api::experiment::ExperimentStatus;
+    use athena_api::experiment::{CheckpointRef, ExperimentStatus};
+    use athena_api::research_campaign::ResearchCampaignSpec;
     use athena_api::experiment_template::{
         ExperimentTemplateSpec, MetricsSpec, ParameterSpec, SourceSpec,
         {GitSource},
@@ -521,5 +642,129 @@ mod tests {
         // idx 2, lap 1 -> factor 0.5 -> 0.5*0.5 = 0.25
         let (params2, _) = next_experiment(&t, Some(("c-002", &best)), 2);
         assert!((lr(&params2) - 0.25).abs() < 1e-9, "{:?}", params2.get("lr"));
+    }
+
+    fn campaign_pbt(population: Option<u32>, perturb: Option<f64>) -> ResearchCampaign {
+        ResearchCampaign {
+            metadata: ObjectMeta {
+                name: Some("c".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec: ResearchCampaignSpec {
+                template_ref: "t".into(),
+                concurrency: 1,
+                budget: Default::default(),
+                strategy: athena_api::research_campaign::StrategySpec {
+                    strategy_type: "pbt".into(),
+                },
+                benchmark_suite_ref: None,
+                benchmark_runtime_profile_ref: None,
+                population_size: population,
+                perturb_factor: perturb,
+            },
+            status: None,
+        }
+    }
+
+    #[test]
+    fn pbt_perturbs_every_numeric_param_from_best_not_defaults() {
+        // Template default lr is 0.1; the best ran lr=0.5. PBT must explore from
+        // 0.5 (exploit the best), never the 0.1 default.
+        let t = template_with_default_lr(0.1);
+        let best: BTreeMap<String, Value> = BTreeMap::from([("lr".to_string(), json!(0.5))]);
+        let lr = |p: &BTreeMap<String, Value>| value_as_f64(p.get("lr").unwrap()).unwrap();
+        // One param (j=0). idx 2 -> (2+0)%2==0 -> up by 1.2 -> 0.5*1.2 = 0.6.
+        let (params, hyp) = pbt_experiment(&t, Some(("c-002", &best)), 1.2, 2);
+        assert!((lr(&params) - 0.6).abs() < 1e-9, "{:?}", params.get("lr"));
+        assert!((lr(&params) - 0.1).abs() > 1e-6, "must not use the default");
+        assert_eq!(params.get("parentExperimentId"), Some(&json!("c-002")));
+        assert!(hyp.contains("pbt"), "{hyp}");
+        // idx 1 -> (1+0)%2==1 -> down by 1/1.2 -> 0.5/1.2.
+        let (params2, _) = pbt_experiment(&t, Some(("c-002", &best)), 1.2, 1);
+        assert!((lr(&params2) - 0.5 / 1.2).abs() < 1e-9, "{:?}", params2.get("lr"));
+    }
+
+    #[test]
+    fn pbt_cold_start_when_no_best() {
+        let t = template_with_default_lr(0.1);
+        let (params, hyp) = pbt_experiment(&t, None, 1.2, 0);
+        assert_eq!(params.get("lr"), Some(&json!(0.1)));
+        assert_eq!(params.get("parentExperimentId"), Some(&Value::Null));
+        assert!(hyp.contains("cold start"), "{hyp}");
+        assert!(pbt_checkpoint_policy(None).is_none());
+    }
+
+    #[test]
+    fn pbt_checkpoint_policy_resumes_from_best_latest_checkpoint() {
+        let mut best = exp_with("best", ExperimentPhase::Succeeded, "loss", 0.1);
+        best.status.as_mut().unwrap().latest_checkpoint = Some(CheckpointRef {
+            uri: "s3://ckpt/best/step-100".into(),
+            step: Some(100),
+            ..Default::default()
+        });
+        let cp = pbt_checkpoint_policy(Some(&best)).expect("best has a checkpoint");
+        assert_eq!(cp.resume_from.as_deref(), Some("s3://ckpt/best/step-100"));
+        // No checkpoint yet -> cold start (None).
+        let no_ckpt = exp_with("warm", ExperimentPhase::Succeeded, "loss", 0.2);
+        assert!(pbt_checkpoint_policy(Some(&no_ckpt)).is_none());
+    }
+
+    #[test]
+    fn pbt_child_experiment_warm_starts_and_perturbs() {
+        // End-to-end through build_experiment: the produced child Experiment must
+        // carry resumeFrom from the best's latestCheckpoint AND perturbed params.
+        let t = template_with_default_lr(0.1);
+        let mut best_exp = exp_with("c-000", ExperimentPhase::Succeeded, "loss", 0.1);
+        best_exp.spec.parameters = BTreeMap::from([("lr".to_string(), json!(0.5))]);
+        best_exp.status.as_mut().unwrap().latest_checkpoint = Some(CheckpointRef {
+            uri: "s3://ckpt/c-000/step-42".into(),
+            ..Default::default()
+        });
+        let campaign = campaign_pbt(None, Some(1.2));
+
+        let (params, hypothesis) =
+            pbt_experiment(&t, Some(("c-000", &best_exp.spec.parameters)), 1.2, 2);
+        let cp = pbt_checkpoint_policy(Some(&best_exp));
+        let child = build_experiment(&campaign, "c", "default", 2, params, hypothesis, cp);
+
+        assert_eq!(
+            child
+                .spec
+                .checkpoint_policy
+                .as_ref()
+                .and_then(|p| p.resume_from.as_deref()),
+            Some("s3://ckpt/c-000/step-42"),
+            "child must warm-start from the best's latest checkpoint"
+        );
+        let lr = value_as_f64(child.spec.parameters.get("lr").unwrap()).unwrap();
+        assert!((lr - 0.6).abs() < 1e-9, "perturbed from best 0.5, got {lr}");
+        assert!((lr - 0.1).abs() > 1e-6, "must not be the template default");
+    }
+
+    #[test]
+    fn heuristic_child_has_no_checkpoint_policy() {
+        // Requirement 4: the heuristic path is unchanged — children cold-start.
+        let t = template_with_default_lr(0.1);
+        let campaign = ResearchCampaign {
+            metadata: ObjectMeta {
+                name: Some("c".into()),
+                ..Default::default()
+            },
+            spec: ResearchCampaignSpec {
+                template_ref: "t".into(),
+                concurrency: 1,
+                budget: Default::default(),
+                strategy: Default::default(),
+                benchmark_suite_ref: None,
+                benchmark_runtime_profile_ref: None,
+                population_size: None,
+                perturb_factor: None,
+            },
+            status: None,
+        };
+        let (params, hypothesis) = next_experiment(&t, None, 0);
+        let child = build_experiment(&campaign, "c", "default", 0, params, hypothesis, None);
+        assert!(child.spec.checkpoint_policy.is_none());
     }
 }
