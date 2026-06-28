@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
     let addr = std::env::var("ATHENA_CONSOLE_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
     let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
         .route("/api/snapshot", get(snapshot))
         .route("/api/manifest/{namespace}/{kind}/{name}", get(manifest))
         .route("/api/template/{namespace}/{name}", get(template))
