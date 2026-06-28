@@ -35,8 +35,12 @@ const GRAFANA_DASHBOARD_UID: &str = "athena-research-runs";
 pub enum Panel {
     /// Experiment list (the native `View::Experiments`).
     Experiments,
-    /// Detail for the selected experiment — embeds Grafana + the manifest IDE.
+    /// Metadata for the selected experiment (phase, namespace, workspace…).
     ExperimentDetail,
+    /// Learning metrics (embedded Grafana dashboard) for the selected experiment.
+    ExperimentMetrics,
+    /// Manifest IDE for the selected experiment.
+    ExperimentManifest,
     /// ResearchCampaign list.
     Campaigns,
     /// ExperimentTemplate list + template-YAML editor.
@@ -52,6 +56,8 @@ impl PanelKind for Panel {
         match self {
             Panel::Experiments => "Experiments",
             Panel::ExperimentDetail => "Experiment Detail",
+            Panel::ExperimentMetrics => "Experiment Metrics",
+            Panel::ExperimentManifest => "Experiment Manifest",
             Panel::Campaigns => "Campaigns",
             Panel::Templates => "Templates",
             Panel::RuntimeProfiles => "Runtime Profiles",
@@ -64,10 +70,12 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
     let mut b = LayoutBuilder::new();
     vec![
         b.at(Panel::Experiments, 16.0, 16.0, 640.0, 460.0),
-        b.at(Panel::ExperimentDetail, 672.0, 16.0, 620.0, 720.0),
+        b.at(Panel::ExperimentDetail, 672.0, 16.0, 620.0, 200.0),
+        b.at(Panel::ExperimentMetrics, 672.0, 232.0, 620.0, 360.0),
+        b.at(Panel::ExperimentManifest, 672.0, 608.0, 620.0, 360.0),
         b.at(Panel::Templates, 16.0, 492.0, 640.0, 320.0),
         b.at(Panel::Campaigns, 16.0, 828.0, 640.0, 260.0),
-        b.at(Panel::Benchmarks, 672.0, 752.0, 620.0, 320.0),
+        b.at(Panel::Benchmarks, 672.0, 984.0, 620.0, 320.0),
         b.at(Panel::RuntimeProfiles, 16.0, 1104.0, 640.0, 260.0),
     ]
 }
@@ -136,7 +144,9 @@ pub fn App() -> Element {
 
         match kind {
             Panel::Experiments => experiments_view(snap, ws, selected, manifest_doc),
-            Panel::ExperimentDetail => experiment_detail_view(selected, manifest_doc),
+            Panel::ExperimentDetail => experiment_detail_view(selected),
+            Panel::ExperimentMetrics => experiment_metrics_view(selected),
+            Panel::ExperimentManifest => experiment_manifest_view(selected, manifest_doc),
             Panel::Campaigns => campaigns_view(snap),
             Panel::Templates => templates_view(snap, template_doc),
             Panel::RuntimeProfiles => runtime_view(snap),
@@ -200,7 +210,10 @@ fn experiments_view(
                                         onclick: move |_| {
                                             let e = exp_select.clone();
                                             selected.set(Some(e.clone()));
+                                            // Surface all three per-experiment panels.
                                             ws.restore(Panel::ExperimentDetail);
+                                            ws.restore(Panel::ExperimentMetrics);
+                                            ws.restore(Panel::ExperimentManifest);
                                             // Load the manifest YAML into the IDE panel.
                                             spawn(async move {
                                                 match fetch_manifest(&e.namespace, &e.kind, &e.name).await {
@@ -227,23 +240,25 @@ fn experiments_view(
     }
 }
 
-fn experiment_detail_view(
-    selected: Signal<Option<ResourceSummary>>,
-    mut manifest_doc: Signal<String>,
-) -> Element {
-    let Some(exp) = selected.read().clone() else {
-        return rsx! {
-            p { class: "muted", "Select an experiment from the Experiments panel to see its training-loss / Auto-RL metrics and manifest." }
-        };
-    };
+/// Placeholder shown by the per-experiment panels when nothing is selected.
+fn no_selection() -> Element {
+    rsx! {
+        p { class: "muted",
+            "Select an experiment from the Experiments panel."
+        }
+    }
+}
 
+/// Metadata grid for the selected experiment.
+fn experiment_detail_view(selected: Signal<Option<ResourceSummary>>) -> Element {
+    let Some(exp) = selected.read().clone() else {
+        return no_selection();
+    };
     let workspace = exp
         .workspace_path
         .clone()
         .unwrap_or_else(|| "Not reported".to_string());
     let manifest_path = exp.manifest_path();
-    // Scope the Grafana dashboard to this experiment.
-    let vars = vec![("experiment".to_string(), exp.name.clone())];
 
     rsx! {
         div { class: "view-head",
@@ -257,8 +272,19 @@ fn experiment_detail_view(
             dt { "Workspace" } dd { "{workspace}" }
             dt { "Manifest" } dd { "{manifest_path}" }
         }
+    }
+}
 
-        div { class: "section-label", "Learning metrics (training-loss / Auto-RL)" }
+/// Embedded learning-metrics dashboard (training-loss / Auto-RL), scoped to the
+/// selected experiment.
+fn experiment_metrics_view(selected: Signal<Option<ResourceSummary>>) -> Element {
+    let Some(exp) = selected.read().clone() else {
+        return no_selection();
+    };
+    // Scope the Grafana dashboard to this experiment.
+    let vars = vec![("experiment".to_string(), exp.name.clone())];
+
+    rsx! {
         div { class: "embed-block",
             GrafanaPanel {
                 base_url: GRAFANA_BASE,
@@ -268,8 +294,20 @@ fn experiment_detail_view(
                 title: "Athena research runs",
             }
         }
+    }
+}
 
-        div { class: "section-label", "Manifest IDE" }
+/// Manifest IDE for the selected experiment.
+fn experiment_manifest_view(
+    selected: Signal<Option<ResourceSummary>>,
+    mut manifest_doc: Signal<String>,
+) -> Element {
+    let Some(exp) = selected.read().clone() else {
+        return no_selection();
+    };
+    let manifest_path = exp.manifest_path();
+
+    rsx! {
         div { class: "ide-block",
             IdePanel {
                 value: manifest_doc(),
