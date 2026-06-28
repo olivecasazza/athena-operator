@@ -26,6 +26,20 @@ pub struct ResearchCampaignSpec {
     pub budget: CampaignBudget,
     #[serde(default)]
     pub strategy: StrategySpec,
+
+    /// Optional BenchmarkSuite to evaluate each succeeded experiment against.
+    /// When set, the campaign creates a BenchmarkRun per succeeded experiment
+    /// (targetRef = the Experiment) and DEFERS the Keep/Discard decision to the
+    /// benchmark's gate results (via promotionPolicy.updateExperimentStatus)
+    /// instead of stamping it from the raw training objective.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark_suite_ref: Option<String>,
+
+    /// RuntimeProfile (BatchJob mode) the BenchmarkRun executes in. Required for
+    /// benchmarking to actually run — an Experiment targetRef is not itself a
+    /// RuntimeProfile, so the run can't fall back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark_runtime_profile_ref: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
