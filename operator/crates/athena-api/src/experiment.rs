@@ -201,6 +201,15 @@ pub struct ExperimentArtifacts {
     pub onnx_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_checkpoint_uri: Option<String>,
+    /// Append-only JSONL research journal the runner writes over the run
+    /// (hypothesis, config, per-eval progress, dead ends, final result). Durable
+    /// on the shared workspace PVC; the primary narrative source for paper writeups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_uri: Option<String>,
+    /// Write-once provenance/reproducibility manifest (seed, resolved params, git
+    /// commit, image, software/hardware environment) the runner emits at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_uri: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]

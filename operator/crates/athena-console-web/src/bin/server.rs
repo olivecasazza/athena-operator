@@ -14,14 +14,21 @@
 
 use athena_api::benchmark_run::BenchmarkRun;
 use athena_api::benchmark_suite::BenchmarkSuite;
+use athena_api::dossier::{self, Curation};
 use athena_api::experiment::Experiment;
 use athena_api::experiment_template::ExperimentTemplate;
 use athena_api::research_campaign::ResearchCampaign;
+use athena_api::research_report::{ResearchReport, ResearchReportSpec};
 use athena_api::runtime_profile::RuntimeProfile;
-use athena_console_web::models::{ClusterSnapshot, ResourceSummary, TemplateSummary};
-use axum::{Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::get};
+use athena_console_web::models::{
+    ClusterSnapshot, ReportSpecDto, ReportSummary, ResourceSummary, TemplateSummary,
+};
+use axum::{
+    Json, Router, extract::Path, http::StatusCode, response::IntoResponse,
+    routing::{get, post},
+};
 use k8s_openapi::api::batch::v1::Job;
-use kube::api::{Api, ListParams};
+use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::{Client, ResourceExt};
 use std::collections::HashMap;
 use std::process::Command;
@@ -42,6 +49,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/snapshot", get(snapshot))
         .route("/api/manifest/:namespace/:kind/:name", get(manifest))
         .route("/api/template/:namespace/:name", get(template))
+        // Report curation: persist a ResearchReport (spec only) and preview its
+        // composed dossier from an unsaved draft.
+        .route("/api/reports", post(create_report))
+        .route("/api/reports/preview", post(preview_report))
         .fallback_service(ServeDir::new(dist));
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -99,9 +110,10 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
     let suites_api = Api::<BenchmarkSuite>::all(client.clone());
     let runs_api = Api::<BenchmarkRun>::all(client.clone());
     let jobs_api = Api::<Job>::all(client.clone());
-    let profiles_api = Api::<RuntimeProfile>::all(client);
+    let profiles_api = Api::<RuntimeProfile>::all(client.clone());
+    let reports_api = Api::<ResearchReport>::all(client);
 
-    let (exp_list, campaign_list, tpl_list, suite_list, run_list, profile_list, job_list) =
+    let (exp_list, campaign_list, tpl_list, suite_list, run_list, profile_list, job_list, report_list) =
         tokio::try_join!(
             experiments_api.list(&lp),
             campaigns_api.list(&lp),
@@ -110,6 +122,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             runs_api.list(&lp),
             profiles_api.list(&lp),
             jobs_api.list(&lp),
+            reports_api.list(&lp),
         )?;
 
     // Run windows from the experiment Jobs (exp-<name>) so the embed can scope its
@@ -151,6 +164,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 metrics_link: status.and_then(|s| s.metrics_link.clone()),
                 started_at: jt.as_ref().and_then(|(s, _)| s.clone()),
                 ended_at: jt.as_ref().and_then(|(_, en)| en.clone()),
+                campaign: Some(e.spec.campaign_ref.clone()),
             }
         })
         .collect();
@@ -184,6 +198,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 // Campaign window: created → now (ended None ⇒ embed uses "now").
                 started_at: to_ms(&c.metadata.creation_timestamp),
                 ended_at: None,
+                campaign: None,
             }
         })
         .collect();
@@ -220,6 +235,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             metrics_link: None,
             started_at: None,
             ended_at: None,
+            campaign: None,
         })
         .collect();
 
@@ -250,6 +266,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 metrics_link: status.and_then(|s| s.metrics_link.clone()),
                 started_at: None,
                 ended_at: None,
+                campaign: None,
             }
         })
         .collect();
@@ -275,6 +292,25 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             metrics_link: None,
             started_at: None,
             ended_at: None,
+            campaign: None,
+        })
+        .collect();
+
+    let reports = report_list
+        .items
+        .into_iter()
+        .map(|r| {
+            let status = r.status.as_ref();
+            ReportSummary {
+                namespace: r.namespace().unwrap_or_else(|| "default".to_string()),
+                name: r.name_any(),
+                campaign_ref: r.spec.campaign_ref.clone(),
+                title: r.spec.title.clone().unwrap_or_default(),
+                phase: status
+                    .and_then(|s| s.phase.clone())
+                    .unwrap_or_else(|| "Draft".to_string()),
+                excluded_count: r.spec.excluded_experiments.len(),
+            }
         })
         .collect();
 
@@ -285,5 +321,100 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         benchmark_suites,
         benchmark_runs,
         runtime_profiles,
+        reports,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Report curation — the console's only WRITE path. Writes ResearchReport SPEC
+// only (never status), via server-side apply with field manager "athena-console".
+// ---------------------------------------------------------------------------
+
+fn spec_from_dto(dto: &ReportSpecDto) -> ResearchReportSpec {
+    ResearchReportSpec {
+        campaign_ref: dto.campaign_ref.clone(),
+        title: dto.title.clone(),
+        included_experiments: dto.included_experiments.clone(),
+        excluded_experiments: dto.excluded_experiments.clone(),
+        sections: dto.sections.clone(),
+        seeded_hypotheses: dto.seeded_hypotheses.clone(),
+    }
+}
+
+fn ise<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// `POST /api/reports` — validate + upsert a ResearchReport spec. Rejects an
+/// empty name/campaign or a campaignRef that does not exist in the namespace.
+async fn create_report(
+    Json(dto): Json<ReportSpecDto>,
+) -> Result<Json<ReportSummary>, (StatusCode, String)> {
+    if dto.name.trim().is_empty() || dto.campaign_ref.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name and campaignRef are required".to_string(),
+        ));
+    }
+    let client = Client::try_default().await.map_err(ise)?;
+
+    // Validate the referenced campaign exists before persisting the report.
+    let campaigns: Api<ResearchCampaign> = Api::namespaced(client.clone(), &dto.namespace);
+    if campaigns
+        .get_opt(&dto.campaign_ref)
+        .await
+        .map_err(ise)?
+        .is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "campaign '{}' not found in namespace '{}'",
+                dto.campaign_ref, dto.namespace
+            ),
+        ));
+    }
+
+    // Server-side apply needs apiVersion/kind/metadata in the body (a typed CR
+    // does not serialize them), so apply a JSON document carrying spec only.
+    let spec = spec_from_dto(&dto);
+    let body = serde_json::json!({
+        "apiVersion": "research.nixlab.io/v1alpha1",
+        "kind": "ResearchReport",
+        "metadata": { "name": dto.name, "namespace": dto.namespace },
+        "spec": spec,
+    });
+    let reports: Api<ResearchReport> = Api::namespaced(client, &dto.namespace);
+    reports
+        .patch(
+            &dto.name,
+            &PatchParams::apply("athena-console").force(),
+            &Patch::Apply(&body),
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    Ok(Json(ReportSummary {
+        namespace: dto.namespace.clone(),
+        name: dto.name.clone(),
+        campaign_ref: dto.campaign_ref.clone(),
+        title: dto.title.clone().unwrap_or_default(),
+        phase: "Draft".to_string(),
+        excluded_count: dto.excluded_experiments.len(),
+    }))
+}
+
+/// `POST /api/reports/preview` — assemble the curated dossier Markdown for an
+/// unsaved draft spec. Read-only; nothing is persisted.
+async fn preview_report(Json(dto): Json<ReportSpecDto>) -> Result<String, (StatusCode, String)> {
+    if dto.campaign_ref.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "campaignRef is required".to_string()));
+    }
+    let client = Client::try_default().await.map_err(ise)?;
+    let spec = spec_from_dto(&dto);
+    let curation = Curation::from_spec(&spec);
+    dossier::assemble(&client, &dto.campaign_ref, &dto.namespace, Some(&curation))
+        .await
+        .map(|(md, _)| md)
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
 }

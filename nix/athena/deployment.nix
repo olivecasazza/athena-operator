@@ -76,6 +76,7 @@ let
         "benchmarksuites"
         "benchmarkruns"
         "metricsources"
+        "researchreports"
       ];
       statusResources = map (resource: "${resource}/status") api.resources;
     };
@@ -126,6 +127,18 @@ let
     }
     {
       apiGroups = [ deployment.api.group ];
+      # researchreports: scientist-authored paper-dataset curation, written by the
+      # console BFF (spec only — never status). No delete: the console curates, it
+      # does not garbage-collect.
+      resources = [ "researchreports" ];
+      verbs = [
+        "create"
+        "update"
+        "patch"
+      ];
+    }
+    {
+      apiGroups = [ deployment.api.group ];
       resources = deployment.api.statusResources;
       verbs = [
         "get"
@@ -148,11 +161,14 @@ let
     }
     {
       apiGroups = [ "" ];
+      # configmaps: the report reconciler publishes each assembled dossier into an
+      # owner-referenced ConfigMap (<report>-dataset).
       resources = [
         "pods"
         "pods/log"
         "persistentvolumeclaims"
         "events"
+        "configmaps"
       ];
       verbs = [
         "get"

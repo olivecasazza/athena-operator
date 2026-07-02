@@ -16,7 +16,7 @@ from dataclasses import dataclass, asdict
 # Athena live metrics: stores training metrics to Prometheus during the run so
 # they surface live in Grafana. Safe no-op when not running under the operator.
 try:
-    from athena_metrics import metrics as _athena_metrics_factory
+    from athena_metrics import journal, metrics as _athena_metrics_factory, provenance
 
     _athm = _athena_metrics_factory()
 except Exception:
@@ -26,6 +26,12 @@ except Exception:
             pass
 
     _athm = _NoMetrics()
+
+    def journal(*args, **kwargs):  # type: ignore[misc]
+        pass
+
+    def provenance(**kwargs):  # type: ignore[misc]
+        pass
 
 import torch
 import torch.nn as nn
@@ -469,6 +475,8 @@ for key, value in param_counts.items():
 num_params = param_counts['total']
 num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
+provenance(seed=42, depth=DEPTH, model_config=asdict(config), num_params=num_params, num_flops_per_token=num_flops_per_token, total_batch_size=TOTAL_BATCH_SIZE, matrix_lr=MATRIX_LR, embedding_lr=EMBEDDING_LR, time_budget=TIME_BUDGET)
+journal("experiment_started", depth=DEPTH, num_params=num_params, time_budget=TIME_BUDGET)
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
@@ -540,6 +548,7 @@ while True:
 
     if math.isnan(train_loss_f) or train_loss_f > 100:
         print("FAIL")
+        journal("experiment_failed", reason="loss_nan_or_diverged", step=step, train_loss=train_loss_f)
         exit(1)
 
     torch.cuda.synchronize()
@@ -610,3 +619,4 @@ _athm.store("mfu_percent", steady_state_mfu)
 _athm.store("peak_vram_mb", peak_vram_mb)
 _athm.store("total_tokens_m", total_tokens / 1e6)
 _athm.store("num_steps", step)
+journal("experiment_finished", val_bpb=val_bpb, training_seconds=total_training_time, mfu_percent=steady_state_mfu, total_tokens_m=total_tokens/1e6, num_steps=step, peak_vram_mb=peak_vram_mb)

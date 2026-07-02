@@ -98,6 +98,7 @@ rules:
       - benchmarksuites
       - benchmarkruns
       - metricsources
+      - researchreports
     verbs:
       - get
       - list
@@ -149,6 +150,7 @@ rules:
       - benchmarksuites
       - benchmarkruns
       - metricsources
+      - researchreports
     verbs:
       - get
       - list
@@ -166,6 +168,14 @@ rules:
   - apiGroups:
       - research.nixlab.io
     resources:
+      - researchreports
+    verbs:
+      - create
+      - update
+      - patch
+  - apiGroups:
+      - research.nixlab.io
+    resources:
       - runtimeprofiles/status
       - experimenttemplates/status
       - researchcampaigns/status
@@ -173,6 +183,7 @@ rules:
       - benchmarksuites/status
       - benchmarkruns/status
       - metricsources/status
+      - researchreports/status
     verbs:
       - get
       - patch
@@ -196,6 +207,7 @@ rules:
       - pods/log
       - persistentvolumeclaims
       - events
+      - configmaps
     verbs:
       - get
       - list
@@ -565,6 +577,12 @@ spec:
   objective:
     metric: "reward_mean"
     goal: "maximize"
+  # Seeds the introduction/motivation when `athena dossier` assembles a research
+  # writeup from this template's campaigns. Not derivable from any single run.
+  researchObjective: >-
+    Does GRPO with a small synthetic arithmetic prompt set produce measurable
+    reward lift over a fixed baseline within a tiny (12-step) training budget,
+    and which hyperparameters (learning rate, rollout count) drive that lift?
   metrics:
     parser:
       type: "file"
