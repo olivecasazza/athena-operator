@@ -1129,6 +1129,7 @@ fn build_job(
                         )
                     },
                     priority_class_name: profile.spec.scheduling.priority_class_name.clone(),
+                    runtime_class_name: profile.spec.scheduling.runtime_class_name.clone(),
                     ..Default::default()
                 }),
             },
