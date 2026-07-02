@@ -23,7 +23,7 @@
 #
 # TRAINER IMAGE CONTRACT (from the trainer track)
 # -----------------------------------------------
-# The image ghcr.io/olivecasazza/spot-rapier-trainer:v23-spread MUST honor two
+# The image ghcr.io/olivecasazza/spot-rapier-trainer:v24-checkpoint MUST honor two
 # operator-injected env vars (athena sets these per Experiment — do NOT set them
 # manually in the RuntimeProfile env):
 #   - ATHENA_CHECKPOINT_DIR : directory under the RWX workspace the trainer
@@ -49,7 +49,7 @@ spec:
   runtime:
     type: pytorch
     mode: batchJob
-  image: "ghcr.io/olivecasazza/spot-rapier-trainer:v23-spread"
+  image: "ghcr.io/olivecasazza/spot-rapier-trainer:v24-checkpoint"
   # Private GHCR image — pull secret lives in the apps namespace.
   imagePullSecrets:
     - name: ghcr-pull
@@ -165,9 +165,9 @@ spec:
     type: pbt
   # PBT knobs (ResearchCampaignSpec, top-level): population to keep running, and
   # the multiplicative perturbation applied to reward weights per exploit/explore.
-  populationSize: 4
+  populationSize: 3
   perturbFactor: 1.2
-  concurrency: 4
+  concurrency: 3
   budget:
     maxExperiments: 16
     maxDuration: "24h"

@@ -215,6 +215,11 @@ pub struct SchedulingProfile {
     pub tolerations: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_class_name: Option<String>,
+    /// Container runtime class for the experiment pods (e.g. `nvidia` on k3s
+    /// nodes where the NVIDIA runtime is not containerd's default — without it
+    /// the pod gets the GPU resource but no driver).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_class_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]

@@ -51,6 +51,9 @@ spec:
       nvidia.com/gpu.product: Quadro-RTX-5000
     # Long exploratory trials are checkpointed → safe to run preemptible.
     priorityClassName: gpu-scavenger
+    # k3s: the NVIDIA runtime is not containerd's default on these nodes; without
+    # this the pod gets the GPU resource but no driver (smoke-run lesson).
+    runtimeClassName: nvidia
     tolerations:
       - key: nvidia.com/gpu
         operator: Exists
