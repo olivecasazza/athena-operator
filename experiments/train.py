@@ -38,10 +38,51 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from kernels import get_kernel
-cap = torch.cuda.get_device_capability()
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+# flash-attn3 needs Hopper/Ada-class GPUs; on older cards (e.g. the Turing
+# Quadros in the cluster) fall back to SDPA with an explicit sliding-window mask.
+# Same math, slower — trials remain comparable as long as every trial in a
+# campaign runs on the same GPU product.
+try:
+    from kernels import get_kernel
+    cap = torch.cuda.get_device_capability()
+    repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+    fa3 = get_kernel(repo).flash_attn_interface
+except Exception as _e:  # kernel hub miss, unsupported arch, offline, ...
+    print(f"[athena] flash-attn3 unavailable ({type(_e).__name__}: {_e}); using SDPA fallback")
+    fa3 = None
+
+# bf16 compute needs Ampere+; Turing gets fp16 autocast + GradScaler.
+AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+_WINDOW_MASKS: dict = {}
+
+
+def _window_mask(T, w, device):
+    """Bool [T,T] mask matching fa3 window_size=(w, 0): j in [i-w, i]."""
+    key = (T, w, str(device))
+    m = _WINDOW_MASKS.get(key)
+    if m is None:
+        i = torch.arange(T, device=device)
+        m = (i[None, :] <= i[:, None]) & (i[None, :] >= i[:, None] - w)
+        _WINDOW_MASKS[key] = m
+    return m
+
+
+def _attention(q, k, v, window_size, n_head, n_kv_head):
+    """fa3 when available, else SDPA. q/k/v are [B, T, H, D] (fa3 layout)."""
+    if fa3 is not None:
+        return fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+    T = q.size(1)
+    q, k, v = (t.transpose(1, 2) for t in (q, k, v))  # -> [B, H, T, D]
+    w = window_size[0]
+    if w >= T:
+        # Full-context layer: plain causal lets SDPA pick its fast path.
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=n_kv_head != n_head)
+    else:
+        y = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=_window_mask(T, w, q.device), enable_gqa=n_kv_head != n_head
+        )
+    return y.transpose(1, 2)
 
 from experiments.prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -105,7 +146,7 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        y = _attention(q, k, v, window_size, self.n_head, self.n_kv_head)
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
@@ -182,9 +223,9 @@ class GPT(nn.Module):
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.cos, self.sin = cos, sin
-        self.transformer.wte.to(dtype=torch.bfloat16)
+        self.transformer.wte.to(dtype=AMP_DTYPE)
         for ve in self.value_embeds.values():
-            ve.to(dtype=torch.bfloat16)
+            ve.to(dtype=AMP_DTYPE)
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
         if device is None:
@@ -194,7 +235,7 @@ class GPT(nn.Module):
         t = torch.arange(seq_len, dtype=torch.float32, device=device)
         freqs = torch.outer(t, inv_freq)
         cos, sin = freqs.cos(), freqs.sin()
-        cos, sin = cos.bfloat16(), sin.bfloat16()
+        cos, sin = cos.to(AMP_DTYPE), sin.to(AMP_DTYPE)
         cos, sin = cos[None, :, None, :], sin[None, :, None, :]
         return cos, sin
 
@@ -320,7 +361,7 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
     momentum = momentum_t.to(stacked_grads.dtype)
     momentum_buffer.lerp_(stacked_grads, 1 - momentum)
     g = stacked_grads.lerp_(momentum_buffer, momentum)
-    X = g.bfloat16()
+    X = g.to(AMP_DTYPE)  # NS iteration dtype; bf16 gemms need Ampere+, fp16 on Turing
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
     if g.size(-2) > g.size(-1):
         for a, b, c in polar_express_coeffs[:ns_steps]:
@@ -468,6 +509,12 @@ MATRIX_LR = _param("matrix_lr", MATRIX_LR)
 SCALAR_LR = _param("scalar_lr", SCALAR_LR)
 WEIGHT_DECAY = _param("weight_decay", WEIGHT_DECAY)
 WINDOW_PATTERN = _param("window_pattern", WINDOW_PATTERN, str)
+# Infra knobs come from plain env (RuntimeProfile), NOT spec.parameters: the
+# campaign strategies perturb every numeric parameter, and batch size is
+# hardware config, not science (a perturbed batch also breaks grad-accum
+# divisibility).
+DEVICE_BATCH_SIZE = int(os.environ.get("TRAIN_DEVICE_BATCH_SIZE", DEVICE_BATCH_SIZE))
+TOTAL_BATCH_SIZE = int(os.environ.get("TRAIN_TOTAL_BATCH_SIZE", TOTAL_BATCH_SIZE))
 if _params:
     print(f"[athena] hyperparameters overridden by campaign: {sorted(_params)}")
 
@@ -477,7 +524,8 @@ torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.set_float32_matmul_precision("high")
 device = torch.device("cuda")
-autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=AMP_DTYPE)
+scaler = torch.amp.GradScaler("cuda", enabled=AMP_DTYPE is torch.float16)
 H100_BF16_PEAK_FLOPS = 989.5e12
 
 tokenizer = Tokenizer.from_directory()
@@ -509,7 +557,7 @@ for key, value in param_counts.items():
 num_params = param_counts['total']
 num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
-provenance(seed=SEED, depth=DEPTH, model_config=asdict(config), num_params=num_params, num_flops_per_token=num_flops_per_token, total_batch_size=TOTAL_BATCH_SIZE, matrix_lr=MATRIX_LR, embedding_lr=EMBEDDING_LR, weight_decay=WEIGHT_DECAY, window_pattern=WINDOW_PATTERN, time_budget=TIME_BUDGET)
+provenance(seed=SEED, depth=DEPTH, model_config=asdict(config), num_params=num_params, num_flops_per_token=num_flops_per_token, total_batch_size=TOTAL_BATCH_SIZE, device_batch_size=DEVICE_BATCH_SIZE, matrix_lr=MATRIX_LR, embedding_lr=EMBEDDING_LR, weight_decay=WEIGHT_DECAY, window_pattern=WINDOW_PATTERN, time_budget=TIME_BUDGET, attention_impl="fa3" if fa3 is not None else "sdpa_fallback", amp_dtype=str(AMP_DTYPE))
 journal("experiment_started", depth=DEPTH, num_params=num_params, time_budget=TIME_BUDGET)
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
@@ -563,7 +611,7 @@ while True:
             loss = model(x, y)
         train_loss = loss.detach()
         loss = loss / grad_accum_steps
-        loss.backward()
+        scaler.scale(loss).backward()
         x, y, epoch = next(train_loader)
 
     progress = min(total_training_time / TIME_BUDGET, 1.0)
@@ -575,7 +623,8 @@ while True:
         if group['kind'] == 'muon':
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
-    optimizer.step()
+    scaler.step(optimizer)
+    scaler.update()
     model.zero_grad(set_to_none=True)
 
     train_loss_f = train_loss.item()

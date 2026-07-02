@@ -1,0 +1,23 @@
+# GPT trainer image for athena Experiments (experiments/train.py + prepare.py).
+# Base ships torch 2.9.1 + cu128 (matches pyproject's pinned index); we add the
+# small pure-python deps on top. flash-attn3 fetches from the HF kernel hub at
+# runtime when the GPU supports it; Turing cards use the SDPA fallback in-tree.
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
+
+RUN pip install --no-cache-dir \
+    kernels>=0.11.7 \
+    rustbpe>=0.1.0 \
+    tiktoken>=0.11.0 \
+    pyarrow>=21.0.0 \
+    requests>=2.32.0 \
+    matplotlib>=3.10.8
+
+WORKDIR /app
+COPY experiments/ /app/experiments/
+# train.py imports `experiments.prepare` (repo-root package layout) and
+# `athena_metrics` (script-dir import) — both need /app resolvable.
+ENV PYTHONPATH=/app
+
+# Data/tokenizer cache lands under $HOME/.cache/autoresearch; the RuntimeProfile
+# sets HOME to the shared workspace PVC so shards persist across trials.
+CMD ["sh", "-c", "python experiments/prepare.py && python experiments/train.py"]
