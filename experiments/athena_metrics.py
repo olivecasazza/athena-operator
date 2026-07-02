@@ -29,9 +29,15 @@ locally and in-cluster.
 
 from __future__ import annotations
 
+import datetime
+import json
 import os
+import platform
 import re
+import socket
+import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Prometheus metric/label name rules: [a-zA-Z_][a-zA-Z0-9_]* (metric names may
@@ -154,6 +160,65 @@ class AthenaMetrics:
         return None
 
 
+def journal(event: str, **fields) -> None:
+    """Append one structured event line to research_journal.jsonl.
+
+    No-op if ``ATHENA_WORKSPACE_PATH`` is unset or if any IO error occurs;
+    never crashes the training process. Append is atomic enough for a single
+    pod writer — do not add locking.
+    """
+    workspace = os.getenv("ATHENA_WORKSPACE_PATH", "")
+    if not workspace:
+        return
+    try:
+        os.makedirs(workspace, exist_ok=True)
+        record = json.dumps({"ts": time.time(), "event": event, **fields}, default=str)
+        with open(os.path.join(workspace, "research_journal.jsonl"), "a") as fh:
+            fh.write(record + "\n")
+    except Exception:
+        pass
+
+
+def provenance(**fields) -> None:
+    """Write a one-time reproducibility manifest to provenance.json.
+
+    Write-once: if the file already exists this is a no-op, preserving the
+    original manifest across preemption/resume restarts. No-op if
+    ``ATHENA_WORKSPACE_PATH`` is unset. Caller ``**fields`` are merged on top
+    of the auto-populated base record.
+    """
+    workspace = os.getenv("ATHENA_WORKSPACE_PATH", "")
+    if not workspace:
+        return
+    path = os.path.join(workspace, "provenance.json")
+    if os.path.exists(path):
+        return
+    base: dict = {
+        "experiment": os.getenv("ATHENA_EXPERIMENT"),
+        "campaign": os.getenv("ATHENA_CAMPAIGN"),
+        "written_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "hostname": socket.gethostname(),
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "git_commit": os.getenv("ATHENA_GIT_COMMIT"),
+    }
+    try:
+        spec_raw = os.getenv("ATHENA_EXPERIMENT_SPEC", "")
+        if spec_raw:
+            spec = json.loads(spec_raw)
+            base["hypothesis"] = spec.get("hypothesis")
+            base["parameters"] = spec.get("parameters")
+    except Exception:
+        pass
+    base.update(fields)
+    try:
+        os.makedirs(workspace, exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(base, fh, indent=2, default=str)
+    except Exception:
+        pass
+
+
 # Module-level singleton + convenience wrappers so workloads can just
 # `from athena_metrics import store, query`.
 _DEFAULT: AthenaMetrics | None = None
@@ -197,4 +262,30 @@ if __name__ == "__main__":
 
     assert _sanitize("123abc")[0] == "_"
     assert query("up") is None or isinstance(query("up"), list)
+
+    # journal / provenance self-check
+    tmp = tempfile.mkdtemp()
+    os.environ["ATHENA_WORKSPACE_PATH"] = tmp
+    os.environ["ATHENA_EXPERIMENT"] = "exp-check"
+    journal("test_event", step=1)
+    journal("test_event2", loss=0.5)
+    jl_path = os.path.join(tmp, "research_journal.jsonl")
+    with open(jl_path) as fh:
+        lines = fh.readlines()
+    assert len(lines) == 2, f"expected 2 lines, got {len(lines)}"
+    for line in lines:
+        rec = json.loads(line)
+        assert "ts" in rec and "event" in rec, rec
+    provenance(seed=42)
+    prov_path = os.path.join(tmp, "provenance.json")
+    assert os.path.exists(prov_path), "provenance.json not written"
+    with open(prov_path) as fh:
+        prov = json.load(fh)
+    assert prov["seed"] == 42, prov
+    assert prov["experiment"] == "exp-check", prov
+    provenance(seed=99)  # write-once: must not overwrite
+    with open(prov_path) as fh:
+        prov2 = json.load(fh)
+    assert prov2["seed"] == 42, "write-once violated"
+
     print("athena_metrics self-check ok")

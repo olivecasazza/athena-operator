@@ -4,6 +4,7 @@ use athena_api::experiment::Experiment;
 use athena_api::experiment_template::ExperimentTemplate;
 use athena_api::metric_source::MetricSource;
 use athena_api::research_campaign::ResearchCampaign;
+use athena_api::research_report::ResearchReport;
 use athena_api::runtime_profile::RuntimeProfile;
 use kube::CustomResourceExt;
 
@@ -16,6 +17,7 @@ pub fn export_crds() {
         BenchmarkSuite::crd(),
         BenchmarkRun::crd(),
         MetricSource::crd(),
+        ResearchReport::crd(),
     ] {
         println!("---");
         println!("{}", serde_json::to_string_pretty(&crd).unwrap());

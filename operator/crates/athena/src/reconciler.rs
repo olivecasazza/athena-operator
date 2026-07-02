@@ -216,6 +216,17 @@ async fn ensure_experiment_job(
             objective_goal: Some(objective_goal_str(&template.spec.objective.goal).to_string()),
             ..Default::default()
         }),
+        // Self-documentation artifacts live at deterministic paths on the shared
+        // workspace PVC. The runner writes them; we stamp the addresses at creation
+        // so they're queryable immediately and survive later status merges (the
+        // terminal-metrics merge only sets checkpoint/onnx fields, never clears these).
+        artifacts: Some(ExperimentArtifacts {
+            workspace_uri: Some(workspace_path.clone()),
+            checkpoints_uri: Some(format!("{workspace_path}/checkpoints")),
+            journal_uri: Some(format!("{workspace_path}/research_journal.jsonl")),
+            provenance_uri: Some(format!("{workspace_path}/provenance.json")),
+            ..Default::default()
+        }),
         environment: Some(ExperimentEnvironment {
             namespace: Some(ns.to_string()),
             job_name: Some(job_name),

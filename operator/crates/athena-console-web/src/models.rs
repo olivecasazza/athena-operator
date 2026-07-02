@@ -8,6 +8,7 @@
 //! serde shape is the boundary, with `athena-api` staying server-side.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// One snapshot of all Athena resources in the cluster — the JSON payload of
 /// `GET /api/snapshot`. Mirrors the native `ClusterSnapshot`.
@@ -19,6 +20,9 @@ pub struct ClusterSnapshot {
     pub benchmark_suites: Vec<ResourceSummary>,
     pub benchmark_runs: Vec<ResourceSummary>,
     pub runtime_profiles: Vec<ResourceSummary>,
+    /// Scientist-authored paper-dataset curations (ResearchReport).
+    #[serde(default)]
+    pub reports: Vec<ReportSummary>,
 }
 
 /// A generic Kubernetes resource row (experiment, campaign, suite, run,
@@ -44,6 +48,10 @@ pub struct ResourceSummary {
     /// Run-window end as epoch-millis string; None = still running (use "now").
     #[serde(default)]
     pub ended_at: Option<String>,
+    /// For experiments: the parent campaign (`spec.campaignRef`), so the report
+    /// curator can filter experiments by campaign. None for other kinds.
+    #[serde(default)]
+    pub campaign: Option<String>,
 }
 
 impl ResourceSummary {
@@ -61,4 +69,36 @@ pub struct TemplateSummary {
     pub name: String,
     pub objective: String,
     pub detail: String,
+}
+
+/// A ResearchReport row for the reports list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReportSummary {
+    pub namespace: String,
+    pub name: String,
+    pub campaign_ref: String,
+    pub title: String,
+    pub phase: String,
+    #[serde(default)]
+    pub excluded_count: usize,
+}
+
+/// Payload for creating/updating a ResearchReport and for previewing its dossier.
+/// Mirrors `athena_api::research_report::ResearchReportSpec` plus the object's
+/// namespace/name so a single struct drives both save and preview.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReportSpecDto {
+    pub namespace: String,
+    pub name: String,
+    pub campaign_ref: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub included_experiments: Vec<String>,
+    #[serde(default)]
+    pub excluded_experiments: Vec<String>,
+    #[serde(default)]
+    pub sections: BTreeMap<String, String>,
+    #[serde(default)]
+    pub seeded_hypotheses: Vec<String>,
 }

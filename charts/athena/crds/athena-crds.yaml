@@ -494,6 +494,11 @@
                     },
                     "type": "object"
                   },
+                  "researchObjective": {
+                    "description": "Free-text research intent for this line of experiments: the question being asked and why it matters. Not derivable from any run; it seeds the introduction/motivation when a research dossier is assembled from a campaign's experiments. Parameter and metric `description`s supply the rest of the semantic glossary.",
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "runtimeProfileRef": {
                     "type": "string"
                   },
@@ -880,6 +885,11 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "journalUri": {
+                        "description": "Append-only JSONL research journal the runner writes over the run (hypothesis, config, per-eval progress, dead ends, final result). Durable on the shared workspace PVC; the primary narrative source for paper writeups.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "metricsUri": {
                         "nullable": true,
                         "type": "string"
@@ -889,6 +899,11 @@
                         "type": "string"
                       },
                       "outputCommit": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "provenanceUri": {
+                        "description": "Write-once provenance/reproducibility manifest (seed, resolved params, git commit, image, software/hardware environment) the runner emits at startup.",
                         "nullable": true,
                         "type": "string"
                       },
@@ -2616,6 +2631,178 @@
               "spec"
             ],
             "title": "MetricSource",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "researchreports.research.nixlab.io"
+  },
+  "spec": {
+    "group": "research.nixlab.io",
+    "names": {
+      "categories": [],
+      "kind": "ResearchReport",
+      "plural": "researchreports",
+      "shortNames": [
+        "rrp"
+      ],
+      "singular": "researchreport"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.campaignRef",
+            "name": "Campaign",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.phase",
+            "name": "Phase",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for ResearchReportSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "description": "A scientist's curation of a ResearchCampaign's results into a research-paper dataset. The **spec** is human/console-authored desired state (which experiments are included, narrative overrides, seeded hypotheses); the **status** is controller-owned (assembled dataset location, completeness).\n\nThe composed dossier is regenerable from spec at any time via `athena dossier --report <name>` or the console BFF, so v1 needs no reconciler — the durable product state is the curation spec.",
+                "properties": {
+                  "campaignRef": {
+                    "description": "The ResearchCampaign whose experiments this report composes.",
+                    "type": "string"
+                  },
+                  "excludedExperiments": {
+                    "description": "Experiments to prune from the dataset by name (applied after inclusion).",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "includedExperiments": {
+                    "description": "Experiments to include by name. Empty = every experiment in the campaign (minus `excludedExperiments`); the curator UI lists them all and the scientist prunes failed/unwanted runs via `excludedExperiments`. No phase filter is applied — inclusion is an explicit curation decision.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "sections": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "Scientist-authored narrative, keyed by section name (e.g. `relatedWork`, `limitations`, `discussion`). Rendered as extra sections in the dossier.",
+                    "type": "object"
+                  },
+                  "seededHypotheses": {
+                    "description": "Hypotheses the scientist wants recorded for follow-up — surfaced as a \"Seeded Hypotheses / Future Work\" section. (This does NOT launch experiments; it is report content.)",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "title": {
+                    "description": "Paper title. Falls back to a generated title when unset.",
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "campaignRef"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "conditions": {
+                    "description": "Bounded conditions (reuses the shared condition shape), e.g. `MissingProvenance`, `CampaignResolved`.",
+                    "items": {
+                      "properties": {
+                        "lastTransitionTime": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "message": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "reason": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "status": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "type": {
+                          "nullable": true,
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "nullable": true,
+                    "type": "array"
+                  },
+                  "controllerVersion": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "datasetUri": {
+                    "description": "Location of the assembled dataset bundle once a reconciler persists it.",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "includedCount": {
+                    "description": "Number of experiments in the composed dataset after curation.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "lastAssembledTime": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "observedGeneration": {
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "phase": {
+                    "description": "Lifecycle phase, e.g. `Draft` / `Assembled`. Controller-owned (phase 2).",
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "ResearchReport",
             "type": "object"
           }
         },

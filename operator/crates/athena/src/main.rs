@@ -1,8 +1,10 @@
 mod benchmark_reconciler;
 mod campaign_reconciler;
 mod crd;
+mod dossier;
 pub mod metrics;
 mod reconciler;
+mod report_reconciler;
 mod telemetry;
 
 use std::sync::Arc;
@@ -10,6 +12,7 @@ use std::sync::Arc;
 use athena_api::benchmark_run::BenchmarkRun;
 use athena_api::experiment::Experiment;
 use athena_api::research_campaign::ResearchCampaign;
+use athena_api::research_report::ResearchReport;
 use futures::StreamExt;
 use kube::{
     Api, Client,
@@ -30,6 +33,50 @@ async fn main() -> anyhow::Result<()> {
             crd::export_crds();
             return Ok(());
         }
+        if arg == "dossier" {
+            let args: Vec<String> = std::env::args().collect();
+            let mut campaign: Option<String> = None;
+            let mut report: Option<String> = None;
+            let mut namespace = "default".to_string();
+            let mut i = 2usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--campaign" => {
+                        i += 1;
+                        if i < args.len() {
+                            campaign = Some(args[i].clone());
+                        }
+                    }
+                    "--report" => {
+                        i += 1;
+                        if i < args.len() {
+                            report = Some(args[i].clone());
+                        }
+                    }
+                    "--namespace" | "-n" => {
+                        i += 1;
+                        if i < args.len() {
+                            namespace = args[i].clone();
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            // A ResearchReport curates one campaign; --report and --campaign are
+            // mutually exclusive, report taking precedence when both are given.
+            match (report, campaign) {
+                (Some(report), _) => dossier::run_report(&report, &namespace).await?,
+                (None, Some(campaign)) => dossier::run(&campaign, &namespace).await?,
+                (None, None) => {
+                    eprintln!(
+                        "Usage: athena dossier (--campaign <name> | --report <name>) [--namespace <ns>]"
+                    );
+                    std::process::exit(2);
+                }
+            }
+            return Ok(());
+        }
     }
 
     info!("starting Athena research operator");
@@ -47,7 +94,8 @@ async fn main() -> anyhow::Result<()> {
     });
     let experiments: Api<Experiment> = Api::all(client.clone());
     let benchmark_runs: Api<BenchmarkRun> = Api::all(client.clone());
-    let campaigns: Api<ResearchCampaign> = Api::all(client);
+    let campaigns: Api<ResearchCampaign> = Api::all(client.clone());
+    let reports: Api<ResearchReport> = Api::all(client);
 
     let experiment_controller = Controller::new(experiments, Config::default())
         .shutdown_on_signal()
@@ -78,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
         .run(
             campaign_reconciler::reconcile,
             campaign_reconciler::error_policy,
-            ctx,
+            ctx.clone(),
         )
         .for_each(|res| async move {
             match res {
@@ -87,10 +135,25 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-    futures::future::join3(
+    let report_controller = Controller::new(reports, Config::default())
+        .shutdown_on_signal()
+        .run(
+            report_reconciler::reconcile,
+            report_reconciler::error_policy,
+            ctx,
+        )
+        .for_each(|res| async move {
+            match res {
+                Ok(o) => info!(?o, "reconciled ResearchReport"),
+                Err(e) => error!(%e, "ResearchReport reconcile error"),
+            }
+        });
+
+    futures::future::join4(
         experiment_controller,
         benchmark_controller,
         campaign_controller,
+        report_controller,
     )
     .await;
 

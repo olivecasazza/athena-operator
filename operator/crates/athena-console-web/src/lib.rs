@@ -16,7 +16,8 @@
 pub mod models;
 
 use dioxus::prelude::*;
-use models::{ClusterSnapshot, ResourceSummary, TemplateSummary};
+use models::{ClusterSnapshot, ReportSpecDto, ReportSummary, ResourceSummary, TemplateSummary};
+use std::collections::{BTreeMap, HashSet};
 use panel_kit::{GrafanaPanel, IdePanel, LayoutBuilder, PanelKind, PanelWin, use_workspace};
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +50,8 @@ pub enum Panel {
     RuntimeProfiles,
     /// BenchmarkSuite + BenchmarkRun lists (the native `View::Benchmarks`).
     Benchmarks,
+    /// Compose a campaign's experiments into a research-paper dataset.
+    ReportCurator,
 }
 
 impl PanelKind for Panel {
@@ -62,6 +65,7 @@ impl PanelKind for Panel {
             Panel::Templates => "Templates",
             Panel::RuntimeProfiles => "Runtime Profiles",
             Panel::Benchmarks => "Benchmarks",
+            Panel::ReportCurator => "Report Curator",
         }
     }
 }
@@ -77,6 +81,7 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
         b.at(Panel::Campaigns, 16.0, 828.0, 640.0, 260.0),
         b.at(Panel::Benchmarks, 672.0, 984.0, 620.0, 320.0),
         b.at(Panel::RuntimeProfiles, 16.0, 1104.0, 640.0, 260.0),
+        b.at(Panel::ReportCurator, 16.0, 1380.0, 640.0, 520.0),
     ]
 }
 
@@ -114,6 +119,17 @@ const APP_CSS: &str = "
 .ide-block { height:260px; margin:.4rem 0; }
 .todo { color:var(--yellow); font-size:.74rem; }
 .err { color:var(--red); font-size:.76rem; }
+.preview { max-height:300px; overflow:auto; white-space:pre-wrap;
+  font-family:var(--mono); font-size:.7rem; background:var(--bg);
+  border:1px solid var(--line); padding:.4rem; margin:.4rem 0; }
+.rc-select { background:var(--bg); color:var(--fg); border:1px solid var(--line2);
+  font-family:var(--mono); font-size:.74rem; padding:.15rem .3rem; width:100%; }
+.rc-input { background:var(--bg); color:var(--fg); border:1px solid var(--line2);
+  font-family:var(--mono); font-size:.74rem; padding:.15rem .3rem; width:100%;
+  box-sizing:border-box; }
+.rc-textarea { background:var(--bg); color:var(--fg); border:1px solid var(--line2);
+  font-family:var(--mono); font-size:.72rem; padding:.2rem .3rem; width:100%;
+  box-sizing:border-box; height:4rem; resize:vertical; }
 ";
 
 /// App root.
@@ -129,6 +145,19 @@ pub fn App() -> Element {
     // Editable manifest / template documents for the IdePanels.
     let manifest_doc = use_signal(|| "# Select an experiment to load its manifest.\n".to_string());
     let template_doc = use_signal(|| "# Load a template to view its YAML.\n".to_string());
+
+    // Report Curator state.
+    let selected_campaign = use_signal(|| Option::<ResourceSummary>::None);
+    let report_name = use_signal(|| String::new());
+    let report_title = use_signal(|| String::new());
+    let excluded: Signal<HashSet<String>> = use_signal(|| HashSet::new());
+    let sec_abstract = use_signal(|| String::new());
+    let sec_related_work = use_signal(|| String::new());
+    let sec_discussion = use_signal(|| String::new());
+    let sec_limitations = use_signal(|| String::new());
+    let seeds_text = use_signal(|| String::new());
+    let preview_doc = use_signal(|| String::new());
+    let save_status = use_signal(|| String::new());
 
     let body = move |kind: Panel, _maximized: bool| -> Element {
         let snap = snapshot.read();
@@ -151,6 +180,20 @@ pub fn App() -> Element {
             Panel::Templates => templates_view(snap, template_doc),
             Panel::RuntimeProfiles => runtime_view(snap),
             Panel::Benchmarks => benchmarks_view(snap),
+            Panel::ReportCurator => report_curator_view(
+                snap,
+                selected_campaign,
+                report_name,
+                report_title,
+                excluded,
+                sec_abstract,
+                sec_related_work,
+                sec_discussion,
+                sec_limitations,
+                seeds_text,
+                preview_doc,
+                save_status,
+            ),
         }
     };
 
@@ -521,6 +564,287 @@ fn resource_table(rows: Vec<ResourceSummary>, name_col: &str, detail_col: &str) 
     }
 }
 
+/// Build a [`ReportSpecDto`] from curator form state. Shared by preview and save.
+fn build_report_spec(
+    campaign: &ResourceSummary,
+    name: &str,
+    title: &str,
+    excluded: &HashSet<String>,
+    sec_abstract: &str,
+    sec_related_work: &str,
+    sec_discussion: &str,
+    sec_limitations: &str,
+    seeds_text: &str,
+) -> ReportSpecDto {
+    let mut sections = BTreeMap::new();
+    let pairs = [
+        ("Abstract", sec_abstract),
+        ("Related Work", sec_related_work),
+        ("Discussion", sec_discussion),
+        ("Limitations", sec_limitations),
+    ];
+    for (key, val) in pairs {
+        let v = val.trim();
+        if !v.is_empty() {
+            sections.insert(key.to_string(), v.to_string());
+        }
+    }
+    let seeded_hypotheses = seeds_text
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let title_opt = {
+        let t = title.trim();
+        if t.is_empty() { None } else { Some(t.to_string()) }
+    };
+    ReportSpecDto {
+        namespace: campaign.namespace.clone(),
+        name: name.trim().to_string(),
+        campaign_ref: campaign.name.clone(),
+        title: title_opt,
+        included_experiments: vec![],
+        excluded_experiments: excluded.iter().cloned().collect(),
+        sections,
+        seeded_hypotheses,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn report_curator_view(
+    snap: ClusterSnapshot,
+    mut selected_campaign: Signal<Option<ResourceSummary>>,
+    mut report_name: Signal<String>,
+    mut report_title: Signal<String>,
+    mut excluded: Signal<HashSet<String>>,
+    mut sec_abstract: Signal<String>,
+    mut sec_related_work: Signal<String>,
+    mut sec_discussion: Signal<String>,
+    mut sec_limitations: Signal<String>,
+    mut seeds_text: Signal<String>,
+    mut preview_doc: Signal<String>,
+    mut save_status: Signal<String>,
+) -> Element {
+    // Two separate Vec copies: one for the handler closure, one for iteration.
+    let campaigns_for_change = snap.campaigns.clone();
+    let campaigns = snap.campaigns;
+    let experiments = snap.experiments;
+
+    let sel_campaign = selected_campaign.read().clone();
+    let sel_name = sel_campaign
+        .as_ref()
+        .map(|c| c.name.clone())
+        .unwrap_or_default();
+
+    let exp_rows: Vec<ResourceSummary> = experiments
+        .into_iter()
+        .filter(|e| {
+            !sel_name.is_empty() && e.campaign.as_deref() == Some(sel_name.as_str())
+        })
+        .collect();
+
+    let excluded_set = excluded.read().clone();
+
+    rsx! {
+        div { class: "view-head",
+            h2 { "Report Curator" }
+            p { "Compose a campaign's experiments into a research-paper dataset (ResearchReport)." }
+        }
+
+        div { class: "section-label", "Campaign" }
+        select {
+            class: "rc-select",
+            onchange: move |e| {
+                let name = e.value();
+                if let Some(found) = campaigns_for_change.iter().find(|c| c.name == name) {
+                    selected_campaign.set(Some(found.clone()));
+                    excluded.set(HashSet::new());
+                } else {
+                    selected_campaign.set(None);
+                }
+            },
+            option { value: "", "— select a campaign —" }
+            for c in &campaigns {
+                {
+                    let cname = c.name.clone();
+                    let cns = c.namespace.clone();
+                    let is_sel = cname == sel_name;
+                    rsx! {
+                        option { value: "{cname}", selected: is_sel, "{cname} ({cns})" }
+                    }
+                }
+            }
+        }
+
+        div { class: "section-label", "Report Name" }
+        input {
+            class: "rc-input",
+            r#type: "text",
+            value: "{report_name()}",
+            placeholder: "my-report-2025",
+            oninput: move |e| report_name.set(e.value()),
+        }
+        div { class: "section-label", "Title (optional)" }
+        input {
+            class: "rc-input",
+            r#type: "text",
+            value: "{report_title()}",
+            placeholder: "Human-readable paper title",
+            oninput: move |e| report_title.set(e.value()),
+        }
+
+        div { class: "section-label", "Experiments" }
+        table { class: "tbl",
+            thead {
+                tr {
+                    th { "Include" }
+                    th { "Experiment" }
+                    th { "Phase" }
+                    th { "Detail" }
+                }
+            }
+            tbody {
+                if sel_name.is_empty() {
+                    tr { td { colspan: "4", class: "muted", "Select a campaign." } }
+                } else if exp_rows.is_empty() {
+                    tr { td { colspan: "4", class: "muted", "No experiments in this campaign." } }
+                }
+                for exp in exp_rows {
+                    {
+                        let exp_name = exp.name.clone();
+                        let is_included = !excluded_set.contains(&exp_name);
+                        rsx! {
+                            tr {
+                                td {
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: is_included,
+                                        onchange: move |_| {
+                                            let mut set = excluded.read().clone();
+                                            if set.contains(&exp_name) {
+                                                set.remove(&exp_name);
+                                            } else {
+                                                set.insert(exp_name.clone());
+                                            }
+                                            excluded.set(set);
+                                        }
+                                    }
+                                }
+                                td { "{exp.name}" }
+                                td { class: "phase", "{exp.phase}" }
+                                td { "{exp.detail}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        div { class: "section-label", "Abstract" }
+        textarea {
+            class: "rc-textarea",
+            value: "{sec_abstract()}",
+            oninput: move |e| sec_abstract.set(e.value()),
+        }
+        div { class: "section-label", "Related Work" }
+        textarea {
+            class: "rc-textarea",
+            value: "{sec_related_work()}",
+            oninput: move |e| sec_related_work.set(e.value()),
+        }
+        div { class: "section-label", "Discussion" }
+        textarea {
+            class: "rc-textarea",
+            value: "{sec_discussion()}",
+            oninput: move |e| sec_discussion.set(e.value()),
+        }
+        div { class: "section-label", "Limitations" }
+        textarea {
+            class: "rc-textarea",
+            value: "{sec_limitations()}",
+            oninput: move |e| sec_limitations.set(e.value()),
+        }
+        div { class: "section-label", "Seeded Hypotheses (one per line)" }
+        textarea {
+            class: "rc-textarea",
+            value: "{seeds_text()}",
+            oninput: move |e| seeds_text.set(e.value()),
+        }
+
+        div { style: "display:flex;gap:.5rem;margin:.5rem 0;",
+            button {
+                class: "btn",
+                onclick: move |_| {
+                    let sel = selected_campaign.read().clone();
+                    let rn = report_name.read().clone();
+                    let rt = report_title.read().clone();
+                    let ex = excluded.read().clone();
+                    let sa = sec_abstract.read().clone();
+                    let srw = sec_related_work.read().clone();
+                    let sd = sec_discussion.read().clone();
+                    let sl = sec_limitations.read().clone();
+                    let st = seeds_text.read().clone();
+                    let camp = match sel {
+                        None => {
+                            preview_doc.set("Select a campaign first.".to_string());
+                            return;
+                        }
+                        Some(c) => c,
+                    };
+                    if rn.trim().is_empty() {
+                        preview_doc.set("Enter a report name.".to_string());
+                        return;
+                    }
+                    let dto = build_report_spec(&camp, &rn, &rt, &ex, &sa, &srw, &sd, &sl, &st);
+                    spawn(async move {
+                        match preview_report(dto).await {
+                            Ok(md) => preview_doc.set(md),
+                            Err(e) => preview_doc.set(format!("Preview error: {e}")),
+                        }
+                    });
+                },
+                "Preview Dossier"
+            }
+            button {
+                class: "btn",
+                onclick: move |_| {
+                    let sel = selected_campaign.read().clone();
+                    let rn = report_name.read().clone();
+                    let rt = report_title.read().clone();
+                    let ex = excluded.read().clone();
+                    let sa = sec_abstract.read().clone();
+                    let srw = sec_related_work.read().clone();
+                    let sd = sec_discussion.read().clone();
+                    let sl = sec_limitations.read().clone();
+                    let st = seeds_text.read().clone();
+                    let camp = match sel {
+                        None => {
+                            save_status.set("Select a campaign first.".to_string());
+                            return;
+                        }
+                        Some(c) => c,
+                    };
+                    if rn.trim().is_empty() {
+                        save_status.set("Enter a report name.".to_string());
+                        return;
+                    }
+                    let dto = build_report_spec(&camp, &rn, &rt, &ex, &sa, &srw, &sd, &sl, &st);
+                    spawn(async move {
+                        match save_report(dto).await {
+                            Ok(s) => save_status.set(format!("Saved: {} ({})", s.name, s.phase)),
+                            Err(e) => save_status.set(format!("Save error: {e}")),
+                        }
+                    });
+                },
+                "Save Report"
+            }
+        }
+
+        pre { class: "preview", "{preview_doc}" }
+        p { class: "err", "{save_status}" }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Data layer (frontend side): plain reqwest fetches to the axum backend.
 // ---------------------------------------------------------------------------
@@ -564,4 +888,34 @@ async fn fetch_template_yaml(namespace: &str, name: &str) -> Result<String, Stri
         .text()
         .await
         .map_err(|e| e.to_string())
+}
+
+/// `POST /api/reports` — persist a ResearchReport spec, returns the summary row.
+async fn save_report(dto: ReportSpecDto) -> Result<ReportSummary, String> {
+    let url = format!("{}/api/reports", api_base());
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&dto)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(resp.text().await.unwrap_or_else(|e| e.to_string()));
+    }
+    resp.json::<ReportSummary>().await.map_err(|e| e.to_string())
+}
+
+/// `POST /api/reports/preview` — compose the dossier Markdown; nothing persisted.
+async fn preview_report(dto: ReportSpecDto) -> Result<String, String> {
+    let url = format!("{}/api/reports/preview", api_base());
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&dto)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(resp.text().await.unwrap_or_else(|e| e.to_string()));
+    }
+    resp.text().await.map_err(|e| e.to_string())
 }

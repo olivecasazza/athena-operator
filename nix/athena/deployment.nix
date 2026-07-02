@@ -17,7 +17,7 @@ let
     image = {
       repository = "ghcr.io/olivecasazza/athena-operator";
       pullPolicy = "IfNotPresent";
-      tag = "latest@sha256:80c87719a1ed5be2e59037e8f734bbb1524d23094804321a18dd965325d8c8bc";
+      tag = "latest@sha256:caff7fb48dead330a79fbee4c8e908cbb442e2e2055d1659bea51a1e47ae25d5";
     };
 
     operator = {
@@ -76,6 +76,7 @@ let
         "benchmarksuites"
         "benchmarkruns"
         "metricsources"
+        "researchreports"
       ];
       statusResources = map (resource: "${resource}/status") api.resources;
     };
@@ -126,6 +127,18 @@ let
     }
     {
       apiGroups = [ deployment.api.group ];
+      # researchreports: scientist-authored paper-dataset curation, written by the
+      # console BFF (spec only — never status). No delete: the console curates, it
+      # does not garbage-collect.
+      resources = [ "researchreports" ];
+      verbs = [
+        "create"
+        "update"
+        "patch"
+      ];
+    }
+    {
+      apiGroups = [ deployment.api.group ];
       resources = deployment.api.statusResources;
       verbs = [
         "get"
@@ -148,11 +161,14 @@ let
     }
     {
       apiGroups = [ "" ];
+      # configmaps: the report reconciler publishes each assembled dossier into an
+      # owner-referenced ConfigMap (<report>-dataset).
       resources = [
         "pods"
         "pods/log"
         "persistentvolumeclaims"
         "events"
+        "configmaps"
       ];
       verbs = [
         "get"

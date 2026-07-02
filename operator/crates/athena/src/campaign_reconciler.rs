@@ -611,6 +611,7 @@ mod tests {
                 )]),
                 defaults: BTreeMap::from([("lr".to_string(), json!(lr))]),
                 dashboard: None,
+                research_objective: None,
             },
             status: None,
         }

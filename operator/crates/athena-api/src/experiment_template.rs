@@ -27,6 +27,13 @@ pub struct ExperimentTemplateSpec {
     pub defaults: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard: Option<DashboardSpec>,
+    /// Free-text research intent for this line of experiments: the question being
+    /// asked and why it matters. Not derivable from any run; it seeds the
+    /// introduction/motivation when a research dossier is assembled from a
+    /// campaign's experiments. Parameter and metric `description`s supply the rest
+    /// of the semantic glossary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_objective: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
