@@ -1,0 +1,34 @@
+# Cluster GPU workload tiers. Shared vocabulary for every GPU consumer (athena
+# experiments, hpc spot RayJobs, canaries) — referenced via
+# RuntimeProfile.spec.scheduling.priorityClassName or pod priorityClassName.
+#
+#   gpu-canary    — short validation/health runs; may preempt batch+scavenger.
+#   gpu-batch     — normal training jobs; may preempt scavenger only.
+#   gpu-scavenger — long checkpointed exploratory trials (athena campaigns, spot
+#                   PBT); below default priority, never preempts, first to be
+#                   preempted. Safe because both trainers checkpoint/resume and
+#                   the athena reconciler treats DisruptionTarget as retryable.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: gpu-canary
+value: 100000
+preemptionPolicy: PreemptLowerPriority
+description: "Short GPU validation runs; preempts batch and scavenger tiers."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: gpu-batch
+value: 10000
+preemptionPolicy: PreemptLowerPriority
+description: "Standard GPU training jobs; preempts scavenger tier only."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: gpu-scavenger
+value: -10
+preemptionPolicy: Never
+description: "Checkpointed long-running exploratory GPU trials; preemptible, never preempts."

@@ -45,9 +45,14 @@ spec:
       memory: "48Gi"
       nvidia.com/gpu: "1"
   scheduling:
-    # Adjust to your GPU pool (Hephaestus scales it under contention).
+    # seir's RTX 5000 pool — deliberately DISJOINT from the spot RayJobs, which
+    # pin Quadro-RTX-4000 (hp01-03). Splitting pools is the cheapest way to keep
+    # long-running spot trials and athena campaigns from blocking each other;
+    # single product per campaign also keeps wall-clock-budget runs comparable.
     nodeSelector:
-      nvidia.com/gpu.product: Quadro-RTX-4000
+      nvidia.com/gpu.product: Quadro-RTX-5000
+    # Long exploratory trials are checkpointed → safe to run preemptible.
+    priorityClassName: gpu-scavenger
     tolerations:
       - key: nvidia.com/gpu
         operator: Exists
@@ -122,7 +127,7 @@ spec:
   templateRef: gpt-muon-lr-repro
   strategy:
     type: heuristic          # hill-climb matrix_lr from the default
-  concurrency: 3
+  concurrency: 2   # seir pool = 2 GPUs; don't queue futile pods
   budget:
     maxExperiments: 12
     maxDuration: "12h"
@@ -191,9 +196,9 @@ spec:
   templateRef: gpt-optimizer-search
   strategy:
     type: pbt                # perturbs every numeric param around the best
-  populationSize: 4
+  populationSize: 2  # sized to seir's 2 GPUs (PBT target = populationSize)
   perturbFactor: 1.2
-  concurrency: 4
+  concurrency: 2
   budget:
     maxExperiments: 24
     maxDuration: "24h"
