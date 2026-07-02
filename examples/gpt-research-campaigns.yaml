@@ -73,9 +73,9 @@ spec:
     - name: HF_HOME
       value: /workspace/.hf
     # Infra knob, deliberately NOT a searched parameter (strategies perturb all
-    # numeric params). 32 rows × 2048 tokens fits fp16+SDPA on a 16GB RTX 5000.
+    # numeric params). 8 rows × 2048 tokens; SDPA-without-flash materializes per-layer attention matrices, so bigger micro-batches OOM the 16GB RTX 5000 (grad-accum keeps the effective batch).
     - name: TRAIN_DEVICE_BATCH_SIZE
-      value: "32"
+      value: "8"
   metricsEndpoint:
     prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
 ---
