@@ -1,0 +1,199 @@
+# GPT research campaigns (Tier 1 validate · Tier 2 open-empirical) for Athena.
+#
+# These run the in-repo GPT pretrainer (experiments/train.py, a nanochat-derived
+# single-GPU trainer) as an Athena hyperparameter-search campaign. train.py now:
+#   - reads the campaign's swept `parameters` from ATHENA_EXPERIMENT_SPEC
+#     (depth, seed, embedding_lr, unembedding_lr, matrix_lr, scalar_lr,
+#     weight_decay, window_pattern), so the search actually varies the run; and
+#   - emits its final objective (val_bpb) in Athena's metric contract
+#     (JSON to the pod termination message + metrics.json) with a metric_series
+#     header, so the campaign can rank trials.
+#
+# PREREQUISITES (not runnable until these exist — flagged honestly, cf. spot-pbt.yaml):
+#   1. A trainer IMAGE that packages experiments/ (train.py, prepare.py,
+#      athena_metrics.py) + torch + flash-attn3 + the `kernels` dep, on a CUDA base.
+#      `Dockerfile.athena` builds only the operator — this image does NOT exist yet.
+#      Replace the `image:` placeholder below once built.
+#   2. DATA access: prepare.py needs the tokenizer + pretraining corpus (HF download
+#      or a mounted dataset). Wire via env/secret before applying.
+#   3. GPU capacity: 1 GPU per trial; Hephaestus scales the pool. Adjust the
+#      nodeSelector to your GPU product.
+# Apply with `kubectl apply -f` (or add to a Flux kustomization) only after 1–3.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: gpt-trainer-gpu
+  namespace: apps
+spec:
+  runtime:
+    type: pytorch
+    mode: batchJob
+  # PLACEHOLDER — build an image packaging experiments/ + torch + flash-attn3 + kernels.
+  image: "ghcr.io/olivecasazza/athena-gpt-trainer:TODO"
+  imagePullSecrets:
+    - name: ghcr-pull
+  command:
+    - python
+    - experiments/train.py
+  resources:
+    requests:
+      cpu: "8"
+      memory: "32Gi"
+      nvidia.com/gpu: "1"
+    limits:
+      memory: "48Gi"
+      nvidia.com/gpu: "1"
+  scheduling:
+    # Adjust to your GPU pool (Hephaestus scales it under contention).
+    nodeSelector:
+      nvidia.com/gpu.product: Quadro-RTX-4000
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+  storage:
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+    createWorkspaceClaim: false
+    workspaceAccessModes:
+      - ReadWriteMany
+    workspaceStorageClassName: nfs
+  # Data/cache wiring — fill in for your corpus (HF cache dir, dataset secret, etc.).
+  env:
+    - name: HF_HOME
+      value: /workspace/.hf
+  metricsEndpoint:
+    prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+---
+# ── Tier 1 — VALIDATE: reproduce a known result ──────────────────────────────
+# Reproduce the known Muon learning-rate sweet spot for this ~8-layer model
+# family (nanochat / Keller-Jordan speedrun regime): the optimal matrix_lr sits
+# near ~0.04 and val_bpb degrades predictably away from it. A heuristic hill-climb
+# from the default should converge back toward the published optimum — that
+# agreement is the validation.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: gpt-muon-lr-repro
+  namespace: apps
+spec:
+  runtimeProfileRef: gpt-trainer-gpu
+  source:
+    git:
+      url: "https://github.com/olivecasazza/athena-operator"
+      ref: "main"
+  objective:
+    metric: "val_bpb"
+    goal: "minimize"
+  metrics:
+    parser:
+      type: "file"
+      path: "metrics.json"
+  researchObjective: >-
+    Validation tier: does Athena's search recover the known Muon learning-rate
+    optimum for this 8-layer GPT (~0.04), and does val_bpb worsen predictably as
+    matrix_lr moves away from it? Agreement with the published sweet spot
+    validates the platform end-to-end (parameter injection → training →
+    objective ingestion → ranking).
+  defaults:
+    matrix_lr: 0.04
+  parameterSchema:
+    matrix_lr:
+      type: number
+      description: "Muon matrix learning rate. Known optimum ~0.04 for this model family."
+      default: 0.04
+  dashboard:
+    title: "GPT Muon-LR reproduction"
+    metrics:
+      val_bpb:
+        label: "Validation bits-per-byte"
+        unit: bpb
+        goal: minimize
+        baseline: 1.0
+        description: "Primary objective; lower is better. Reproduces the known LR optimum."
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: gpt-muon-lr-repro
+  namespace: apps
+spec:
+  templateRef: gpt-muon-lr-repro
+  strategy:
+    type: heuristic          # hill-climb matrix_lr from the default
+  concurrency: 3
+  budget:
+    maxExperiments: 12
+    maxDuration: "12h"
+---
+# ── Tier 2 — OPEN EMPIRICAL: human-framed novel search ───────────────────────
+# Open question (not settled in the literature at sub-100M scale): is the
+# hand-tuned nanochat optimizer config actually optimal here, or can a
+# population-based search over the LRs + weight decay beat it? Athena searches the
+# space; the human framed the question — NOT autonomous hypothesis origination.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: gpt-optimizer-search
+  namespace: apps
+spec:
+  runtimeProfileRef: gpt-trainer-gpu
+  source:
+    git:
+      url: "https://github.com/olivecasazza/athena-operator"
+      ref: "main"
+  objective:
+    metric: "val_bpb"
+    goal: "minimize"
+  metrics:
+    parser:
+      type: "file"
+      path: "metrics.json"
+  researchObjective: >-
+    Open-empirical tier: can population-based training over (embedding_lr,
+    matrix_lr, weight_decay) find a config that beats the hand-tuned nanochat
+    baseline for this 8-layer GPT? The optimal embedding/matrix LR ratio and
+    weight-decay strength at this scale are not established in the literature.
+  defaults:
+    embedding_lr: 0.6
+    matrix_lr: 0.04
+    weight_decay: 0.2
+  parameterSchema:
+    embedding_lr:
+      type: number
+      description: "AdamW embedding learning rate (baseline 0.6)."
+      default: 0.6
+    matrix_lr:
+      type: number
+      description: "Muon matrix learning rate (baseline 0.04)."
+      default: 0.04
+    weight_decay:
+      type: number
+      description: "Muon weight decay (baseline 0.2)."
+      default: 0.2
+  dashboard:
+    title: "GPT optimizer PBT"
+    metrics:
+      val_bpb:
+        label: "Validation bits-per-byte"
+        unit: bpb
+        goal: minimize
+        baseline: 1.0
+        description: "Primary PBT objective; can the population beat the hand-tuned baseline?"
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: gpt-optimizer-pbt
+  namespace: apps
+spec:
+  templateRef: gpt-optimizer-search
+  strategy:
+    type: pbt                # perturbs every numeric param around the best
+  populationSize: 4
+  perturbFactor: 1.2
+  concurrency: 4
+  budget:
+    maxExperiments: 24
+    maxDuration: "24h"

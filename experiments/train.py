@@ -9,6 +9,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import gc
+import json
 import math
 import time
 from dataclasses import dataclass, asdict
@@ -436,11 +437,44 @@ FINAL_LR_FRAC = 0.0
 
 DEPTH = 8
 DEVICE_BATCH_SIZE = 128
+SEED = 42
+
+# Athena injects the Experiment's swept parameters as JSON in
+# ATHENA_EXPERIMENT_SPEC. Override the hardcoded hyperparameters with any the
+# campaign is searching over, so a hyperparameter-search campaign actually varies
+# the run (otherwise every trial trains identically). Unset keys keep the defaults
+# above; a malformed value falls back rather than crashing the trial.
+try:
+    _params = (json.loads(os.environ.get("ATHENA_EXPERIMENT_SPEC", "") or "{}").get("parameters") or {})
+except Exception:
+    _params = {}
+
+
+def _param(name, default, cast=float):
+    value = _params.get(name)
+    if value is None:
+        return default
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        return default
+
+
+DEPTH = _param("depth", DEPTH, int)
+SEED = _param("seed", SEED, int)
+EMBEDDING_LR = _param("embedding_lr", EMBEDDING_LR)
+UNEMBEDDING_LR = _param("unembedding_lr", UNEMBEDDING_LR)
+MATRIX_LR = _param("matrix_lr", MATRIX_LR)
+SCALAR_LR = _param("scalar_lr", SCALAR_LR)
+WEIGHT_DECAY = _param("weight_decay", WEIGHT_DECAY)
+WINDOW_PATTERN = _param("window_pattern", WINDOW_PATTERN, str)
+if _params:
+    print(f"[athena] hyperparameters overridden by campaign: {sorted(_params)}")
 
 
 t_start = time.time()
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
 torch.set_float32_matmul_precision("high")
 device = torch.device("cuda")
 autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -475,7 +509,7 @@ for key, value in param_counts.items():
 num_params = param_counts['total']
 num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
-provenance(seed=42, depth=DEPTH, model_config=asdict(config), num_params=num_params, num_flops_per_token=num_flops_per_token, total_batch_size=TOTAL_BATCH_SIZE, matrix_lr=MATRIX_LR, embedding_lr=EMBEDDING_LR, time_budget=TIME_BUDGET)
+provenance(seed=SEED, depth=DEPTH, model_config=asdict(config), num_params=num_params, num_flops_per_token=num_flops_per_token, total_batch_size=TOTAL_BATCH_SIZE, matrix_lr=MATRIX_LR, embedding_lr=EMBEDDING_LR, weight_decay=WEIGHT_DECAY, window_pattern=WINDOW_PATTERN, time_budget=TIME_BUDGET)
 journal("experiment_started", depth=DEPTH, num_params=num_params, time_budget=TIME_BUDGET)
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
@@ -620,3 +654,39 @@ _athm.store("peak_vram_mb", peak_vram_mb)
 _athm.store("total_tokens_m", total_tokens / 1e6)
 _athm.store("num_steps", step)
 journal("experiment_finished", val_bpb=val_bpb, training_seconds=total_training_time, mfu_percent=steady_state_mfu, total_tokens_m=total_tokens/1e6, num_steps=step, peak_vram_mb=peak_vram_mb)
+
+# Athena metric contract: the operator ranks experiments by the objective it reads
+# from the pod's termination message (JSON), copying scalar fields into
+# status.metrics and using the `metric_series` header for objective/goal. Emit the
+# final summary there (and a durable metrics.json in the workspace). Best-effort:
+# a local run without these paths just skips it.
+_summary = {
+    "val_bpb": val_bpb,
+    "training_seconds": total_training_time,
+    "total_seconds": t_end - t_start,
+    "peak_vram_mb": peak_vram_mb,
+    "mfu_percent": steady_state_mfu,
+    "total_tokens_m": total_tokens / 1e6,
+    "num_steps": step,
+    "num_params_m": num_params / 1e6,
+    "depth": DEPTH,
+    "metric_series": {
+        "objective": "val_bpb",
+        "goal": "minimize",
+        "points": [{"name": "val_bpb", "value": val_bpb, "step": step}],
+    },
+}
+_ws = os.environ.get("ATHENA_WORKSPACE_PATH")
+if _ws:
+    try:
+        os.makedirs(_ws, exist_ok=True)
+        with open(os.path.join(_ws, "metrics.json"), "w") as _fh:
+            json.dump(_summary, _fh)
+    except Exception:
+        pass
+try:
+    # /dev/termination-log is what the operator actually parses (terminationMessagePolicy=File).
+    with open("/dev/termination-log", "w") as _fh:
+        _fh.write(json.dumps(_summary))
+except Exception:
+    pass
