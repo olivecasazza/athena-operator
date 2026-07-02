@@ -32,12 +32,15 @@ spec:
   imagePullSecrets:
     - name: ghcr-pull
   resources:
+    # seir runs other services; its CPUs/memory are heavily requested while the
+    # GPUs sit free. Training is GPU-bound (single light dataloader), so request
+    # small and let limits overcommit.
     requests:
-      cpu: "8"
-      memory: "32Gi"
+      cpu: "2"
+      memory: "3Gi"
       nvidia.com/gpu: "1"
     limits:
-      memory: "48Gi"
+      memory: "16Gi"
       nvidia.com/gpu: "1"
   scheduling:
     # seir's RTX 5000 pool — deliberately DISJOINT from the spot RayJobs, which

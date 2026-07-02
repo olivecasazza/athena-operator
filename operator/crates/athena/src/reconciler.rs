@@ -182,21 +182,26 @@ async fn ensure_experiment_job(
     let metrics_path = resolve_metrics_path(&workspace_path, &template.spec.metrics.parser.path);
     let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
     let workspace_claim = ensure_workspace_claim(ctx.clone(), ns, &profile).await?;
-    if jobs.get_opt(&job_name).await?.is_none() {
-        jobs.create(
-            &PostParams::default(),
-            &build_job(
-                experiment,
-                &profile,
-                &job_name,
-                &workspace_path,
-                &metrics_path,
-                ns,
-                name,
-            ),
-        )
-        .await?;
+    if jobs.get_opt(&job_name).await?.is_some() {
+        // Job already exists: reconcile_experiment_status owns the phase from
+        // here. Re-stamping the initial Running status on every pass would
+        // ping-pong with its Preparing verdict while a pod is unschedulable
+        // (each patch re-triggering the watch → a permanent flap).
+        return Ok(());
     }
+    jobs.create(
+        &PostParams::default(),
+        &build_job(
+            experiment,
+            &profile,
+            &job_name,
+            &workspace_path,
+            &metrics_path,
+            ns,
+            name,
+        ),
+    )
+    .await?;
 
     let status = ExperimentStatus {
         phase: ExperimentPhase::Running,
@@ -1056,6 +1061,11 @@ fn build_job(
             name: Some(job_name.to_string()),
             namespace: Some(namespace.to_string()),
             labels: Some(labels.clone()),
+            // GC the Job (and its pods) with the Experiment; without this a
+            // deleted Experiment orphans its Job and a recreated one adopts the
+            // stale Job spec instead of rebuilding it.
+            owner_references: kube::Resource::controller_owner_ref(experiment, &())
+                .map(|r| vec![r]),
             ..Default::default()
         },
         spec: Some(JobSpec {
