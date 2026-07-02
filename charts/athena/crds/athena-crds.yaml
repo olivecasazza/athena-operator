@@ -226,6 +226,11 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "runtimeClassName": {
+                        "description": "Container runtime class for the experiment pods (e.g. `nvidia` on k3s nodes where the NVIDIA runtime is not containerd's default — without it the pod gets the GPU resource but no driver).",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "tolerations": {
                         "x-kubernetes-preserve-unknown-fields": true
                       }
