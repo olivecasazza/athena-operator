@@ -30,6 +30,7 @@ rules:
       - benchmarksuites
       - benchmarkruns
       - metricsources
+      - researchreports
     verbs:
       - get
       - list
@@ -81,6 +82,7 @@ rules:
       - benchmarksuites
       - benchmarkruns
       - metricsources
+      - researchreports
     verbs:
       - get
       - list
@@ -98,6 +100,14 @@ rules:
   - apiGroups:
       - research.nixlab.io
     resources:
+      - researchreports
+    verbs:
+      - create
+      - update
+      - patch
+  - apiGroups:
+      - research.nixlab.io
+    resources:
       - runtimeprofiles/status
       - experimenttemplates/status
       - researchcampaigns/status
@@ -105,6 +115,7 @@ rules:
       - benchmarksuites/status
       - benchmarkruns/status
       - metricsources/status
+      - researchreports/status
     verbs:
       - get
       - patch
@@ -128,6 +139,7 @@ rules:
       - pods/log
       - persistentvolumeclaims
       - events
+      - configmaps
     verbs:
       - get
       - list
