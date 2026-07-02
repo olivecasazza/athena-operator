@@ -4,6 +4,10 @@
 # runtime when the GPU supports it; Turing cards use the SDPA fallback in-tree.
 FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
 
+# triton (torch.compile) builds its launcher stubs with a host C compiler; the
+# -runtime base ships none ("Failed to find C compiler" at first compiled step).
+RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir \
     kernels>=0.11.7 \
     rustbpe>=0.1.0 \

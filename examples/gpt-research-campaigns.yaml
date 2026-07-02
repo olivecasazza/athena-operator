@@ -28,7 +28,7 @@ spec:
   # Built from Dockerfile.trainer (torch cu128 base + experiments/). Image CMD
   # runs prepare.py (idempotent shard/tokenizer download into $HOME cache) then
   # train.py. Turing GPUs use the in-tree SDPA fallback + fp16 GradScaler.
-  image: "ghcr.io/olivecasazza/athena-gpt-trainer:v1"
+  image: "ghcr.io/olivecasazza/athena-gpt-trainer:v2"
   imagePullSecrets:
     - name: ghcr-pull
   resources:
