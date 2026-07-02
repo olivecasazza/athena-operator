@@ -10,15 +10,11 @@
 #     header, so the campaign can rank trials.
 #
 # PREREQUISITES (not runnable until these exist — flagged honestly, cf. spot-pbt.yaml):
-#   1. A trainer IMAGE that packages experiments/ (train.py, prepare.py,
-#      athena_metrics.py) + torch + flash-attn3 + the `kernels` dep, on a CUDA base.
-#      `Dockerfile.athena` builds only the operator — this image does NOT exist yet.
-#      Replace the `image:` placeholder below once built.
-#   2. DATA access: prepare.py needs the tokenizer + pretraining corpus (HF download
-#      or a mounted dataset). Wire via env/secret before applying.
-#   3. GPU capacity: 1 GPU per trial; Hephaestus scales the pool. Adjust the
-#      nodeSelector to your GPU product.
-# Apply with `kubectl apply -f` (or add to a Flux kustomization) only after 1–3.
+#   1. Trainer image: Dockerfile.trainer → ghcr.io/olivecasazza/athena-gpt-trainer.
+#   2. Data: prepare.py downloads shards + trains the tokenizer on first run
+#      (HOME=/workspace → cached on the shared PVC thereafter).
+#   3. GPU capacity: 1 GPU per trial on the seir RTX 5000 pool.
+# Smoke-test one Experiment (device_batch_size small) before a full campaign.
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: RuntimeProfile
@@ -29,13 +25,12 @@ spec:
   runtime:
     type: pytorch
     mode: batchJob
-  # PLACEHOLDER — build an image packaging experiments/ + torch + flash-attn3 + kernels.
-  image: "ghcr.io/olivecasazza/athena-gpt-trainer:TODO"
+  # Built from Dockerfile.trainer (torch cu128 base + experiments/). Image CMD
+  # runs prepare.py (idempotent shard/tokenizer download into $HOME cache) then
+  # train.py. Turing GPUs use the in-tree SDPA fallback + fp16 GradScaler.
+  image: "ghcr.io/olivecasazza/athena-gpt-trainer:v1"
   imagePullSecrets:
     - name: ghcr-pull
-  command:
-    - python
-    - experiments/train.py
   resources:
     requests:
       cpu: "8"
@@ -64,10 +59,17 @@ spec:
     workspaceAccessModes:
       - ReadWriteMany
     workspaceStorageClassName: nfs
-  # Data/cache wiring — fill in for your corpus (HF cache dir, dataset secret, etc.).
+  # HOME on the shared PVC => ~/.cache/autoresearch (shards + tokenizer) persists
+  # across trials; first trial pays the download, the rest reuse it.
   env:
+    - name: HOME
+      value: /workspace
     - name: HF_HOME
       value: /workspace/.hf
+    # Infra knob, deliberately NOT a searched parameter (strategies perturb all
+    # numeric params). 32 rows × 2048 tokens fits fp16+SDPA on a 16GB RTX 5000.
+    - name: TRAIN_DEVICE_BATCH_SIZE
+      value: "32"
   metricsEndpoint:
     prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
 ---
