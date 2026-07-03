@@ -890,6 +890,11 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "figuresUri": {
+                        "description": "Directory of rendered scientific figures (loss curves etc.) plus the re-plottable per-step series the runner writes alongside them.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "journalUri": {
                         "description": "Append-only JSONL research journal the runner writes over the run (hypothesis, config, per-eval progress, dead ends, final result). Durable on the shared workspace PVC; the primary narrative source for paper writeups.",
                         "nullable": true,
@@ -2709,6 +2714,39 @@
                     "description": "Experiments to include by name. Empty = every experiment in the campaign (minus `excludedExperiments`); the curator UI lists them all and the scientist prunes failed/unwanted runs via `excludedExperiments`. No phase filter is applied — inclusion is an explicit curation decision.",
                     "items": {
                       "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "references": {
+                    "description": "Structured external citations. Narrative sections reference them inline as `[@key]`; the dossier renders a References section in both formats, and the reconciler surfaces cited-but-undefined / defined-but-uncited keys as conditions. Verification of the claims themselves is a separate adversarial audit workload, never self-asserted here.",
+                    "items": {
+                      "properties": {
+                        "doi": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "key": {
+                          "description": "Citation key used inline as `[@key]` in section text.",
+                          "type": "string"
+                        },
+                        "supports": {
+                          "description": "The specific claim in this report the source is cited to support — the unit the adversarial audit verifies.",
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "url": {
+                          "nullable": true,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "key",
+                        "title"
+                      ],
+                      "type": "object"
                     },
                     "type": "array"
                   },
