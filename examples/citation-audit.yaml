@@ -13,7 +13,7 @@ metadata:
   namespace: apps
 spec:
   runtime: {type: pytorch, mode: batchJob}
-  image: "ghcr.io/olivecasazza/athena-citation-audit:v1"
+  image: "ghcr.io/olivecasazza/athena-citation-audit:v2"
   imagePullSecrets: [{name: ghcr-pull}]
   resources:
     requests: {cpu: "250m", memory: "256Mi"}
