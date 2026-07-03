@@ -14,18 +14,18 @@ use athena_api::research_report::ResearchReport;
 use kube::{Api, Client};
 
 /// Uncurated dossier for a campaign.
-pub async fn run(campaign_name: &str, namespace: &str) -> Result<()> {
+pub async fn run(campaign_name: &str, namespace: &str, latex: bool) -> Result<()> {
     let client = Client::try_default().await?;
-    let (doc, _) = dossier::assemble(&client, campaign_name, namespace, None)
+    let d = dossier::assemble(&client, campaign_name, namespace, None)
         .await
         .with_context(|| format!("assembling dossier for campaign '{campaign_name}'"))?;
-    print!("{doc}");
+    print!("{}", if latex { d.latex } else { d.markdown });
     Ok(())
 }
 
 /// Dossier curated by a ResearchReport (resolves its campaign and applies the
 /// report's include/exclude, sections and seeded hypotheses).
-pub async fn run_report(report_name: &str, namespace: &str) -> Result<()> {
+pub async fn run_report(report_name: &str, namespace: &str, latex: bool) -> Result<()> {
     let client = Client::try_default().await?;
     let reports: Api<ResearchReport> = Api::namespaced(client.clone(), namespace);
     let report = reports.get(report_name).await.with_context(|| {
@@ -33,9 +33,9 @@ pub async fn run_report(report_name: &str, namespace: &str) -> Result<()> {
     })?;
     let campaign_name = report.spec.campaign_ref.clone();
     let curation = Curation::from_spec(&report.spec);
-    let (doc, _) = dossier::assemble(&client, &campaign_name, namespace, Some(&curation))
+    let d = dossier::assemble(&client, &campaign_name, namespace, Some(&curation))
         .await
         .with_context(|| format!("assembling curated dossier from report '{report_name}'"))?;
-    print!("{doc}");
+    print!("{}", if latex { d.latex } else { d.markdown });
     Ok(())
 }

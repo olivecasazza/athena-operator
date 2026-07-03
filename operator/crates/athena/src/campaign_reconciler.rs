@@ -170,16 +170,45 @@ pub async fn reconcile(campaign: Arc<ResearchCampaign>, ctx: Arc<Context>) -> Re
             Some(f) if f > 0.0 => f,
             _ => PBT_FACTOR,
         };
+        // Already-tried science points (all children, any phase) for duplicate
+        // detection; grows with the candidates created this pass.
+        let mut seen: std::collections::HashSet<String> = exps
+            .items
+            .iter()
+            .map(|e| science_key(&e.spec.parameters))
+            .collect();
         for i in 0..want.min(budget_left) {
             let idx = total + i;
-            let (params, hypothesis, checkpoint_policy) = if is_pbt {
-                let (params, hypothesis) =
-                    pbt_experiment(&template, best_ctx, perturb_factor, idx);
-                (params, hypothesis, pbt_checkpoint_policy(best_exp))
-            } else {
-                let (params, hypothesis) = next_experiment(&template, best_ctx, idx);
-                (params, hypothesis, None)
+            let generate = |salt: u32| {
+                if is_pbt {
+                    let (params, hypothesis) =
+                        pbt_experiment(&template, best_ctx, perturb_factor, idx, salt);
+                    (params, hypothesis, pbt_checkpoint_policy(best_exp))
+                } else {
+                    let (params, hypothesis) = next_experiment(&template, best_ctx, idx, salt);
+                    (params, hypothesis, None)
+                }
             };
+            // Dedup only applies when there is a best to perturb from — baselines
+            // have nothing to vary. Bounded re-rolls; if the local lattice is
+            // exhausted, accept the duplicate as a labeled replicate (liveness).
+            let mut chosen = generate(0);
+            if best_ctx.is_some() {
+                let mut deduped = false;
+                for salt in 0..=MAX_REROLLS {
+                    let candidate = generate(salt);
+                    if !seen.contains(&science_key(&candidate.0)) {
+                        chosen = candidate;
+                        deduped = true;
+                        break;
+                    }
+                }
+                if !deduped {
+                    chosen.1 = format!("{} [replicate: local search space exhausted]", chosen.1);
+                }
+            }
+            seen.insert(science_key(&chosen.0));
+            let (params, hypothesis, checkpoint_policy) = chosen;
             let exp =
                 build_experiment(&campaign, &name, &ns, idx, params, hypothesis, checkpoint_policy);
             match experiments.create(&PostParams::default(), &exp).await {
@@ -253,6 +282,25 @@ fn numeric_params(base: &BTreeMap<String, Value>) -> Vec<String> {
         .collect()
 }
 
+/// Bookkeeping keys stamped on every child; excluded from duplicate detection.
+const BOOKKEEPING: [&str; 2] = ["experimentIteration", "parentExperimentId"];
+
+/// Canonical string of the science parameters (bookkeeping stripped) for
+/// duplicate-point detection across a campaign's children.
+fn science_key(params: &BTreeMap<String, Value>) -> String {
+    params
+        .iter()
+        .filter(|(k, _)| !BOOKKEEPING.contains(&k.as_str()))
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Bounded re-rolls when a generated candidate duplicates an already-tried
+/// point. Each salt varies the perturbation pattern; if the local lattice is
+/// exhausted we accept the duplicate as a deliberate replicate (liveness).
+const MAX_REROLLS: u32 = 8;
+
 /// Build the parameter set + hypothesis for the next experiment.
 ///
 /// idx 0 (or no best yet) → baseline from template defaults. Otherwise hill-climb
@@ -263,6 +311,7 @@ fn next_experiment(
     template: &ExperimentTemplate,
     best: Option<(&str, &BTreeMap<String, Value>)>,
     idx: u32,
+    salt: u32,
 ) -> (BTreeMap<String, Value>, String) {
     // Base: template defaults + parameter_schema defaults. For non-baseline
     // experiments, overlay the best experiment's parameters so the hill-climb
@@ -292,9 +341,12 @@ fn next_experiment(
             if keys.is_empty() {
                 format!("re-run from {best_name} (no numeric parameters to perturb)")
             } else {
-                // Coordinate descent: pick a parameter, alternate direction per lap.
-                let lap = (idx as usize - 1) / keys.len();
-                let key = &keys[(idx as usize - 1) % keys.len()];
+                // Coordinate descent: pick a parameter, alternate direction per
+                // lap. The dedup salt advances the (param, direction) cycle so a
+                // re-roll lands on an untried point.
+                let pick = idx as usize - 1 + salt as usize;
+                let lap = pick / keys.len();
+                let key = &keys[pick % keys.len()];
                 let factor = if lap % 2 == 0 { 1.0 + STEP } else { 1.0 - STEP };
                 if let Some(cur) = params.get(key).and_then(value_as_f64) {
                     let next = cur * factor;
@@ -331,6 +383,7 @@ fn pbt_experiment(
     best: Option<(&str, &BTreeMap<String, Value>)>,
     perturb_factor: f64,
     idx: u32,
+    salt: u32,
 ) -> (BTreeMap<String, Value>, String) {
     // Base: template defaults + parameter_schema defaults (the param space).
     let mut params: BTreeMap<String, Value> = template.spec.defaults.clone();
@@ -355,7 +408,10 @@ fn pbt_experiment(
             let mut perturbed = Vec::new();
             for (j, key) in keys.iter().enumerate() {
                 if let Some(cur) = params.get(key).and_then(value_as_f64) {
-                    let up = (idx as usize + j) % 2 == 0;
+                    // Base parity alternates per child; the dedup salt is a
+                    // bitmask flipping individual params' directions, giving
+                    // 2^n distinct patterns instead of two.
+                    let up = ((idx as usize + j) % 2 == 0) ^ ((salt >> j) & 1 == 1);
                     let factor = if up { perturb_factor } else { down };
                     let next = cur * factor;
                     params.insert(
@@ -582,6 +638,32 @@ mod tests {
     }
 
     #[test]
+    // Dedup machinery: the salt must move a candidate to a DIFFERENT science
+    // point (both strategies), and science_key must ignore bookkeeping params —
+    // otherwise every child would look unique and dedup would never fire.
+    #[test]
+    fn salt_varies_candidates_and_science_key_ignores_bookkeeping() {
+        let t = template_with_default_lr(0.1);
+        let best = BTreeMap::from([("lr".to_string(), json!(0.1))]);
+
+        let (p0, _) = next_experiment(&t, Some(("c-000", &best)), 1, 0);
+        let (p1, _) = next_experiment(&t, Some(("c-000", &best)), 1, 1);
+        assert_ne!(science_key(&p0), science_key(&p1), "hill-climb salt must vary the point");
+
+        let (q0, _) = pbt_experiment(&t, Some(("c-000", &best)), 1.2, 2, 0);
+        let (q1, _) = pbt_experiment(&t, Some(("c-000", &best)), 1.2, 2, 1);
+        assert_ne!(science_key(&q0), science_key(&q1), "pbt salt bitmask must vary the point");
+
+        // Same science params, different bookkeeping → same key.
+        let mut a = BTreeMap::from([("lr".to_string(), json!(0.1))]);
+        let mut b = a.clone();
+        a.insert("experimentIteration".into(), json!(3));
+        b.insert("experimentIteration".into(), json!(7));
+        a.insert("parentExperimentId".into(), json!("x"));
+        b.insert("parentExperimentId".into(), Value::Null);
+        assert_eq!(science_key(&a), science_key(&b));
+    }
+
     fn pick_best_none_when_no_metric() {
         let a = exp_with("a", ExperimentPhase::Succeeded, "other", 2.0);
         assert_eq!(pick_best(&[&a], &obj("loss", ObjectiveGoal::Minimize)), None);
@@ -620,7 +702,7 @@ mod tests {
     #[test]
     fn baseline_uses_defaults_and_stamps_bookkeeping() {
         let t = template_with_default_lr(0.1);
-        let (params, hyp) = next_experiment(&t, None, 0);
+        let (params, hyp) = next_experiment(&t, None, 0, 0);
         assert_eq!(params.get("lr"), Some(&json!(0.1)));
         assert_eq!(params.get("experimentIteration"), Some(&json!(0)));
         assert_eq!(params.get("parentExperimentId"), Some(&Value::Null));
@@ -636,12 +718,12 @@ mod tests {
         let best: BTreeMap<String, Value> = BTreeMap::from([("lr".to_string(), json!(0.5))]);
         let lr = |p: &BTreeMap<String, Value>| value_as_f64(p.get("lr").unwrap()).unwrap();
         // idx 1, lap 0 -> factor 1.5 -> 0.5*1.5 = 0.75
-        let (params, hyp) = next_experiment(&t, Some(("c-002", &best)), 1);
+        let (params, hyp) = next_experiment(&t, Some(("c-002", &best)), 1, 0);
         assert!((lr(&params) - 0.75).abs() < 1e-9, "{:?}", params.get("lr"));
         assert_eq!(params.get("parentExperimentId"), Some(&json!("c-002")));
         assert!(hyp.contains("perturb lr"), "{hyp}");
         // idx 2, lap 1 -> factor 0.5 -> 0.5*0.5 = 0.25
-        let (params2, _) = next_experiment(&t, Some(("c-002", &best)), 2);
+        let (params2, _) = next_experiment(&t, Some(("c-002", &best)), 2, 0);
         assert!((lr(&params2) - 0.25).abs() < 1e-9, "{:?}", params2.get("lr"));
     }
 
@@ -676,20 +758,20 @@ mod tests {
         let best: BTreeMap<String, Value> = BTreeMap::from([("lr".to_string(), json!(0.5))]);
         let lr = |p: &BTreeMap<String, Value>| value_as_f64(p.get("lr").unwrap()).unwrap();
         // One param (j=0). idx 2 -> (2+0)%2==0 -> up by 1.2 -> 0.5*1.2 = 0.6.
-        let (params, hyp) = pbt_experiment(&t, Some(("c-002", &best)), 1.2, 2);
+        let (params, hyp) = pbt_experiment(&t, Some(("c-002", &best)), 1.2, 2, 0);
         assert!((lr(&params) - 0.6).abs() < 1e-9, "{:?}", params.get("lr"));
         assert!((lr(&params) - 0.1).abs() > 1e-6, "must not use the default");
         assert_eq!(params.get("parentExperimentId"), Some(&json!("c-002")));
         assert!(hyp.contains("pbt"), "{hyp}");
         // idx 1 -> (1+0)%2==1 -> down by 1/1.2 -> 0.5/1.2.
-        let (params2, _) = pbt_experiment(&t, Some(("c-002", &best)), 1.2, 1);
+        let (params2, _) = pbt_experiment(&t, Some(("c-002", &best)), 1.2, 1, 0);
         assert!((lr(&params2) - 0.5 / 1.2).abs() < 1e-9, "{:?}", params2.get("lr"));
     }
 
     #[test]
     fn pbt_cold_start_when_no_best() {
         let t = template_with_default_lr(0.1);
-        let (params, hyp) = pbt_experiment(&t, None, 1.2, 0);
+        let (params, hyp) = pbt_experiment(&t, None, 1.2, 0, 0);
         assert_eq!(params.get("lr"), Some(&json!(0.1)));
         assert_eq!(params.get("parentExperimentId"), Some(&Value::Null));
         assert!(hyp.contains("cold start"), "{hyp}");
@@ -725,7 +807,7 @@ mod tests {
         let campaign = campaign_pbt(None, Some(1.2));
 
         let (params, hypothesis) =
-            pbt_experiment(&t, Some(("c-000", &best_exp.spec.parameters)), 1.2, 2);
+            pbt_experiment(&t, Some(("c-000", &best_exp.spec.parameters)), 1.2, 2, 0);
         let cp = pbt_checkpoint_policy(Some(&best_exp));
         let child = build_experiment(&campaign, "c", "default", 2, params, hypothesis, cp);
 
@@ -764,7 +846,7 @@ mod tests {
             },
             status: None,
         };
-        let (params, hypothesis) = next_experiment(&t, None, 0);
+        let (params, hypothesis) = next_experiment(&t, None, 0, 0);
         let child = build_experiment(&campaign, "c", "default", 0, params, hypothesis, None);
         assert!(child.spec.checkpoint_policy.is_none());
     }
