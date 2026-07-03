@@ -84,13 +84,24 @@ def llm(prompt: str, model: str) -> str | None:
 
 def vote(claim: str, excerpt: str, model: str, i: int, n: int) -> str:
     """One adversarial vote: SUPPORTED / REFUTED / ABSTAIN."""
+    # Fair-but-rigorous adjudication. An earlier refutation-BIASED prompt made a
+    # weak judge refute everything (100% refute rate = verifies nothing); the
+    # adversarial framing from the deep-research harness assumes CAPABLE voters.
+    # Here each voter judges support neutrally, and we explicitly guard the two
+    # degenerate priors (rubber-stamp / reflexive-refute). The excerpt is
+    # web-fetched HTML-stripped text and may include navigation chrome; judge on
+    # the substantive content, not on chrome or on an exact-sentence match.
     out = llm(
-        f"You are adversarial citation-audit voter {i+1}/{n}. Be SKEPTICAL.\n\n"
-        f"CLAIM the citation is supposed to support:\n{claim}\n\n"
-        f"SOURCE EXCERPT (fetched from the cited URL):\n{excerpt}\n\n"
-        "Try to REFUTE that this source supports the claim. The claim is refuted if the "
-        "excerpt does not actually contain/entail it, contradicts it, or is unrelated.\n"
-        "Final line must be exactly 'VERDICT: SUPPORTED' or 'VERDICT: REFUTED'.",
+        f"You are citation-audit voter {i+1}/{n}, judging fairly and rigorously.\n\n"
+        f"CLAIM the citation supports:\n{claim}\n\n"
+        f"SOURCE EXCERPT (HTML-stripped from the cited URL; may include nav chrome):\n{excerpt}\n\n"
+        "Does the substantive content of this source support the claim? SUPPORTED if the "
+        "source is about this topic and its content substantiates or is consistent with the "
+        "claim (an exact sentence match is NOT required — a paper's abstract supporting its "
+        "own contribution counts). REFUTED only if the source contradicts the claim, is about "
+        "an unrelated topic, or the excerpt is pure navigation with no substantive content.\n"
+        "Reason in 1-2 sentences, then a final line exactly 'VERDICT: SUPPORTED' or "
+        "'VERDICT: REFUTED'.",
         model,
     )
     if not out:
