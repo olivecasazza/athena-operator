@@ -338,6 +338,7 @@ fn spec_from_dto(dto: &ReportSpecDto) -> ResearchReportSpec {
         excluded_experiments: dto.excluded_experiments.clone(),
         sections: dto.sections.clone(),
         seeded_hypotheses: dto.seeded_hypotheses.clone(),
+        references: vec![],
     }
 }
 
