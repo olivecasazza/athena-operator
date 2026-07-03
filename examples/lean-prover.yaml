@@ -24,7 +24,7 @@ spec:
   runtime:
     type: pytorch        # nearest existing runtime type; mode is what matters
     mode: batchJob
-  image: "ghcr.io/olivecasazza/athena-lean-prover:v4"
+  image: "ghcr.io/olivecasazza/athena-lean-prover:v5"
   imagePullSecrets:
     - name: ghcr-pull
   resources:

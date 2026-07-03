@@ -179,6 +179,46 @@ def main() -> int:
     )
     journal("proof_attempt_started", statement_id=target, statement_hash=statement_hash)
 
+    # Pre-check: does the statement TYPE elaborate at all? A `:= by sorry`
+    # version compiles (returncode 0 — sorry is a warning) iff the proposition is
+    # well-formed. This cleanly separates a GENUINELY OPEN goal from a malformed
+    # statement / harness bug, so a proof_closed=0 on a valid statement is a
+    # trustworthy negative rather than a typo. (A false-but-well-formed statement
+    # like the negative canary elaborates fine here and correctly stays open.)
+    elaborates, elab_detail = kernel_check(
+        f"import Mathlib\n\n{signature} := by sorry\n", timeout
+    )
+    if not elaborates:
+        journal("statement_invalid", statement_id=target, detail=elab_detail[:300])
+        print(f"[{target}] STATEMENT DOES NOT ELABORATE — excluded from proof-rate")
+        result = {
+            "proof_closed": 0.0,
+            "statement_id": target,
+            "statement_hash": statement_hash,
+            "statement_invalid": True,
+            "tactic": None,
+            "tactics_tried": 0,
+            "wall_seconds": round(time.time() - t0, 1),
+            "metric_series": {
+                "objective": "proof_closed",
+                "goal": "maximize",
+                "points": [{"name": "proof_closed", "value": 0.0, "step": 0}],
+            },
+        }
+        ws = os.environ.get("ATHENA_WORKSPACE_PATH")
+        if ws:
+            try:
+                os.makedirs(ws, exist_ok=True)
+                json.dump(result, open(os.path.join(ws, "result.json"), "w"))
+            except Exception:
+                pass
+        try:
+            open("/dev/termination-log", "w").write(json.dumps(result))
+        except Exception:
+            pass
+        print(json.dumps(result, indent=1))
+        return 0
+
     llm_model = str(params.get("llm_model", "") or "")
     llm_candidates = int(params.get("llm_candidates", 8) or 8)
 
