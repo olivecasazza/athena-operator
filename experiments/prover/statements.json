@@ -1,7 +1,17 @@
 {
-  "smoke_add_comm": "theorem smoke_add_comm (a b : ℕ) : a + b = b + a",
-  "smoke_arith": "theorem smoke_arith : (2 : ℕ) ^ 10 = 1024",
-  "smoke_linear_int": "theorem smoke_linear_int (x : ℤ) (h : 3 * x + 2 = 17) : x = 5",
-  "smoke_sq_nonneg": "theorem smoke_sq_nonneg (x : ℝ) : 0 ≤ x ^ 2 + 2 * x + 1",
-  "hard_open_style": "theorem hard_open_style (n : ℕ) (h : 2 ≤ n) : ∃ p, Nat.Prime p ∧ n ≤ p ∧ p ≤ 2 * n"
+  "canary_pos_add": "theorem canary_pos_add : (1 : ℕ) + 1 = 2",
+  "canary_pos_mul": "theorem canary_pos_mul : (6 : ℕ) * 7 = 42",
+  "canary_neg_false": "theorem canary_neg_false : (2 : ℕ) + 2 = 5",
+  "easy_add_comm": "theorem easy_add_comm (a b : ℕ) : a + b = b + a",
+  "easy_pow_ten": "theorem easy_pow_ten : (2 : ℕ) ^ 10 = 1024",
+  "easy_linear_int": "theorem easy_linear_int (x : ℤ) (h : 3 * x + 2 = 17) : x = 5",
+  "easy_le_add": "theorem easy_le_add (n : ℕ) : n ≤ n + 5",
+  "easy_even_ten": "theorem easy_even_ten : Even (10 : ℕ)",
+  "med_sq_completed": "theorem med_sq_completed (x : ℝ) : 0 ≤ x ^ 2 + 2 * x + 1",
+  "med_abs_self_le": "theorem med_abs_self_le (x : ℝ) : x ≤ |x|",
+  "med_dvd_mul": "theorem med_dvd_mul (n : ℕ) : n ∣ n * 3",
+  "med_gcd_self": "theorem med_gcd_self (n : ℕ) : Nat.gcd n n = n",
+  "hard_exists_prime_ge": "theorem hard_exists_prime_ge (n : ℕ) : ∃ p, n ≤ p ∧ Nat.Prime p",
+  "hard_bertrand": "theorem hard_bertrand (n : ℕ) (h : n ≠ 0) : ∃ p, Nat.Prime p ∧ n < p ∧ p ≤ 2 * n",
+  "hard_sqrt2_irrational": "theorem hard_sqrt2_irrational : Irrational (Real.sqrt 2)"
 }
