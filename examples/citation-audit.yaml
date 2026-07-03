@@ -1,0 +1,78 @@
+# Adversarial citation audit (sources + formatting reconciliation loop).
+# Formatting reconciliation is deterministic and lives in the operator
+# (CitationsReconciled condition + dossier Citation Reconciliation section).
+# SOURCE verification is this workload: per reference, fetch the URL and run
+# N adversarial LLM votes instructed to REFUTE the support relation; majority
+# refutation kills the citation, abstention-quorum failures report UNVERIFIED,
+# dead links report UNREACHABLE. Verdicts land in status.metrics + journal.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: citation-audit-cpu
+  namespace: apps
+spec:
+  runtime: {type: pytorch, mode: batchJob}
+  image: "ghcr.io/olivecasazza/athena-citation-audit:v1"
+  imagePullSecrets: [{name: ghcr-pull}]
+  resources:
+    requests: {cpu: "250m", memory: "256Mi"}
+    limits: {memory: "512Mi"}
+  scheduling:
+    nodeSelector: {kubernetes.io/arch: amd64}
+  storage:
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+    createWorkspaceClaim: false
+    workspaceAccessModes: [ReadWriteMany]
+    workspaceStorageClassName: nfs
+  env:
+    - {name: LLM_BASE_URL, value: "http://litellm.apps.svc.cluster.local:4000/v1"}
+    - {name: LLM_API_KEY_FILE, value: /var/run/secrets/llm/key}
+  secretMounts:
+    - {secretName: litellm-secrets, mountPath: /var/run/secrets/llm/key, subPath: LITELLM_MASTER_KEY}
+  metricsEndpoint:
+    prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: citation-audit
+  namespace: apps
+spec:
+  runtimeProfileRef: citation-audit-cpu
+  source:
+    git: {url: "https://github.com/olivecasazza/athena-operator", ref: "main"}
+  objective: {metric: citations_supported_ratio, goal: maximize}
+  metrics:
+    parser: {type: file, path: result.json}
+  researchObjective: >-
+    Adversarial source verification for ResearchReport citations: for each
+    cited (url, claim) pair, N independent skeptical votes try to refute that
+    the fetched source supports the claim. No self-asserted citations survive
+    unexamined.
+  defaults:
+    votes: 3
+  parameterSchema:
+    references:
+      type: string
+      description: "JSON array of {key,url,supports} to audit (from a ResearchReport's spec.references)."
+    llm_model:
+      type: string
+      description: "Gateway model for the adversarial votes."
+      default: "gpt-oss-20b-free"
+    votes:
+      type: integer
+      description: "Adversarial votes per citation."
+      default: 3
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: citation-audit
+  namespace: apps
+spec:
+  templateRef: citation-audit
+  strategy: {type: heuristic}
+  concurrency: 1
+  budget: {maxExperiments: 1, maxDuration: "1h"}

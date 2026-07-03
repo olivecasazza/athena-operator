@@ -17,7 +17,7 @@ use crate::benchmark_run::BenchmarkRun;
 use crate::experiment::Experiment;
 use crate::experiment_template::ExperimentTemplate;
 use crate::research_campaign::ResearchCampaign;
-use crate::research_report::ResearchReportSpec;
+use crate::research_report::{Reference, ResearchReportSpec};
 
 /// Label the campaign controller stamps on every child experiment Job/CR.
 pub const CAMPAIGN_LABEL: &str = "athena.nixlab.io/campaign";
@@ -34,6 +34,8 @@ pub struct Curation<'a> {
     pub sections: &'a BTreeMap<String, String>,
     /// Hypotheses to record as future work.
     pub seeded_hypotheses: &'a [String],
+    /// External citations from the report spec.
+    pub references: &'a [Reference],
 }
 
 impl<'a> Curation<'a> {
@@ -44,6 +46,7 @@ impl<'a> Curation<'a> {
             excluded: &spec.excluded_experiments,
             sections: &spec.sections,
             seeded_hypotheses: &spec.seeded_hypotheses,
+            references: &spec.references,
         }
     }
 }
@@ -383,6 +386,41 @@ pub fn render(
         }
     }
 
+    // ── 8b. References (curated) ─────────────────────────────────────────────
+    if let Some(c) = curation {
+        if !c.references.is_empty() {
+            writeln!(out, "## References")?;
+            writeln!(out)?;
+            for r in c.references {
+                let mut line = format!("- **[{}]** {}", r.key, r.title);
+                if let Some(url) = &r.url {
+                    line.push_str(&format!(" — <{}>", url));
+                }
+                if let Some(doi) = &r.doi {
+                    line.push_str(&format!(" (doi:{})", doi));
+                }
+                if let Some(supports) = &r.supports {
+                    line.push_str(&format!(" — supports: \"{}\"", supports));
+                }
+                writeln!(out, "{}", line)?;
+            }
+            writeln!(out)?;
+
+            let check = citation_check(c.sections, c.references);
+            if !check.cited_undefined.is_empty() || !check.defined_uncited.is_empty() {
+                writeln!(out, "## Citation Reconciliation")?;
+                writeln!(out)?;
+                if !check.cited_undefined.is_empty() {
+                    writeln!(out, "cited but undefined: {}", check.cited_undefined.join(", "))?;
+                }
+                if !check.defined_uncited.is_empty() {
+                    writeln!(out, "defined but never cited: {}", check.defined_uncited.join(", "))?;
+                }
+                writeln!(out)?;
+            }
+        }
+    }
+
     // ── 9. Artifact Index ────────────────────────────────────────────────────
     writeln!(out, "## Artifact Index")?;
     writeln!(out)?;
@@ -570,6 +608,113 @@ fn tex_escape(s: &str) -> String {
     out
 }
 
+/// Returns true for bytes valid in a citation key `[@key]`.
+#[inline]
+fn is_key_char(b: u8) -> bool {
+    matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b':' | b'.' | b'-')
+}
+
+/// Extract every citation key referenced as `[@key]` in `text`, in order of
+/// appearance, possibly with duplicates. A key must be non-empty and match
+/// `[A-Za-z0-9_:.-]+`. Malformed patterns (`[@]`, unclosed `[@`) are skipped.
+fn extract_citation_keys(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i + 1 < n {
+        if bytes[i] == b'[' && bytes[i + 1] == b'@' {
+            let start = i + 2;
+            let mut j = start;
+            while j < n && is_key_char(bytes[j]) {
+                j += 1;
+            }
+            if j > start && j < n && bytes[j] == b']' {
+                // All bytes in [start..j] are ASCII, so slice is valid UTF-8.
+                keys.push(text[start..j].to_string());
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    keys
+}
+
+/// Render `text` for LaTeX: replace each `[@key]` with `\cite{key}` and
+/// tex-escape all surrounding text. Keys are not escaped (their charset is
+/// already safe). Text fragments between cites are escaped individually.
+fn tex_body_with_cites(text: &str) -> String {
+    let mut out = String::new();
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    let mut frag_start = 0;
+    while i + 1 < n {
+        if bytes[i] == b'[' && bytes[i + 1] == b'@' {
+            let start = i + 2;
+            let mut j = start;
+            while j < n && is_key_char(bytes[j]) {
+                j += 1;
+            }
+            if j > start && j < n && bytes[j] == b']' {
+                out.push_str(&tex_escape(&text[frag_start..i]));
+                out.push_str(r"\cite{");
+                out.push_str(&text[start..j]);
+                out.push('}');
+                frag_start = j + 1;
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&tex_escape(&text[frag_start..]));
+    out
+}
+
+/// Result of a citation consistency check between section bodies and the reference list.
+pub struct CitationCheck {
+    /// Citation keys that appear in section bodies but have no matching `Reference.key`
+    /// in the reference list (deduped, sorted).
+    pub cited_undefined: Vec<String>,
+    /// `Reference.key` values that are never cited in any section body (in
+    /// reference-list order, deduped).
+    pub defined_uncited: Vec<String>,
+}
+
+/// Pure check: scan all section bodies for `[@key]` citations and cross-reference
+/// against the provided reference list. Seeded hypotheses and other fields are
+/// NOT scanned — sections only.
+pub fn citation_check(sections: &BTreeMap<String, String>, references: &[Reference]) -> CitationCheck {
+    // Collect every cited key into a set.
+    let mut cited_set: HashSet<String> = HashSet::new();
+    for body in sections.values() {
+        for key in extract_citation_keys(body) {
+            cited_set.insert(key);
+        }
+    }
+
+    // cited_undefined: cited keys absent from the reference list, sorted.
+    let ref_key_set: HashSet<&str> = references.iter().map(|r| r.key.as_str()).collect();
+    let mut cited_undefined: Vec<String> = cited_set
+        .iter()
+        .filter(|k| !ref_key_set.contains(k.as_str()))
+        .cloned()
+        .collect();
+    cited_undefined.sort();
+
+    // defined_uncited: reference keys never cited, in reference-list order, deduped.
+    let mut seen: HashSet<&str> = HashSet::new();
+    let defined_uncited: Vec<String> = references
+        .iter()
+        .filter(|r| !cited_set.contains(&r.key))
+        .filter_map(|r| if seen.insert(r.key.as_str()) { Some(r.key.clone()) } else { None })
+        .collect();
+
+    CitationCheck { cited_undefined, defined_uncited }
+}
+
 /// Assemble the dossier as a standalone LaTeX document into `out`, mirroring
 /// every section produced by [`render`]. Writing to a `String` is infallible;
 /// the `fmt::Result` is only propagated to satisfy the `write!` macros.
@@ -639,7 +784,7 @@ pub fn render_latex(
         for (heading, body) in c.sections {
             writeln!(out, r"\section{{{}}}", tex_escape(heading))?;
             writeln!(out)?;
-            writeln!(out, "{}", tex_escape(body))?;
+            writeln!(out, "{}", tex_body_with_cites(body))?;
             writeln!(out)?;
         }
     }
@@ -1062,6 +1207,49 @@ pub fn render_latex(
     writeln!(out, r"\end{{tabular}}")?;
     writeln!(out)?;
 
+    // ── 10. Bibliography + Citation Reconciliation (curated) ─────────────────
+    if let Some(c) = curation {
+        if !c.references.is_empty() {
+            let check = citation_check(c.sections, c.references);
+            if !check.cited_undefined.is_empty() || !check.defined_uncited.is_empty() {
+                writeln!(out, r"\section{{Citation Reconciliation}}")?;
+                writeln!(out)?;
+                if !check.cited_undefined.is_empty() {
+                    writeln!(
+                        out,
+                        "Cited but undefined: {}.",
+                        check.cited_undefined.join(", ")
+                    )?;
+                }
+                if !check.defined_uncited.is_empty() {
+                    writeln!(
+                        out,
+                        "Defined but never cited: {}.",
+                        check.defined_uncited.join(", ")
+                    )?;
+                }
+                writeln!(out)?;
+            }
+
+            writeln!(out, r"\begin{{thebibliography}}{{99}}")?;
+            for r in c.references {
+                write!(out, r"\bibitem{{{}}} {}", r.key, tex_escape(&r.title))?;
+                if let Some(url) = &r.url {
+                    write!(out, r". \url{{{}}}", url)?;
+                }
+                if let Some(doi) = &r.doi {
+                    write!(out, " doi:{}", tex_escape(doi))?;
+                }
+                if let Some(supports) = &r.supports {
+                    write!(out, " Supports: {}", tex_escape(supports))?;
+                }
+                writeln!(out, ".")?;
+            }
+            writeln!(out, r"\end{{thebibliography}}")?;
+            writeln!(out)?;
+        }
+    }
+
     writeln!(out, r"\end{{document}}")?;
 
     Ok(())
@@ -1081,6 +1269,7 @@ mod tests {
     use crate::research_campaign::{
         CampaignBudget, ResearchCampaignSpec, ResearchCampaignStatus, StrategySpec,
     };
+    use crate::research_report::Reference;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use serde_json::json;
 
@@ -1196,6 +1385,7 @@ mod tests {
             excluded: &["exp-a".to_string()],
             sections: &sections,
             seeded_hypotheses: &seeds,
+            references: &[],
         };
         let mut doc = String::new();
         render(&mut doc, "camp", "research", &campaign(), &template(), &exps, &runs, Some(&cur))
@@ -1255,6 +1445,7 @@ mod tests {
             excluded: &["exp-a".to_string()],
             sections: &sections,
             seeded_hypotheses: &seeds,
+            references: &[],
         };
         let mut doc = String::new();
         render_latex(
@@ -1339,5 +1530,106 @@ mod tests {
         let mut b = String::new();
         render_latex(&mut b, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
         assert_eq!(a, b, "render_latex must be a pure function of inputs (no wall clock)");
+    }
+
+    // citation_check must identify cited-but-undefined and defined-but-uncited keys.
+    #[test]
+    fn citation_check_finds_mismatches() {
+        let sections = BTreeMap::from([(
+            "Analysis".to_string(),
+            "See [@good] and also [@ghost].".to_string(),
+        )]);
+        let refs = vec![
+            Reference {
+                key: "good".into(),
+                title: "Good Paper".into(),
+                url: None,
+                doi: None,
+                supports: None,
+            },
+            Reference {
+                key: "orphan".into(),
+                title: "Orphan Paper".into(),
+                url: None,
+                doi: None,
+                supports: None,
+            },
+        ];
+        let check = citation_check(&sections, &refs);
+        assert_eq!(check.cited_undefined, vec!["ghost".to_string()]);
+        assert_eq!(check.defined_uncited, vec!["orphan".to_string()]);
+    }
+
+    // render() and render_latex() must handle references: markdown lists them
+    // and surfaces reconciliation warnings; LaTeX replaces [@key] with \cite{key}
+    // and emits a bibliography.
+    #[test]
+    fn render_includes_references_and_cites() {
+        let exps = vec![experiment("exp-a", "baseline", 2.34, ExperimentDecision::Keep)];
+        let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
+        // Sections cite [@good] (defined) and [@ghost] (undefined).
+        let sections = BTreeMap::from([(
+            "Analysis".to_string(),
+            "See [@good] and also [@ghost].".to_string(),
+        )]);
+        // References define "good" (cited) and "orphan" (never cited).
+        let refs = vec![
+            Reference {
+                key: "good".into(),
+                title: "Good Paper".into(),
+                url: Some("https://example.com/good".into()),
+                doi: None,
+                supports: None,
+            },
+            Reference {
+                key: "orphan".into(),
+                title: "Orphan Paper".into(),
+                url: None,
+                doi: None,
+                supports: None,
+            },
+        ];
+        let seeds: Vec<String> = vec![];
+        let cur = Curation {
+            title: Some("Citation Test"),
+            included: &[],
+            excluded: &[],
+            sections: &sections,
+            seeded_hypotheses: &seeds,
+            references: &refs,
+        };
+
+        // ── Markdown checks ───────────────────────────────────────────────────
+        let mut md = String::new();
+        render(&mut md, "camp", "research", &campaign(), &template(), &exps, &runs, Some(&cur))
+            .expect("infallible");
+
+        assert!(md.contains("## References"), "missing ## References: {md}");
+        assert!(md.contains("Good Paper"), "missing reference title: {md}");
+        assert!(
+            md.contains("## Citation Reconciliation"),
+            "missing ## Citation Reconciliation: {md}"
+        );
+        assert!(md.contains("ghost"), "ghost (cited but undefined) not in reconciliation: {md}");
+        assert!(md.contains("orphan"), "orphan (defined but uncited) not in reconciliation: {md}");
+
+        // ── LaTeX checks ──────────────────────────────────────────────────────
+        let mut tex = String::new();
+        render_latex(
+            &mut tex,
+            "camp",
+            "research",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            Some(&cur),
+        )
+        .expect("infallible");
+
+        assert!(tex.contains(r"\cite{good}"), r"missing \cite{{good}}: {tex}");
+        assert!(tex.contains(r"\bibitem{good}"), r"missing \bibitem{{good}}: {tex}");
+        assert!(tex.contains("thebibliography"), "missing thebibliography env: {tex}");
+        assert!(!tex.contains("[@good]"), "literal [@good] must be replaced by \\cite in latex: {tex}");
     }
 }

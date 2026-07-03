@@ -50,6 +50,29 @@ pub struct ResearchReportSpec {
     /// experiments; it is report content.)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seeded_hypotheses: Vec<String>,
+    /// Structured external citations. Narrative sections reference them inline
+    /// as `[@key]`; the dossier renders a References section in both formats,
+    /// and the reconciler surfaces cited-but-undefined / defined-but-uncited
+    /// keys as conditions. Verification of the claims themselves is a separate
+    /// adversarial audit workload, never self-asserted here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<Reference>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Reference {
+    /// Citation key used inline as `[@key]` in section text.
+    pub key: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doi: Option<String>,
+    /// The specific claim in this report the source is cited to support —
+    /// the unit the adversarial audit verifies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]

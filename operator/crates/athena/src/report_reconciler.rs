@@ -170,15 +170,45 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
             .await?;
     }
 
+    // Deterministic citation/formatting reconciliation: pure check over the
+    // spec; surfaced as a condition so the console and dossier agree about it.
+    let cc = dossier::citation_check(&report.spec.sections, &report.spec.references);
+    let citations_ok = cc.cited_undefined.is_empty() && cc.defined_uncited.is_empty();
+    let citation_condition = if citations_ok {
+        condition(
+            "CitationsReconciled", "True", "CitationsConsistent",
+            &format!("{} reference(s), all keys resolve and are cited", report.spec.references.len()),
+        )
+    } else {
+        condition(
+            "CitationsReconciled", "False", "CitationMismatch",
+            &format!(
+                "cited-but-undefined: [{}]; defined-but-uncited: [{}]",
+                cc.cited_undefined.join(", "),
+                cc.defined_uncited.join(", ")
+            ),
+        )
+    };
+
     // Stamp status only when something meaningful changed — otherwise a fresh
     // condition timestamp every pass would re-trigger reconcile forever. In steady
     // state (content unchanged, same phase/generation/count) we skip the write and
     // let the periodic requeue re-check.
     let prev_included = prev.and_then(|s| s.included_count);
+    let prev_citations_ok = report
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|cs| {
+            cs.iter()
+                .find(|c| c.condition_type.as_deref() == Some("CitationsReconciled"))
+        })
+        .map(|c| c.status.as_deref() == Some("True"));
     let needs_write = !unchanged
         || prev_phase != Some("Assembled")
         || prev_gen != generation
-        || prev_included != Some(included as u32);
+        || prev_included != Some(included as u32)
+        || prev_citations_ok != Some(citations_ok);
 
     if needs_write {
         let mut status_obj = json!({
@@ -193,6 +223,7 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
                     "Assembled", "True", "DossierAssembled",
                     &format!("assembled {included} experiment(s) into ConfigMap {cm_name}"),
                 ),
+                citation_condition,
             ],
         });
         // lastAssembledTime advances only when the dossier content actually changed.

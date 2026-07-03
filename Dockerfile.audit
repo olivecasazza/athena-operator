@@ -1,0 +1,7 @@
+# Citation-audit workload: fetch cited sources, adversarially vote via the LLM
+# gateway, report kernel-style honest verdicts. Pure stdlib — tiny image.
+FROM python:3.12-slim
+COPY experiments/audit/ /app/audit/
+COPY experiments/athena_metrics.py /app/athena_metrics.py
+ENV PYTHONPATH=/app
+CMD ["python3", "/app/audit/audit.py"]
