@@ -83,7 +83,7 @@ def llm_propose(signature: str, model: str, n: int, failed: list) -> list:
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.8,
-        "max_tokens": 500,
+        "max_tokens": 2000,
     }).encode()
     req = urllib.request.Request(
         base + "/chat/completions",
@@ -92,9 +92,15 @@ def llm_propose(signature: str, model: str, n: int, failed: list) -> list:
     )
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
-            out = json.load(resp)["choices"][0]["message"]["content"]
+            msg = json.load(resp)["choices"][0]["message"]
+        # Reasoning-style models may return content=null (answer in
+        # reasoning_content, or the token budget burned on reasoning).
+        out = msg.get("content") or msg.get("reasoning_content") or ""
     except Exception as e:
         journal("llm_policy_error", error=str(e)[:200])
+        return []
+    if not out.strip():
+        journal("llm_policy_error", error="empty completion (reasoning model? token cap?)")
         return []
     cands = []
     for line in out.splitlines():
