@@ -78,9 +78,9 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
     // user config error, not a controller failure — record it in status and back
     // off, rather than thrashing the error path.
     let curation = Curation::from_spec(&report.spec);
-    let (doc, included) =
+    let dossier::Dossier { markdown: doc, latex: doc_tex, included } =
         match dossier::assemble(&ctx.client, &campaign_ref, &ns, Some(&curation)).await {
-            Ok(pair) => pair,
+            Ok(d) => d,
             Err(e) => {
                 if prev_phase != Some("Error") || prev_gen != generation {
                     let status = json!({ "status": {
@@ -102,7 +102,7 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
         };
 
     // Never write an oversized ConfigMap; ask the scientist to prune instead.
-    if doc.len() > MAX_DATASET_BYTES {
+    if doc.len() + doc_tex.len() > MAX_DATASET_BYTES {
         if prev_phase != Some("Error") || prev_gen != generation {
             let status = json!({ "status": {
                 "phase": "Error",
@@ -154,7 +154,7 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
                     "athena.nixlab.io/report": name,
                 },
             },
-            "data": { "dossier.md": doc },
+            "data": { "dossier.md": doc, "dossier.tex": doc_tex },
         });
         if let Some(uid) = report.metadata.uid.as_ref() {
             body["metadata"]["ownerReferences"] = json!([{

@@ -210,6 +210,10 @@ pub struct ExperimentArtifacts {
     /// commit, image, software/hardware environment) the runner emits at startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance_uri: Option<String>,
+    /// Directory of rendered scientific figures (loss curves etc.) plus the
+    /// re-plottable per-step series the runner writes alongside them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub figures_uri: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]

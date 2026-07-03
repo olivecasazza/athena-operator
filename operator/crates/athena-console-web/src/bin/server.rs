@@ -415,6 +415,6 @@ async fn preview_report(Json(dto): Json<ReportSpecDto>) -> Result<String, (Statu
     let curation = Curation::from_spec(&spec);
     dossier::assemble(&client, &dto.campaign_ref, &dto.namespace, Some(&curation))
         .await
-        .map(|(md, _)| md)
+        .map(|d| d.markdown)
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
 }

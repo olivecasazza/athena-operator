@@ -230,6 +230,7 @@ async fn ensure_experiment_job(
             checkpoints_uri: Some(format!("{workspace_path}/checkpoints")),
             journal_uri: Some(format!("{workspace_path}/research_journal.jsonl")),
             provenance_uri: Some(format!("{workspace_path}/provenance.json")),
+            figures_uri: Some(format!("{workspace_path}/figures")),
             ..Default::default()
         }),
         environment: Some(ExperimentEnvironment {

@@ -573,6 +573,53 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
+# ── Checkpointing (PBT warm-start + preemption resilience) ──────────────────
+# The operator injects ATHENA_CHECKPOINT_DIR and, for PBT children, sets
+# ATHENA_RESUME_FROM to the parent's latest checkpoint. We save MODEL WEIGHTS
+# ONLY: a PBT child runs with new hyperparameters, so a fresh optimizer state
+# is deliberate, not a shortcut. `raw_model` is the uncompiled module so the
+# state_dict has clean keys (torch.compile prefixes _orig_mod otherwise).
+raw_model = model
+CHECKPOINT_DIR = os.environ.get("ATHENA_CHECKPOINT_DIR", "")
+CHECKPOINT_INTERVAL = float(os.environ.get("ATHENA_CHECKPOINT_INTERVAL", "120"))
+RESUME_FROM = os.environ.get("ATHENA_RESUME_FROM", "")
+CHECKPOINT_RETAIN = 2  # ponytail: fixed retain; wire CheckpointPolicy.retain if it matters
+_saved_checkpoints: list = []
+
+
+def save_checkpoint(step):
+    if not CHECKPOINT_DIR:
+        return None
+    try:
+        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+        path = os.path.join(CHECKPOINT_DIR, f"step-{step:05d}.pt")
+        tmp = path + ".tmp"
+        torch.save({"model": raw_model.state_dict(), "step": step, "config": asdict(config)}, tmp)
+        os.replace(tmp, path)
+        _saved_checkpoints.append(path)
+        while len(_saved_checkpoints) > CHECKPOINT_RETAIN:
+            old = _saved_checkpoints.pop(0)
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        return path
+    except Exception as e:
+        print(f"[athena] checkpoint save failed: {e}")
+        return None
+
+
+if RESUME_FROM:
+    try:
+        ckpt = torch.load(RESUME_FROM, map_location=device, weights_only=True)
+        raw_model.load_state_dict(ckpt["model"])
+        journal("warm_start", resume_from=RESUME_FROM, parent_step=ckpt.get("step"))
+        print(f"[athena] warm-started weights from {RESUME_FROM} (parent step {ckpt.get('step')})")
+    except Exception as e:
+        # A cold start is a valid experiment; a crashed one is not.
+        journal("warm_start_failed", resume_from=RESUME_FROM, error=str(e))
+        print(f"[athena] warm-start failed ({e}); continuing cold")
+
 model = torch.compile(model, dynamic=False)
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
@@ -602,6 +649,8 @@ t_start_training = time.time()
 smooth_train_loss = 0
 total_training_time = 0
 step = 0
+_last_ckpt_time = 0.0
+_step_history: list = []
 
 while True:
     torch.cuda.synchronize()
@@ -658,6 +707,7 @@ while True:
     _athm.store("tokens_per_sec", tok_per_sec)
     _athm.store("learning_rate_mult", lrm)
     _athm.store("step", step)
+    _step_history.append({"step": step, "loss": debiased_smooth_loss, "lrm": lrm, "tok_per_sec": tok_per_sec})
 
     if step == 0:
         gc.collect()
@@ -668,10 +718,20 @@ while True:
 
     step += 1
 
+    # Periodic checkpoint on the training clock (skipped entirely when the
+    # operator provides no checkpoint dir).
+    if CHECKPOINT_DIR and total_training_time - _last_ckpt_time >= CHECKPOINT_INTERVAL:
+        if save_checkpoint(step):
+            _last_ckpt_time = total_training_time
+
     if step > 10 and total_training_time >= TIME_BUDGET:
         break
 
 print()
+
+final_checkpoint = save_checkpoint(step)
+if final_checkpoint:
+    journal("checkpoint_saved", path=final_checkpoint, step=step, final=True)
 
 total_tokens = step * TOTAL_BATCH_SIZE
 
@@ -719,6 +779,7 @@ _summary = {
     "num_steps": step,
     "num_params_m": num_params / 1e6,
     "depth": DEPTH,
+    **({"latest_checkpoint": final_checkpoint, "best_checkpoint": final_checkpoint} if final_checkpoint else {}),
     "metric_series": {
         "objective": "val_bpb",
         "goal": "minimize",
@@ -733,6 +794,30 @@ if _ws:
             json.dump(_summary, _fh)
     except Exception:
         pass
+    # Scientific viz: per-step series (re-plottable data) + a rendered loss
+    # curve. Best-effort — a plotting failure must not fail the trial.
+    try:
+        with open(os.path.join(_ws, "metrics_series.json"), "w") as _fh:
+            json.dump({"steps": _step_history, "val_bpb": val_bpb}, _fh)
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        _figdir = os.path.join(_ws, "figures")
+        os.makedirs(_figdir, exist_ok=True)
+        _fig, _ax1 = plt.subplots(figsize=(7, 4))
+        _steps = [h["step"] for h in _step_history]
+        _ax1.plot(_steps, [h["loss"] for h in _step_history], color="tab:blue", label="train loss (EMA)")
+        _ax1.set_xlabel("step"); _ax1.set_ylabel("loss")
+        _ax2 = _ax1.twinx()
+        _ax2.plot(_steps, [h["lrm"] for h in _step_history], color="tab:orange", alpha=0.6, label="LR multiplier")
+        _ax2.set_ylabel("LR multiplier")
+        _ax1.set_title(f"{os.environ.get('ATHENA_EXPERIMENT','run')}: loss (final val_bpb={val_bpb:.4f})")
+        _fig.tight_layout()
+        _fig.savefig(os.path.join(_figdir, "loss_curve.png"), dpi=120)
+        plt.close(_fig)
+        journal("figures_saved", figures=["figures/loss_curve.png"], series="metrics_series.json")
+    except Exception as _e:
+        print(f"[athena] figure generation failed: {_e}")
 try:
     # /dev/termination-log is what the operator actually parses (terminationMessagePolicy=File).
     with open("/dev/termination-log", "w") as _fh:

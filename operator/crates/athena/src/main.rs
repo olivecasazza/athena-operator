@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
             let mut campaign: Option<String> = None;
             let mut report: Option<String> = None;
             let mut namespace = "default".to_string();
+            let mut latex = false;
             let mut i = 2usize;
             while i < args.len() {
                 match args[i].as_str() {
@@ -59,6 +60,10 @@ async fn main() -> anyhow::Result<()> {
                             namespace = args[i].clone();
                         }
                     }
+                    "--format" => {
+                        i += 1;
+                        latex = args.get(i).map(|f| f == "latex").unwrap_or(false);
+                    }
                     _ => {}
                 }
                 i += 1;
@@ -66,11 +71,11 @@ async fn main() -> anyhow::Result<()> {
             // A ResearchReport curates one campaign; --report and --campaign are
             // mutually exclusive, report taking precedence when both are given.
             match (report, campaign) {
-                (Some(report), _) => dossier::run_report(&report, &namespace).await?,
-                (None, Some(campaign)) => dossier::run(&campaign, &namespace).await?,
+                (Some(report), _) => dossier::run_report(&report, &namespace, latex).await?,
+                (None, Some(campaign)) => dossier::run(&campaign, &namespace, latex).await?,
                 (None, None) => {
                     eprintln!(
-                        "Usage: athena dossier (--campaign <name> | --report <name>) [--namespace <ns>]"
+                        "Usage: athena dossier (--campaign <name> | --report <name>) [--namespace <ns>] [--format latex|markdown]"
                     );
                     std::process::exit(2);
                 }
