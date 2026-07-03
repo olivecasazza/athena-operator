@@ -24,7 +24,7 @@ spec:
   runtime:
     type: pytorch        # nearest existing runtime type; mode is what matters
     mode: batchJob
-  image: "ghcr.io/olivecasazza/athena-lean-prover:v1"
+  image: "ghcr.io/olivecasazza/athena-lean-prover:v2"
   imagePullSecrets:
     - name: ghcr-pull
   resources:
@@ -43,6 +43,18 @@ spec:
     workspaceAccessModes:
       - ReadWriteMany
     workspaceStorageClassName: nfs
+  # LLM tactic policy (phase 2): proposals come from the in-cluster litellm
+  # gateway; the kernel remains the only judge. Key is file-mounted (env vars
+  # in RuntimeProfile are plain values; never inline a secret).
+  env:
+    - name: LLM_BASE_URL
+      value: http://litellm.apps.svc.cluster.local:4000/v1
+    - name: LLM_API_KEY_FILE
+      value: /var/run/secrets/llm/key
+  secretMounts:
+    - secretName: litellm-secrets
+      mountPath: /var/run/secrets/llm/key
+      subPath: LITELLM_MASTER_KEY
   metricsEndpoint:
     prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
 ---
@@ -78,6 +90,14 @@ spec:
       type: string
       description: "Statement id in experiments/prover/statements.json."
       default: "smoke_add_comm"
+    llm_model:
+      type: string
+      description: "LLM tactic-policy model (litellm id); empty = sweep-only baseline. Proposals are kernel-checked; the policy can never affect soundness."
+      default: ""
+    llm_candidates:
+      type: integer
+      description: "Max LLM tactic proposals to kernel-check after the sweep fails."
+      default: 8
   dashboard:
     title: "Lean tactic-sweep baseline"
     metrics:
