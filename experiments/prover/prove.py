@@ -102,11 +102,27 @@ def llm_propose(signature: str, model: str, n: int, failed: list) -> list:
     if not out.strip():
         journal("llm_policy_error", error="empty completion (reasoning model? token cap?)")
         return []
+    # Reasoning models often bury tactics in prose. Harvest backtick-quoted
+    # spans first (high precision — that's where models put code), then bare
+    # lines that don't read like English sentences.
+    import re
     cands = []
+
+    def add(c):
+        c = c.strip().strip("`").strip()
+        if c and c not in cands and not c.startswith(("```", "#", "--", "theorem", "import")):
+            cands.append(c)
+
+    for span in re.findall(r"`([^`\n]{2,120})`", out):
+        if not span.startswith("by "):
+            add(span)
+        else:
+            add(span[3:])
+    prose = re.compile(r"\b(the|we|need|use|can|but|so|goal|possible)\b", re.I)
     for line in out.splitlines():
-        line = line.strip().strip("`").lstrip("-*0123456789. ").strip()
-        if line and not line.startswith(("```", "#", "--")) and line not in cands:
-            cands.append(line)
+        line = line.strip().lstrip("-*0123456789. ").strip()
+        if line and not prose.search(line) and " := " not in line and not line.endswith((".", ":", "?")):
+            add(line)
     return cands[:n]
 
 
