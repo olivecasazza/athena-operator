@@ -1,0 +1,7 @@
+{
+  "smoke_add_comm": "theorem smoke_add_comm (a b : ℕ) : a + b = b + a",
+  "smoke_arith": "theorem smoke_arith : (2 : ℕ) ^ 10 = 1024",
+  "smoke_linear_int": "theorem smoke_linear_int (x : ℤ) (h : 3 * x + 2 = 17) : x = 5",
+  "smoke_sq_nonneg": "theorem smoke_sq_nonneg (x : ℝ) : 0 ≤ x ^ 2 + 2 * x + 1",
+  "hard_open_style": "theorem hard_open_style (n : ℕ) (h : 2 ≤ n) : ∃ p, Nat.Prime p ∧ n ≤ p ∧ p ≤ 2 * n"
+}
