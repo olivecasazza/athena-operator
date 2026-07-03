@@ -108,6 +108,8 @@ const APP_CSS: &str = "
 .row-link:hover { text-decoration:underline; }
 .muted { color:var(--dim); }
 .view-head { margin:.1rem 0 .6rem; }
+.scroll-tbl { max-height:340px; overflow-y:auto; }
+.scroll-tbl .tbl thead th { position:sticky; top:0; background:var(--bg); z-index:1; }
 .view-head h2 { font-size:.92rem; color:var(--fg); margin:0 0 .2rem; }
 .view-head p { font-size:.72rem; color:var(--dim); margin:0; }
 .detail-grid { display:grid; grid-template-columns:auto 1fr; gap:.2rem .8rem;
@@ -235,6 +237,7 @@ fn experiments_view(
             h2 { "Experiments" }
             p { "Kubernetes-native experiment resources, phases, and workspace refs." }
         }
+        div { class: "scroll-tbl",
         table { class: "tbl",
             thead {
                 tr {
@@ -284,6 +287,7 @@ fn experiments_view(
                     }
                 }
             }
+        }
         }
     }
 }
