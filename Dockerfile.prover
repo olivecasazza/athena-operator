@@ -1,0 +1,31 @@
+# Lean 4 + mathlib prover image for athena Tier-3 experiments (phase 1:
+# tactic-sweep baseline, CPU-only). The Lean toolchain is pinned by mathlib's
+# own lean-toolchain file at the tag below; `lake exe cache get` pulls prebuilt
+# oleans so no mathlib compile happens at runtime.
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git ca-certificates python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# elan (Lean toolchain manager); the toolchain itself installs on first use
+# from mathlib's lean-toolchain pin.
+RUN curl -sSfL https://github.com/leanprover/elan/releases/latest/download/elan-x86_64-unknown-linux-gnu.tar.gz \
+    | tar xz -C /usr/local/bin && elan-init -y --default-toolchain none
+ENV PATH="/root/.elan/bin:${PATH}"
+
+# Pinned mathlib release; bump deliberately (statements + tactics are validated
+# against this snapshot — that pin is part of the proof provenance).
+ARG MATHLIB_TAG=v4.14.0
+RUN git clone --depth 1 --branch ${MATHLIB_TAG} https://github.com/leanprover-community/mathlib4 /mathlib
+WORKDIR /mathlib
+RUN lake exe cache get
+# Warm check: `import Mathlib` must elaborate from cache — fails the build
+# loudly if the olean cache is unusable rather than at first proof attempt.
+RUN echo 'import Mathlib' > /tmp/warm.lean && lake env lean /tmp/warm.lean
+
+COPY experiments/prover/ /app/prover/
+COPY experiments/athena_metrics.py /app/athena_metrics.py
+ENV MATHLIB_DIR=/mathlib
+ENV PYTHONPATH=/app
+CMD ["python3", "/app/prover/prove.py"]

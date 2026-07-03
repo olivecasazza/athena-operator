@@ -1,0 +1,103 @@
+# Tier-3 phase 1 — formal theorem proving with verifier-as-reward (spec:
+# docs/tier3-lean-prover-spec.md).
+#
+# The prover is a deliberate BASELINE: a fixed sweep of standard closing tactics
+# (norm_num, omega, simp, aesop, ...) with the Lean kernel (`lake env lean`
+# under pinned mathlib) as the ONLY reward source — proof_closed is 1.0 iff the
+# kernel elaborates the candidate proof. Phase 2 swaps the sweep for an LLM
+# tactic policy + search; this reward contract is what it plugs into.
+#
+# Statements are vendored smoke statements (experiments/prover/statements.json),
+# NOT the miniF2F benchmark: four closeable by standard tactics, one (Bertrand-
+# postulate-shaped) deliberately beyond the sweep so reward=0 is exercised
+# honestly. Real miniF2F arrives with the phase-2 BenchmarkSuite.
+#
+# CPU-only: no GPU, no nvidia runtime — schedules anywhere amd64. `import
+# Mathlib` elaboration needs real RAM (~4-6Gi) per attempt.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: lean-prover-cpu
+  namespace: apps
+spec:
+  runtime:
+    type: pytorch        # nearest existing runtime type; mode is what matters
+    mode: batchJob
+  image: "ghcr.io/olivecasazza/athena-lean-prover:v1"
+  imagePullSecrets:
+    - name: ghcr-pull
+  resources:
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      memory: "8Gi"
+  scheduling:
+    nodeSelector:
+      kubernetes.io/arch: amd64
+  storage:
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+    createWorkspaceClaim: false
+    workspaceAccessModes:
+      - ReadWriteMany
+    workspaceStorageClassName: nfs
+  metricsEndpoint:
+    prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: lean-tactic-sweep
+  namespace: apps
+spec:
+  runtimeProfileRef: lean-prover-cpu
+  source:
+    git:
+      url: "https://github.com/olivecasazza/athena-operator"
+      ref: "main"
+  objective:
+    # The Lean kernel's verdict, and nothing else. 1.0 = proof closed.
+    metric: "proof_closed"
+    goal: "maximize"
+  metrics:
+    parser:
+      type: "file"
+      path: "result.json"
+  researchObjective: >-
+    Tier-3 phase 1: validate formal theorem proving as an Athena workload with
+    the Lean kernel as the reward oracle. What fraction of the vendored smoke
+    statements does a standard-tactic sweep close, and does the kernel verdict
+    flow end-to-end (result.json -> status.metrics.proof_closed -> campaign
+    ranking -> dossier) without any self-reported scoring?
+  defaults:
+    target_statement: "smoke_add_comm"
+  parameterSchema:
+    target_statement:
+      type: string
+      description: "Statement id in experiments/prover/statements.json."
+      default: "smoke_add_comm"
+  dashboard:
+    title: "Lean tactic-sweep baseline"
+    metrics:
+      proof_closed:
+        label: "Proof closed (kernel verdict)"
+        unit: bool
+        goal: maximize
+        baseline: 0
+        description: "1.0 iff the Lean kernel accepted a candidate proof; the RL reward signal."
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: lean-prove-once
+  namespace: apps
+spec:
+  templateRef: lean-tactic-sweep
+  strategy:
+    type: heuristic     # baseline only; target_statement is a string, never perturbed
+  concurrency: 1
+  budget:
+    maxExperiments: 1
+    maxDuration: "2h"

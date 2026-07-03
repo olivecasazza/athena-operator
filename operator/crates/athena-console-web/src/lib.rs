@@ -52,6 +52,8 @@ pub enum Panel {
     Benchmarks,
     /// Compose a campaign's experiments into a research-paper dataset.
     ReportCurator,
+    /// Published ResearchReport list.
+    Reports,
 }
 
 impl PanelKind for Panel {
@@ -66,6 +68,7 @@ impl PanelKind for Panel {
             Panel::RuntimeProfiles => "Runtime Profiles",
             Panel::Benchmarks => "Benchmarks",
             Panel::ReportCurator => "Report Curator",
+            Panel::Reports => "Reports",
         }
     }
 }
@@ -82,6 +85,7 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
         b.at(Panel::Benchmarks, 672.0, 984.0, 620.0, 320.0),
         b.at(Panel::RuntimeProfiles, 16.0, 1104.0, 640.0, 260.0),
         b.at(Panel::ReportCurator, 16.0, 1380.0, 640.0, 520.0),
+        b.at(Panel::Reports, 16.0, 1916.0, 640.0, 260.0),
     ]
 }
 
@@ -194,6 +198,7 @@ pub fn App() -> Element {
                 preview_doc,
                 save_status,
             ),
+            Panel::Reports => reports_view(snap, ws, selected_campaign, report_name, report_title),
         }
     };
 
@@ -557,6 +562,72 @@ fn resource_table(rows: Vec<ResourceSummary>, name_col: &str, detail_col: &str) 
                         }
                         td { class: "phase", "{r.phase}" }
                         td { "{r.detail}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn reports_view(
+    snap: ClusterSnapshot,
+    ws: panel_kit::Workspace<Panel>,
+    mut selected_campaign: Signal<Option<ResourceSummary>>,
+    mut report_name: Signal<String>,
+    mut report_title: Signal<String>,
+) -> Element {
+    let rows = snap.reports;
+    let campaigns = snap.campaigns;
+    rsx! {
+        div { class: "view-head",
+            h2 { "Reports" }
+            p { "Published ResearchReport resources. Click Load to open one in the Report Curator." }
+        }
+        table { class: "tbl",
+            thead {
+                tr {
+                    th { "Report" }
+                    th { "Campaign" }
+                    th { "Title" }
+                    th { "Phase" }
+                    th { "Excluded" }
+                    th { "" }
+                }
+            }
+            tbody {
+                if rows.is_empty() {
+                    tr { td { colspan: "6", class: "muted", "No reports found." } }
+                }
+                for r in rows {
+                    {
+                        let r2 = r.clone();
+                        let camps = campaigns.clone();
+                        rsx! {
+                            tr {
+                                td {
+                                    div { "{r.name}" }
+                                    div { class: "muted", "{r.namespace}" }
+                                }
+                                td { "{r.campaign_ref}" }
+                                td { "{r.title}" }
+                                td { class: "phase", "{r.phase}" }
+                                td { "{r.excluded_count}" }
+                                td {
+                                    button {
+                                        class: "btn",
+                                        onclick: move |_| {
+                                            if let Some(camp) = camps.iter().find(|c| c.name == r2.campaign_ref) {
+                                                selected_campaign.set(Some(camp.clone()));
+                                            }
+                                            report_name.set(r2.name.clone());
+                                            report_title.set(r2.title.clone());
+                                            ws.restore(Panel::ReportCurator);
+                                        },
+                                        "Load"
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
