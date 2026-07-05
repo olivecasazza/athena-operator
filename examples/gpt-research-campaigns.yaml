@@ -13,7 +13,7 @@
 #   1. Trainer image: Dockerfile.trainer → ghcr.io/olivecasazza/athena-gpt-trainer.
 #   2. Data: prepare.py downloads shards + trains the tokenizer on first run
 #      (HOME=/workspace → cached on the shared PVC thereafter).
-#   3. GPU capacity: 1 GPU per trial on the seir RTX 5000 pool.
+#   3. GPU capacity: 1 GPU per trial on the hp01-03 Quadro-RTX-4000 pool (3 GPUs).
 # Smoke-test one Experiment (device_batch_size small) before a full campaign.
 ---
 apiVersion: research.nixlab.io/v1alpha1
@@ -32,9 +32,8 @@ spec:
   imagePullSecrets:
     - name: ghcr-pull
   resources:
-    # seir runs other services; its CPUs/memory are heavily requested while the
-    # GPUs sit free. Training is GPU-bound (single light dataloader), so request
-    # small and let limits overcommit.
+    # hp01-03 are dedicated GPU workers. Training is GPU-bound (single light
+    # dataloader), so request small CPU/memory and let limits overcommit.
     requests:
       cpu: "2"
       memory: "3Gi"
@@ -43,12 +42,13 @@ spec:
       memory: "16Gi"
       nvidia.com/gpu: "1"
   scheduling:
-    # seir's RTX 5000 pool — deliberately DISJOINT from the spot RayJobs, which
-    # pin Quadro-RTX-4000 (hp01-03). Splitting pools is the cheapest way to keep
-    # long-running spot trials and athena campaigns from blocking each other;
-    # single product per campaign also keeps wall-clock-budget runs comparable.
+    # Quadro-RTX-4000 pool (hp01-03, hephaestus scale-from-zero) — NOT seir's
+    # RTX 5000. seir is olive's workstation; pinning athena there let training
+    # bursts (uncapped CPU) pin the desk. Moved off it deliberately. Trades the
+    # old spot/athena pool split for keeping seir interactive; spot RayJobs also
+    # target RTX-4000, so watch for pool contention when both run heavy.
     nodeSelector:
-      nvidia.com/gpu.product: Quadro-RTX-5000
+      nvidia.com/gpu.product: Quadro-RTX-4000
     # Long exploratory trials are checkpointed → safe to run preemptible.
     priorityClassName: gpu-scavenger
     # k3s: the NVIDIA runtime is not containerd's default on these nodes; without
@@ -135,7 +135,7 @@ spec:
   templateRef: gpt-muon-lr-repro
   strategy:
     type: heuristic          # hill-climb matrix_lr from the default
-  concurrency: 2   # seir pool = 2 GPUs; don't queue futile pods
+  concurrency: 2   # hp RTX-4000 pool = 3 GPUs; leave 1 free for spot RayJob contention
   budget:
     maxExperiments: 12
     maxDuration: "12h"
@@ -204,7 +204,7 @@ spec:
   templateRef: gpt-optimizer-search
   strategy:
     type: pbt                # perturbs every numeric param around the best
-  populationSize: 2  # sized to seir's 2 GPUs (PBT target = populationSize)
+  populationSize: 2  # hp RTX-4000 pool (3 GPUs); 2 leaves headroom for spot RayJobs
   perturbFactor: 1.2
   concurrency: 2
   budget:
