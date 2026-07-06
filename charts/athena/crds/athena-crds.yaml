@@ -226,6 +226,11 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "queueName": {
+                        "description": "Kueue LocalQueue (in the Job's namespace) to submit this experiment's Job to. When set, the operator stamps the `kueue.x-k8s.io/queue-name` label and creates the Job suspended, so Kueue admits it against the queue's quota. Unset → Jobs schedule directly, no Kueue involvement.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "runtimeClassName": {
                         "description": "Container runtime class for the experiment pods (e.g. `nvidia` on k3s nodes where the NVIDIA runtime is not containerd's default — without it the pod gets the GPU resource but no driver).",
                         "nullable": true,

@@ -893,7 +893,7 @@ fn build_job(
     namespace: &str,
     experiment_name: &str,
 ) -> Job {
-    let labels = BTreeMap::from([
+    let mut labels = BTreeMap::from([
         (
             "app.kubernetes.io/name".to_string(),
             "athena-experiment".to_string(),
@@ -911,6 +911,12 @@ fn build_job(
             profile.name_any(),
         ),
     ]);
+    // Kueue admission: opt in by labeling the Job with its LocalQueue. Kueue
+    // only manages Jobs carrying this label (manageJobsWithoutQueueName=false),
+    // so leaving queue_name unset preserves direct scheduling.
+    if let Some(queue) = &profile.spec.scheduling.queue_name {
+        labels.insert("kueue.x-k8s.io/queue-name".to_string(), queue.clone());
+    }
     let spec_json = serde_json::to_string(&experiment.spec).unwrap_or_else(|_| "{}".to_string());
     let metrics_endpoint = &profile.spec.metrics_endpoint;
     let checkpoint_dir = format!("{workspace_path}/checkpoints");
@@ -1073,6 +1079,14 @@ fn build_job(
             // Small >0 budget so a pod lost to preemption / node scale-down is
             // recreated instead of failing the whole experiment.
             backoff_limit: Some(3),
+            // Kueue requires managed Jobs to start suspended; it unsuspends on
+            // admission. Only when a queue is set — otherwise schedule directly.
+            suspend: profile
+                .spec
+                .scheduling
+                .queue_name
+                .as_ref()
+                .map(|_| true),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(labels),

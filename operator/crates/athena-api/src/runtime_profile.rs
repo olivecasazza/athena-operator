@@ -220,6 +220,12 @@ pub struct SchedulingProfile {
     /// the pod gets the GPU resource but no driver).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class_name: Option<String>,
+    /// Kueue LocalQueue (in the Job's namespace) to submit this experiment's
+    /// Job to. When set, the operator stamps the `kueue.x-k8s.io/queue-name`
+    /// label and creates the Job suspended, so Kueue admits it against the
+    /// queue's quota. Unset → Jobs schedule directly, no Kueue involvement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
