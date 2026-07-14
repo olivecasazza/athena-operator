@@ -32,7 +32,10 @@
             };
             vendorHash = "sha256-FuXR6Cq+BLJ7h5UqFEDJ/BVlWIUpye7GOpiqbhjv6aM=";
             subPackages = [ "cmd/mg" ];
-            ldflags = [ "-s" "-w" ];
+            ldflags = [
+              "-s"
+              "-w"
+            ];
             postInstall = ''
               ln -s "$out/bin/mg" "$out/bin/mardi-gras"
             '';
@@ -47,7 +50,10 @@
               hash = "sha256-rSXRxdK9Z5crYyABlyrc3xASikvyaPRQOzU9UyiJJc4=";
             };
             vendorHash = "sha256-Z90bsgXyfrz0Wurj0cJG4J5ZoCBp5ED51tVWby5xaOs=";
-            ldflags = [ "-s" "-w" ];
+            ldflags = [
+              "-s"
+              "-w"
+            ];
             doCheck = false;
           };
           athena = mkDeployment pkgs.lib;
@@ -267,11 +273,13 @@
                 pkgs.lapce
                 pkgs.neovim
                 pkgs.nerd-fonts.monaspace
-                  pkgs.nodejs
-                  mardiGras
-                  perles
-                  pkgs.pkg-config
+                pkgs.nodejs
+                mardiGras
+                perles
+                pkgs.pkg-config
                 pkgs.rustc
+                pkgs.rustfmt
+                pkgs.clippy
                 pkgs.uv
                 pkgs.watchexec
                 pkgs.xdg-utils

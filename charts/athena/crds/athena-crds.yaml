@@ -667,6 +667,63 @@
                     "minimum": 0.0,
                     "type": "integer"
                   },
+                  "inferenceMesh": {
+                    "description": "Optional ephemeral inference mesh (mesh-llm) brought up for the campaign's active lifetime and torn down when the campaign reaches terminal phase. While set, every experiment the campaign creates gets `LLM_BASE_URL` injected to point at the mesh Service, and experiment generation is gated on the mesh becoming Ready.",
+                    "nullable": true,
+                    "properties": {
+                      "extraArgs": {
+                        "description": "Extra args appended to `mesh-llm serve`.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "gpuResources": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "description": "GPU resource requests/limits, e.g. {\"amd.com/gpu\": \"1\"} or {\"nvidia.com/gpu\": \"2\"}. Empty = CPU-only.",
+                        "type": "object"
+                      },
+                      "image": {
+                        "description": "Container image serving the mesh-llm OpenAI endpoint.",
+                        "type": "string"
+                      },
+                      "model": {
+                        "description": "Model to serve (mesh-llm catalog name, HF ref, or in-image path).",
+                        "type": "string"
+                      },
+                      "nodeSelector": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "description": "nodeSelector for the mesh pod (e.g. pin to a specific host/pool).",
+                        "type": "object"
+                      },
+                      "port": {
+                        "default": 9337,
+                        "description": "API port. mesh-llm defaults to 9337.",
+                        "format": "uint16",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "runtimeClassName": {
+                        "description": "runtimeClassName (e.g. \"nvidia\"). Required for NVIDIA GPU pods on k3s.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "tolerations": {
+                        "description": "Pod tolerations (raw JSON, mirrors SchedulingProfile.tolerations).",
+                        "items": {},
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "image",
+                      "model"
+                    ],
+                    "type": "object"
+                  },
                   "perturbFactor": {
                     "description": "Perturbation factor applied to hyperparameters during PBT exploit/explore.",
                     "format": "double",
@@ -846,6 +903,25 @@
                       }
                     },
                     "type": "object"
+                  },
+                  "env": {
+                    "description": "Extra env vars merged into the job container AFTER the RuntimeProfile env, overriding same-named profile vars. The campaign controller uses this to inject `LLM_BASE_URL` for an ephemeral inference mesh.",
+                    "items": {
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "nullable": true,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
                   },
                   "hypothesis": {
                     "type": "string"

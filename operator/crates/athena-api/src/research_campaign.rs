@@ -1,6 +1,7 @@
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, JsonSchema)]
 #[kube(
@@ -48,6 +49,50 @@ pub struct ResearchCampaignSpec {
     /// Perturbation factor applied to hyperparameters during PBT exploit/explore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perturb_factor: Option<f64>,
+
+    /// Optional ephemeral inference mesh (mesh-llm) brought up for the campaign's
+    /// active lifetime and torn down when the campaign reaches terminal phase.
+    /// While set, every experiment the campaign creates gets `LLM_BASE_URL`
+    /// injected to point at the mesh Service, and experiment generation is gated
+    /// on the mesh becoming Ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_mesh: Option<InferenceMeshSpec>,
+}
+
+/// Ephemeral OpenAI-compatible inference endpoint (mesh-llm) the operator brings
+/// up for the duration of a campaign. Runs as a companion Deployment+Service the
+/// campaign owns; keep it OUT of the Kueue-managed GPU pool (e.g. pin to traitor)
+/// so it can't over-subscribe quota Kueue arbitrates for experiment Jobs.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceMeshSpec {
+    /// Container image serving the mesh-llm OpenAI endpoint.
+    pub image: String,
+    /// Model to serve (mesh-llm catalog name, HF ref, or in-image path).
+    pub model: String,
+    /// API port. mesh-llm defaults to 9337.
+    #[serde(default = "default_mesh_port")]
+    pub port: u16,
+    /// nodeSelector for the mesh pod (e.g. pin to a specific host/pool).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_selector: BTreeMap<String, String>,
+    /// Pod tolerations (raw JSON, mirrors SchedulingProfile.tolerations).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tolerations: Vec<serde_json::Value>,
+    /// GPU resource requests/limits, e.g. {"amd.com/gpu": "1"} or
+    /// {"nvidia.com/gpu": "2"}. Empty = CPU-only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gpu_resources: BTreeMap<String, String>,
+    /// runtimeClassName (e.g. "nvidia"). Required for NVIDIA GPU pods on k3s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_class_name: Option<String>,
+    /// Extra args appended to `mesh-llm serve`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+fn default_mesh_port() -> u16 {
+    9337
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]

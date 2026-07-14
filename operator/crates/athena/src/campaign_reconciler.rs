@@ -33,10 +33,18 @@ use athena_api::experiment::{
     CheckpointPolicy, Experiment, ExperimentDecision, ExperimentPhase, ExperimentSpec,
 };
 use athena_api::experiment_template::{ExperimentTemplate, ObjectiveGoal, ObjectiveSpec};
-use athena_api::research_campaign::ResearchCampaign;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use athena_api::research_campaign::{InferenceMeshSpec, ResearchCampaign};
+use athena_api::runtime_profile::EnvVar;
+use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
+use k8s_openapi::api::core::v1::{
+    Container, ContainerPort, HTTPGetAction, PodSpec, PodTemplateSpec, Probe, ResourceRequirements,
+    Service, ServicePort, ServiceSpec, Toleration,
+};
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference};
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::ResourceExt;
-use kube::api::{Api, ListParams, ObjectMeta, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use serde_json::{Value, json};
 use tracing::{info, warn};
@@ -67,9 +75,14 @@ pub fn error_policy(campaign: Arc<ResearchCampaign>, err: &Error, _ctx: Arc<Cont
     campaign.name = %campaign.name_any(),
     campaign.namespace = %campaign.namespace().unwrap_or_default(),
 ))]
-pub async fn reconcile(campaign: Arc<ResearchCampaign>, ctx: Arc<Context>) -> Result<Action, Error> {
+pub async fn reconcile(
+    campaign: Arc<ResearchCampaign>,
+    ctx: Arc<Context>,
+) -> Result<Action, Error> {
     let name = campaign.name_any();
-    let ns = campaign.namespace().unwrap_or_else(|| "default".to_string());
+    let ns = campaign
+        .namespace()
+        .unwrap_or_else(|| "default".to_string());
 
     // 1. Resolve the template for objective + parameter space.
     let templates: Api<ExperimentTemplate> = Api::namespaced(ctx.client.clone(), &ns);
@@ -137,11 +150,30 @@ pub async fn reconcile(campaign: Arc<ResearchCampaign>, ctx: Arc<Context>) -> Re
         }
     }
 
+    // 3c. Ephemeral inference mesh (mesh-llm): bring it up while the campaign is
+    // active, gate experiment generation on its readiness, and tear it down at
+    // terminal phase (NOT object deletion — completed campaigns linger for
+    // decision evaluation, so ownerReference-only GC would outlive the run).
+    let at_budget = total >= campaign.spec.budget.max_experiments;
+    // "The run ended" = budget reached AND all experiments terminal (running == 0).
+    // at_budget alone only means "done generating": the final `concurrency`
+    // experiments are still Running when total hits budget and must keep their mesh
+    // endpoint until they finish. Keep the mesh up (ensure self-heals) through that
+    // drain window; tear down only once nothing is left running.
+    let all_done = at_budget && running == 0;
+    let mesh_ready = match &campaign.spec.inference_mesh {
+        Some(mesh) if !all_done => ensure_mesh(&ctx, &ns, &campaign, &name, mesh).await?,
+        Some(_) => {
+            teardown_mesh(&ctx, &ns, &name).await?;
+            true
+        }
+        None => true,
+    };
+
     // 4. Generate next experiments within budget + concurrency.
     // PBT runs a population at once: its concurrency target is populationSize
     // when set, falling back to spec.concurrency. Heuristic uses concurrency.
     let is_pbt = campaign.spec.strategy.strategy_type == "pbt";
-    let at_budget = total >= campaign.spec.budget.max_experiments;
     let concurrency = if is_pbt {
         campaign
             .spec
@@ -152,7 +184,9 @@ pub async fn reconcile(campaign: Arc<ResearchCampaign>, ctx: Arc<Context>) -> Re
         campaign.spec.concurrency.max(1)
     };
     let mut created = 0u32;
-    if !at_budget {
+    // When an inference mesh is configured, hold experiment creation until it is
+    // Ready so the first prover Jobs don't launch against a dead LLM_BASE_URL.
+    if !at_budget && mesh_ready {
         let want = concurrency.saturating_sub(running);
         let budget_left = campaign.spec.budget.max_experiments - total;
         // The best succeeded experiment is the seed for both strategies: its
@@ -209,8 +243,15 @@ pub async fn reconcile(campaign: Arc<ResearchCampaign>, ctx: Arc<Context>) -> Re
             }
             seen.insert(science_key(&chosen.0));
             let (params, hypothesis, checkpoint_policy) = chosen;
-            let exp =
-                build_experiment(&campaign, &name, &ns, idx, params, hypothesis, checkpoint_policy);
+            let exp = build_experiment(
+                &campaign,
+                &name,
+                &ns,
+                idx,
+                params,
+                hypothesis,
+                checkpoint_policy,
+            );
             match experiments.create(&PostParams::default(), &exp).await {
                 Ok(_) => created += 1,
                 Err(e) => warn!(%e, idx, "failed to create experiment"),
@@ -352,7 +393,9 @@ fn next_experiment(
                     let next = cur * factor;
                     params.insert(
                         key.clone(),
-                        serde_json::Number::from_f64(next).map(Value::Number).unwrap_or(Value::Null),
+                        serde_json::Number::from_f64(next)
+                            .map(Value::Number)
+                            .unwrap_or(Value::Null),
                     );
                     format!("perturb {key} {cur:.4}->{next:.4} (x{factor}) from {best_name}")
                 } else {
@@ -426,7 +469,10 @@ fn pbt_experiment(
             if perturbed.is_empty() {
                 format!("pbt exploit from {best_name} (no numeric params to perturb)")
             } else {
-                format!("pbt exploit+explore from {best_name}: {}", perturbed.join(", "))
+                format!(
+                    "pbt exploit+explore from {best_name}: {}",
+                    perturbed.join(", ")
+                )
             }
         }
     };
@@ -491,9 +537,235 @@ fn build_experiment(
             parameters,
             patch: None,
             checkpoint_policy,
+            env: mesh_env(campaign, campaign_name, ns),
         },
         status: None,
     }
+}
+
+/// When the campaign runs an ephemeral inference mesh, point experiment jobs at
+/// its Service via `LLM_BASE_URL` (prove.py reads this env directly). Empty
+/// otherwise, so non-mesh campaigns are unchanged.
+fn mesh_env(campaign: &ResearchCampaign, campaign_name: &str, ns: &str) -> Vec<EnvVar> {
+    match &campaign.spec.inference_mesh {
+        Some(mesh) => vec![EnvVar {
+            name: "LLM_BASE_URL".to_string(),
+            value: Some(format!(
+                "http://mesh-llm-{campaign_name}.{ns}.svc.cluster.local:{}/v1",
+                mesh.port
+            )),
+        }],
+        None => Vec::new(),
+    }
+}
+
+/// Ensure the campaign's ephemeral mesh-llm Deployment + Service exist, returning
+/// whether the Deployment reports at least one available (Ready) replica.
+/// Idempotent: creates on first sight, otherwise just reads readiness. Both
+/// objects are owned by the campaign (crash-safety GC backstop); terminal-phase
+/// `teardown_mesh` is the primary teardown path.
+async fn ensure_mesh(
+    ctx: &Arc<Context>,
+    ns: &str,
+    campaign: &ResearchCampaign,
+    campaign_name: &str,
+    mesh: &InferenceMeshSpec,
+) -> Result<bool, Error> {
+    let name = format!("mesh-llm-{campaign_name}");
+    let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
+    let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+
+    let owner = OwnerReference {
+        api_version: "research.nixlab.io/v1alpha1".to_string(),
+        kind: "ResearchCampaign".to_string(),
+        name: campaign_name.to_string(),
+        uid: campaign.uid().unwrap_or_default(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    };
+    let labels = BTreeMap::from([
+        ("app".to_string(), "mesh-llm".to_string()),
+        (CAMPAIGN_LABEL.to_string(), campaign_name.to_string()),
+    ]);
+
+    if services.get_opt(&name).await?.is_none() {
+        let svc = Service {
+            metadata: ObjectMeta {
+                name: Some(name.clone()),
+                namespace: Some(ns.to_string()),
+                labels: Some(labels.clone()),
+                owner_references: Some(vec![owner.clone()]),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                selector: Some(labels.clone()),
+                ports: Some(vec![ServicePort {
+                    name: Some("http".to_string()),
+                    port: mesh.port as i32,
+                    target_port: Some(IntOrString::Int(mesh.port as i32)),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match services.create(&PostParams::default(), &svc).await {
+            Ok(_) => info!(campaign = %campaign_name, %name, "created inference mesh Service"),
+            Err(kube::Error::Api(e)) if e.code == 409 => {}
+            Err(e) => return Err(Error::Kube(e)),
+        }
+    }
+
+    match deployments.get_opt(&name).await? {
+        None => {
+            let dep = build_mesh_deployment(&name, ns, mesh, &labels, owner);
+            match deployments.create(&PostParams::default(), &dep).await {
+                Ok(_) => {
+                    info!(campaign = %campaign_name, %name, "created inference mesh Deployment")
+                }
+                Err(kube::Error::Api(e)) if e.code == 409 => {}
+                Err(e) => return Err(Error::Kube(e)),
+            }
+            Ok(false)
+        }
+        Some(dep) => Ok(dep
+            .status
+            .as_ref()
+            .and_then(|s| s.available_replicas)
+            .unwrap_or(0)
+            >= 1),
+    }
+}
+
+/// Build the mesh-llm serving Deployment: `mesh-llm serve --model <m> --listen-all
+/// --headless --port <p>` with the campaign-specified node placement, tolerations,
+/// GPU resources, and runtimeClassName.
+fn build_mesh_deployment(
+    name: &str,
+    ns: &str,
+    mesh: &InferenceMeshSpec,
+    labels: &BTreeMap<String, String>,
+    owner: OwnerReference,
+) -> Deployment {
+    let mut args = vec![
+        "serve".to_string(),
+        "--model".to_string(),
+        mesh.model.clone(),
+        "--listen-all".to_string(),
+        "--headless".to_string(),
+        "--port".to_string(),
+        mesh.port.to_string(),
+    ];
+    args.extend(mesh.extra_args.iter().cloned());
+
+    let resources = if mesh.gpu_resources.is_empty() {
+        None
+    } else {
+        let q: BTreeMap<String, Quantity> = mesh
+            .gpu_resources
+            .iter()
+            .map(|(k, v)| (k.clone(), Quantity(v.clone())))
+            .collect();
+        Some(ResourceRequirements {
+            limits: Some(q.clone()),
+            requests: Some(q),
+            ..Default::default()
+        })
+    };
+
+    let tolerations: Option<Vec<Toleration>> = if mesh.tolerations.is_empty() {
+        None
+    } else {
+        Some(
+            mesh.tolerations
+                .iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect(),
+        )
+    };
+
+    let node_selector = if mesh.node_selector.is_empty() {
+        None
+    } else {
+        Some(mesh.node_selector.clone())
+    };
+
+    let container = Container {
+        name: "mesh-llm".to_string(),
+        image: Some(mesh.image.clone()),
+        args: Some(args),
+        ports: Some(vec![ContainerPort {
+            container_port: mesh.port as i32,
+            name: Some("http".to_string()),
+            ..Default::default()
+        }]),
+        resources,
+        // Readiness must reflect *serving* readiness, not container start: /v1/models
+        // only 200s once the model is loaded. Without this the campaign's readiness
+        // gate would release experiments against a mesh that isn't serving yet.
+        // failureThreshold * periodSeconds (60 * 15s = 15m) covers model download.
+        readiness_probe: Some(Probe {
+            http_get: Some(HTTPGetAction {
+                path: Some("/v1/models".to_string()),
+                port: IntOrString::Int(mesh.port as i32),
+                ..Default::default()
+            }),
+            initial_delay_seconds: Some(20),
+            period_seconds: Some(15),
+            timeout_seconds: Some(5),
+            failure_threshold: Some(60),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    Deployment {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(ns.to_string()),
+            labels: Some(labels.clone()),
+            owner_references: Some(vec![owner]),
+            ..Default::default()
+        },
+        spec: Some(DeploymentSpec {
+            replicas: Some(1),
+            selector: LabelSelector {
+                match_labels: Some(labels.clone()),
+                ..Default::default()
+            },
+            template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(labels.clone()),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    containers: vec![container],
+                    node_selector,
+                    tolerations,
+                    runtime_class_name: mesh.runtime_class_name.clone(),
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Delete the campaign's mesh Deployment + Service at terminal phase. Idempotent:
+/// only deletes what still exists, so repeated terminal reconciles are no-ops.
+async fn teardown_mesh(ctx: &Arc<Context>, ns: &str, campaign_name: &str) -> Result<(), Error> {
+    let name = format!("mesh-llm-{campaign_name}");
+    let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
+    let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+    if deployments.get_opt(&name).await?.is_some() {
+        deployments.delete(&name, &DeleteParams::default()).await?;
+        info!(campaign = %campaign_name, %name, "tore down inference mesh Deployment");
+    }
+    if services.get_opt(&name).await?.is_some() {
+        services.delete(&name, &DeleteParams::default()).await?;
+    }
+    Ok(())
 }
 
 /// Create a BenchmarkRun for a succeeded experiment if one doesn't exist yet.
@@ -585,11 +857,10 @@ async fn ensure_benchmark_run(
 mod tests {
     use super::*;
     use athena_api::experiment::{CheckpointRef, ExperimentStatus};
-    use athena_api::research_campaign::ResearchCampaignSpec;
     use athena_api::experiment_template::{
-        ExperimentTemplateSpec, MetricsSpec, ParameterSpec, SourceSpec,
-        {GitSource},
+        ExperimentTemplateSpec, GitSource, MetricsSpec, ParameterSpec, SourceSpec,
     };
+    use athena_api::research_campaign::ResearchCampaignSpec;
 
     fn exp_with(name: &str, phase: ExperimentPhase, metric: &str, value: f64) -> Experiment {
         let mut metrics = BTreeMap::new();
@@ -605,6 +876,7 @@ mod tests {
                 parameters: BTreeMap::new(),
                 patch: None,
                 checkpoint_policy: None,
+                env: vec![],
             },
             status: Some(ExperimentStatus {
                 phase,
@@ -648,11 +920,19 @@ mod tests {
 
         let (p0, _) = next_experiment(&t, Some(("c-000", &best)), 1, 0);
         let (p1, _) = next_experiment(&t, Some(("c-000", &best)), 1, 1);
-        assert_ne!(science_key(&p0), science_key(&p1), "hill-climb salt must vary the point");
+        assert_ne!(
+            science_key(&p0),
+            science_key(&p1),
+            "hill-climb salt must vary the point"
+        );
 
         let (q0, _) = pbt_experiment(&t, Some(("c-000", &best)), 1.2, 2, 0);
         let (q1, _) = pbt_experiment(&t, Some(("c-000", &best)), 1.2, 2, 1);
-        assert_ne!(science_key(&q0), science_key(&q1), "pbt salt bitmask must vary the point");
+        assert_ne!(
+            science_key(&q0),
+            science_key(&q1),
+            "pbt salt bitmask must vary the point"
+        );
 
         // Same science params, different bookkeeping → same key.
         let mut a = BTreeMap::from([("lr".to_string(), json!(0.1))]);
@@ -666,7 +946,10 @@ mod tests {
 
     fn pick_best_none_when_no_metric() {
         let a = exp_with("a", ExperimentPhase::Succeeded, "other", 2.0);
-        assert_eq!(pick_best(&[&a], &obj("loss", ObjectiveGoal::Minimize)), None);
+        assert_eq!(
+            pick_best(&[&a], &obj("loss", ObjectiveGoal::Minimize)),
+            None
+        );
     }
 
     fn template_with_default_lr(lr: f64) -> ExperimentTemplate {
@@ -724,7 +1007,11 @@ mod tests {
         assert!(hyp.contains("perturb lr"), "{hyp}");
         // idx 2, lap 1 -> factor 0.5 -> 0.5*0.5 = 0.25
         let (params2, _) = next_experiment(&t, Some(("c-002", &best)), 2, 0);
-        assert!((lr(&params2) - 0.25).abs() < 1e-9, "{:?}", params2.get("lr"));
+        assert!(
+            (lr(&params2) - 0.25).abs() < 1e-9,
+            "{:?}",
+            params2.get("lr")
+        );
     }
 
     fn campaign_pbt(population: Option<u32>, perturb: Option<f64>) -> ResearchCampaign {
@@ -745,6 +1032,7 @@ mod tests {
                 benchmark_runtime_profile_ref: None,
                 population_size: population,
                 perturb_factor: perturb,
+                inference_mesh: None,
             },
             status: None,
         }
@@ -765,7 +1053,11 @@ mod tests {
         assert!(hyp.contains("pbt"), "{hyp}");
         // idx 1 -> (1+0)%2==1 -> down by 1/1.2 -> 0.5/1.2.
         let (params2, _) = pbt_experiment(&t, Some(("c-002", &best)), 1.2, 1, 0);
-        assert!((lr(&params2) - 0.5 / 1.2).abs() < 1e-9, "{:?}", params2.get("lr"));
+        assert!(
+            (lr(&params2) - 0.5 / 1.2).abs() < 1e-9,
+            "{:?}",
+            params2.get("lr")
+        );
     }
 
     #[test]
@@ -843,6 +1135,7 @@ mod tests {
                 benchmark_runtime_profile_ref: None,
                 population_size: None,
                 perturb_factor: None,
+                inference_mesh: None,
             },
             status: None,
         };

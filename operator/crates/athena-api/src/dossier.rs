@@ -1282,6 +1282,7 @@ mod tests {
                 parameters: BTreeMap::from([("lr".to_string(), json!(0.001))]),
                 patch: None,
                 checkpoint_policy: None,
+                env: vec![],
             },
             status: Some(ExperimentStatus {
                 phase: ExperimentPhase::Succeeded,
@@ -1304,6 +1305,7 @@ mod tests {
                 benchmark_runtime_profile_ref: None,
                 population_size: None,
                 perturb_factor: None,
+                inference_mesh: None,
             },
             status: Some(ResearchCampaignStatus {
                 best_experiment: Some("exp-b".into()),
@@ -1416,6 +1418,7 @@ mod tests {
                 parameters: BTreeMap::from([("lr".to_string(), serde_json::json!(lr))]),
                 patch: None,
                 checkpoint_policy: None,
+                env: vec![],
             },
             status: Some(ExperimentStatus {
                 phase: ExperimentPhase::Succeeded,
