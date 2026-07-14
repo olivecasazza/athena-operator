@@ -27,6 +27,11 @@ pub struct ExperimentSpec {
     pub patch: Option<PatchSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_policy: Option<CheckpointPolicy>,
+    /// Extra env vars merged into the job container AFTER the RuntimeProfile env,
+    /// overriding same-named profile vars. The campaign controller uses this to
+    /// inject `LLM_BASE_URL` for an ephemeral inference mesh.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<crate::runtime_profile::EnvVar>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default, PartialEq)]

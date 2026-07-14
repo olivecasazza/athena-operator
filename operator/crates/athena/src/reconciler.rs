@@ -486,9 +486,7 @@ async fn pods_for_job(ctx: Arc<Context>, ns: &str, job: &Job) -> Result<Vec<Pod>
     let job_name = job.name_any();
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
     let list = pods
-        .list(&ListParams::default().labels(&format!(
-            "batch.kubernetes.io/job-name={job_name}"
-        )))
+        .list(&ListParams::default().labels(&format!("batch.kubernetes.io/job-name={job_name}")))
         .await?;
     let Some(job_uid) = job.metadata.uid.as_deref() else {
         return Ok(list.items);
@@ -1014,6 +1012,20 @@ fn build_job(
             ..Default::default()
         });
     }
+    // Experiment-level env overrides (e.g. campaign-injected LLM_BASE_URL for an
+    // ephemeral inference mesh). Override a same-named profile var in place so we
+    // never emit duplicate env entries; append otherwise.
+    for var in &experiment.spec.env {
+        if let Some(existing) = container_env.iter_mut().find(|e| e.name == var.name) {
+            existing.value = var.value.clone();
+        } else {
+            container_env.push(EnvVar {
+                name: var.name.clone(),
+                value: var.value.clone(),
+                ..Default::default()
+            });
+        }
+    }
 
     // Workspace PVC mount plus any RuntimeProfile secret mounts. Volume names are
     // index-based so two mounts (or the same secret mounted twice) never collide.
@@ -1081,12 +1093,7 @@ fn build_job(
             backoff_limit: Some(3),
             // Kueue requires managed Jobs to start suspended; it unsuspends on
             // admission. Only when a queue is set — otherwise schedule directly.
-            suspend: profile
-                .spec
-                .scheduling
-                .queue_name
-                .as_ref()
-                .map(|_| true),
+            suspend: profile.spec.scheduling.queue_name.as_ref().map(|_| true),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(labels),
@@ -1274,7 +1281,10 @@ mod tests {
         assert_eq!(checkpoint.uri, "/workspace/runs/c/e/checkpoints/step-100");
 
         let artifacts = artifacts.expect("artifacts present");
-        assert_eq!(artifacts.onnx_uri.as_deref(), Some("gs://bucket/model.onnx"));
+        assert_eq!(
+            artifacts.onnx_uri.as_deref(),
+            Some("gs://bucket/model.onnx")
+        );
         assert_eq!(
             artifacts.best_checkpoint_uri.as_deref(),
             Some("/workspace/runs/c/e/checkpoints/best")
@@ -1295,9 +1305,6 @@ mod tests {
         let (metrics, detail, _artifacts, _checkpoint) =
             merge_terminal_metrics(BTreeMap::new(), None, None, None, None, Some(&raw));
         assert_eq!(metrics.get("val_bpb"), Some(&json!(2.34)));
-        assert_eq!(
-            detail.unwrap().objective_name.as_deref(),
-            Some("val_bpb")
-        );
+        assert_eq!(detail.unwrap().objective_name.as_deref(), Some("val_bpb"));
     }
 }

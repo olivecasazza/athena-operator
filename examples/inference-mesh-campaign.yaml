@@ -1,0 +1,51 @@
+# ResearchCampaign with an ephemeral inference mesh (mesh-llm).
+#
+# The campaign controller brings up a `mesh-llm-<campaign>` Deployment+Service
+# (OpenAI-compatible, :9337) while the campaign is active, holds experiment
+# creation until it reports Ready, injects LLM_BASE_URL into every experiment Job
+# (prove.py reads it directly), and tears the mesh down when the campaign reaches
+# terminal phase (status.phase == Completed). Both objects are owned by the
+# campaign, so a campaign delete is a GC backstop.
+#
+# Kueue note: this pins the mesh to traitor (AMD/ROCm) via nodeSelector so it
+# stays OUT of the Kueue-managed NVIDIA hp pool and can't over-subscribe the
+# nvidia.com/gpu quota Kueue arbitrates for experiment Jobs. To run the mesh on
+# an NVIDIA node instead, use the CUDA image + runtimeClassName: nvidia +
+# nvidia.com/gpu resources + the nvidia toleration (and accept it shares the
+# Kueue pool). Image must be pushed to ghcr first (see Dockerfile.mesh{,-rocm}).
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: prover-mesh-demo
+  namespace: apps
+spec:
+  templateRef: lean-prover
+  concurrency: 2
+  budget:
+    maxExperiments: 20
+    maxDuration: 6h
+  strategy:
+    type: heuristic
+  inferenceMesh:
+    # ROCm image on traitor (24GB) — smoke this image on traitor before first use.
+    image: ghcr.io/olivecasazza/mesh-llm:v0.73.1-rocm
+    # mesh-llm is GGUF/llama.cpp: this MUST resolve to a GGUF artifact, NOT the
+    # vLLM safetensors id. Verify with `mesh-llm models search deepseek-prover`
+    # first — if it doesn't resolve, the pod never goes Ready and the campaign
+    # hangs at the readiness gate. e.g. an HF GGUF repo ref like
+    # `hf://<owner>/DeepSeek-Prover-V2-7B-GGUF:q4_k_m`.
+    model: hf://bartowski/DeepSeek-Prover-V2-7B-GGUF:Q4_K_M
+    port: 9337
+    # TODO(follow-up): no model cache volume yet → the ~5GB GGUF re-downloads once
+    # per campaign into the ephemeral pod. Add a hostPath/PVC cache like
+    # vllm-prover.nix if churn matters. One-time-per-campaign, not per-experiment.
+    nodeSelector:
+      kubernetes.io/hostname: traitor
+    gpuResources:
+      amd.com/gpu: "1"
+    tolerations:
+      - key: amd.com/gpu
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+    # extraArgs: ["--mesh-guardrails", "metrics"]  # enable OTLP metrics later
