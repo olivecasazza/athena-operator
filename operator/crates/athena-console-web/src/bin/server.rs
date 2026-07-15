@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/snapshot", get(snapshot))
+        .route("/api/scheduling", get(scheduling))
         .route("/api/manifest/:namespace/:kind/:name", get(manifest))
         .route("/api/template/:namespace/:name", get(template))
         // Report curation: persist a ResearchReport (spec only) and preview its
@@ -66,6 +67,17 @@ async fn snapshot() -> Result<Json<ClusterSnapshot>, (StatusCode, String)> {
         .await
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// `GET /api/scheduling` → the GPU-scheduling/inference stack snapshot (Kueue
+/// pools + workloads, Hephaestus node power, inference backends) for the admin
+/// views. Reuses the shared `athena_api::scheduling` reader; camelCase wire.
+async fn scheduling()
+-> Result<Json<athena_api::scheduling::SchedulingSnapshot>, (StatusCode, String)> {
+    let client = Client::try_default()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(athena_api::scheduling::read_scheduling(&client).await))
 }
 
 async fn manifest(

@@ -102,3 +102,59 @@ pub struct ReportSpecDto {
     #[serde(default)]
     pub seeded_hypotheses: Vec<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Scheduling / inference stack (admin views). Mirrors
+// `athena_api::scheduling::*` on the wire (camelCase) — `GET /api/scheduling`.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchedulingSnapshot {
+    pub pools: Vec<GpuPool>,
+    pub workloads: Vec<WorkloadRow>,
+    pub nodes: Vec<NodePower>,
+    pub inference: Vec<InferenceBackend>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuPool {
+    pub name: String,
+    pub gpu_nominal: i64,
+    pub gpu_used: i64,
+    pub cpu_nominal: i64,
+    pub cpu_used: i64,
+    pub pending_workloads: i64,
+    pub admitted_workloads: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadRow {
+    pub name: String,
+    pub namespace: String,
+    pub queue: String,
+    pub priority_class: String,
+    pub state: String,
+    pub gpus: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodePower {
+    pub name: String,
+    pub powered: bool,
+    pub phase: String,
+    pub pool: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceBackend {
+    pub campaign: String,
+    pub kind: String,
+    pub name: String,
+    pub serving: bool,
+    pub endpoint: String,
+}

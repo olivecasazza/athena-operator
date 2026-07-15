@@ -16,7 +16,10 @@
 pub mod models;
 
 use dioxus::prelude::*;
-use models::{ClusterSnapshot, ReportSpecDto, ReportSummary, ResourceSummary, TemplateSummary};
+use models::{
+    ClusterSnapshot, ReportSpecDto, ReportSummary, ResourceSummary, SchedulingSnapshot,
+    TemplateSummary,
+};
 use std::collections::{BTreeMap, HashSet};
 use panel_kit::{GrafanaPanel, IdePanel, LayoutBuilder, PanelKind, PanelWin, use_workspace};
 use serde::{Deserialize, Serialize};
@@ -89,6 +92,35 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
     ]
 }
 
+/// Admin-only page: the GPU-scheduling / inference stack. Rendered on a SEPARATE
+/// panel-kit workspace (its own layout), opened via the topbar "Admin" toggle.
+/// Observability only — cluster config stays GitOps (nixlab/Flux).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AdminPanel {
+    GpuPools,
+    NodePower,
+    Inference,
+}
+
+impl PanelKind for AdminPanel {
+    fn title(self) -> &'static str {
+        match self {
+            AdminPanel::GpuPools => "GPU Pools & Queues",
+            AdminPanel::NodePower => "Node Power · Hephaestus",
+            AdminPanel::Inference => "Inference Backends",
+        }
+    }
+}
+
+fn admin_layout() -> Vec<PanelWin<AdminPanel>> {
+    let mut b = LayoutBuilder::new();
+    vec![
+        b.at(AdminPanel::GpuPools, 16.0, 16.0, 900.0, 560.0),
+        b.at(AdminPanel::NodePower, 932.0, 16.0, 440.0, 260.0),
+        b.at(AdminPanel::Inference, 932.0, 292.0, 440.0, 284.0),
+    ]
+}
+
 /// App-specific theming layered after [`panel_kit::CSS`]: a high-contrast
 /// pink/blue palette echoing the native console, plus table + detail styles.
 const APP_CSS: &str = "
@@ -119,6 +151,7 @@ const APP_CSS: &str = "
 .btn { background:var(--bg); color:var(--fg); border:1px solid var(--line2);
   border-radius:3px; padding:.1rem .45rem; font-size:.7rem; cursor:pointer;
   font-family:var(--mono); }
+.admin-toggle { margin-left:auto; color:var(--pink); border-color:var(--pink); }
 .btn:hover { border-color:var(--pink); }
 .section-label { font-size:.78rem; color:var(--fg); margin:.5rem 0 .25rem; }
 .embed-block { height:340px; margin:.4rem 0; }
@@ -142,9 +175,15 @@ const APP_CSS: &str = "
 #[component]
 pub fn App() -> Element {
     let ws = use_workspace("athena_console_web", default_layout);
+    let admin_ws = use_workspace("athena_console_web_admin", admin_layout);
+    // Admin page toggle — a separate panel set (GPU/Kueue/inference). Researchers
+    // stay on the default page; access itself is gated at the ingress (Zero Trust).
+    let mut admin = use_signal(|| false);
 
     // Snapshot fetched once from the backend; views read it reactively.
     let snapshot = use_resource(move || async move { fetch_snapshot().await });
+    // Scheduling/inference stack snapshot for the admin page.
+    let sched = use_resource(move || async move { fetch_scheduling().await });
 
     // External selection state for the data-less ExperimentDetail panel.
     let selected = use_signal(|| Option::<ResourceSummary>::None);
@@ -204,19 +243,51 @@ pub fn App() -> Element {
         }
     };
 
+    let admin_body = move |kind: AdminPanel, _maximized: bool| -> Element {
+        let s = sched.read();
+        let snap = match &*s {
+            None => return rsx! { p { class: "muted", "Loading scheduling state…" } },
+            Some(Err(e)) => {
+                return rsx! { p { class: "err", "Failed to load scheduling: {e}" } };
+            }
+            Some(Ok(snap)) => snap.clone(),
+        };
+        match kind {
+            AdminPanel::GpuPools => gpu_pools_view(snap),
+            AdminPanel::NodePower => node_power_view(snap),
+            AdminPanel::Inference => inference_view(snap),
+        }
+    };
+
     rsx! {
         style { {panel_kit::CSS} }
         style { {APP_CSS} }
-        div {
-            class: ws.root_class(),
-            onmousemove: move |e| ws.handle_mouse_move(&e),
-            onmouseup: move |_| ws.handle_mouse_up(),
-            header { class: "topbar",
-                h1 { "Athena Console" }
-                span { class: "hint", "Kubernetes research operator dashboard · drag, resize, tile panels" }
+        if admin() {
+            div {
+                class: admin_ws.root_class(),
+                onmousemove: move |e| admin_ws.handle_mouse_move(&e),
+                onmouseup: move |_| admin_ws.handle_mouse_up(),
+                header { class: "topbar",
+                    h1 { "Athena Console · Admin" }
+                    span { class: "hint", "GPU scheduling · Kueue · inference · Hephaestus — read-only" }
+                    button { class: "btn admin-toggle", onclick: move |_| admin.set(false), "← Research" }
+                }
+                {admin_ws.render(admin_body)}
+                {admin_ws.dock()}
             }
-            {ws.render(body)}
-            {ws.dock()}
+        } else {
+            div {
+                class: ws.root_class(),
+                onmousemove: move |e| ws.handle_mouse_move(&e),
+                onmouseup: move |_| ws.handle_mouse_up(),
+                header { class: "topbar",
+                    h1 { "Athena Console" }
+                    span { class: "hint", "Kubernetes research operator dashboard · drag, resize, tile panels" }
+                    button { class: "btn admin-toggle", onclick: move |_| admin.set(true), "⚙ Admin" }
+                }
+                {ws.render(body)}
+                {ws.dock()}
+            }
         }
     }
 }
@@ -921,6 +992,125 @@ fn report_curator_view(
 }
 
 // ---------------------------------------------------------------------------
+// Admin views (GPU-scheduling / inference stack) — read from SchedulingSnapshot.
+// ---------------------------------------------------------------------------
+
+fn gpu_pools_view(snap: SchedulingSnapshot) -> Element {
+    rsx! {
+        div { class: "view-head",
+            h2 { "GPU Pools & Queues" }
+            p { "Kueue admission — quota vs live usage, and the workload queue (preemption in play)." }
+        }
+        for p in snap.pools.iter() {
+            dl { class: "detail-grid",
+                dt { "Pool" }
+                dd { "{p.name}" }
+                dt { "GPU" }
+                dd { "{p.gpu_used} / {p.gpu_nominal} used" }
+                dt { "CPU" }
+                dd { "{p.cpu_used} / {p.cpu_nominal}" }
+                dt { "Queue" }
+                dd { "{p.admitted_workloads} admitted · {p.pending_workloads} pending" }
+            }
+        }
+        div { class: "scroll-tbl",
+            table { class: "tbl",
+                thead {
+                    tr {
+                        th { "Workload" }
+                        th { "NS" }
+                        th { "Queue" }
+                        th { "Priority" }
+                        th { "State" }
+                        th { "GPU" }
+                    }
+                }
+                tbody {
+                    for w in snap.workloads.iter().filter(|w| w.state != "Finished") {
+                        tr {
+                            td { "{w.name}" }
+                            td { "{w.namespace}" }
+                            td { "{w.queue}" }
+                            td { class: "phase",
+                                {if w.priority_class.is_empty() { "default" } else { w.priority_class.as_str() }}
+                            }
+                            td { "{w.state}" }
+                            td { "{w.gpus}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn node_power_view(snap: SchedulingSnapshot) -> Element {
+    rsx! {
+        div { class: "view-head",
+            h2 { "Node Power" }
+            p { "Hephaestus scale-from-zero — physical GPU nodes powered on/off." }
+        }
+        table { class: "tbl",
+            thead {
+                tr {
+                    th { "Node" }
+                    th { "Power" }
+                    th { "Phase" }
+                    th { "Pool" }
+                }
+            }
+            tbody {
+                for n in snap.nodes.iter() {
+                    tr {
+                        td { "{n.name}" }
+                        td { class: "phase", {if n.powered { "● ON" } else { "○ off" }} }
+                        td { "{n.phase}" }
+                        td { "{n.pool}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn inference_view(snap: SchedulingSnapshot) -> Element {
+    if snap.inference.is_empty() {
+        return rsx! {
+            div { class: "view-head", h2 { "Inference Backends" } }
+            p { class: "muted",
+                "No ephemeral inference backend active. Campaigns with inferenceMesh / inferenceCluster appear here while serving."
+            }
+        };
+    }
+    rsx! {
+        div { class: "view-head",
+            h2 { "Inference Backends" }
+            p { "Ephemeral per-campaign endpoints (mesh-llm / vLLM-on-Ray)." }
+        }
+        table { class: "tbl",
+            thead {
+                tr {
+                    th { "Campaign" }
+                    th { "Kind" }
+                    th { "Serving" }
+                    th { "Endpoint" }
+                }
+            }
+            tbody {
+                for b in snap.inference.iter() {
+                    tr {
+                        td { "{b.campaign}" }
+                        td { "{b.kind}" }
+                        td { class: "phase", {if b.serving { "● serving" } else { "… starting" }} }
+                        td { "{b.endpoint}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Data layer (frontend side): plain reqwest fetches to the axum backend.
 // ---------------------------------------------------------------------------
 
@@ -939,6 +1129,17 @@ async fn fetch_snapshot() -> Result<ClusterSnapshot, String> {
         .await
         .map_err(|e| e.to_string())?
         .json::<ClusterSnapshot>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/scheduling` → the [`SchedulingSnapshot`] for the admin page.
+async fn fetch_scheduling() -> Result<SchedulingSnapshot, String> {
+    let url = format!("{}/api/scheduling", api_base());
+    reqwest::get(&url)
+        .await
+        .map_err(|e| e.to_string())?
+        .json::<SchedulingSnapshot>()
         .await
         .map_err(|e| e.to_string())
 }
