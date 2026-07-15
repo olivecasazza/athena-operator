@@ -382,6 +382,16 @@ async fn reconcile_experiment_status(
     name: &str,
 ) -> Result<(), Error> {
     let current = experiment.status.clone().unwrap_or_default();
+    // Terminal experiments are immutable records: their Job may be GC'd or
+    // deleted after the fact (seen with the 2026-07-15 etcd-snapshot
+    // restore, where this check flipped restored succeeded/failed records
+    // to error/JobMissing). Nothing below can improve a terminal status.
+    if matches!(
+        current.phase,
+        ExperimentPhase::Succeeded | ExperimentPhase::Failed
+    ) {
+        return Ok(());
+    }
     let job_name = current
         .job_name
         .clone()
