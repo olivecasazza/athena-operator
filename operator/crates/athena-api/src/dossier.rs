@@ -1306,6 +1306,7 @@ mod tests {
                 population_size: None,
                 perturb_factor: None,
                 inference_mesh: None,
+                inference_cluster: None,
             },
             status: Some(ResearchCampaignStatus {
                 best_experiment: Some("exp-b".into()),

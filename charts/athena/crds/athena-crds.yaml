@@ -667,6 +667,87 @@
                     "minimum": 0.0,
                     "type": "integer"
                   },
+                  "inferenceCluster": {
+                    "description": "Optional ephemeral MULTI-NODE inference cluster (vLLM tensor/pipeline parallel over Ray) for models too big for one GPU. The operator creates a Kueue-admitted RayJob (mesh-high priority → reclaims GPUs from spot) plus a stable head Service; experiments get `LLM_BASE_URL` injected and generation is gated on it serving. Torn down at terminal phase. Mutually exclusive with inferenceMesh (single-node); if both set, inferenceCluster wins.",
+                    "nullable": true,
+                    "properties": {
+                      "dtype": {
+                        "default": "float16",
+                        "description": "vLLM dtype. Turing has no efficient bf16 → float16.",
+                        "type": "string"
+                      },
+                      "extraArgs": {
+                        "description": "Extra args appended to `vllm serve`.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "gpuProduct": {
+                        "default": "Quadro-RTX-4000",
+                        "description": "nodeSelector `nvidia.com/gpu.product` value (the GPU pool to land on).",
+                        "type": "string"
+                      },
+                      "image": {
+                        "description": "vLLM OpenAI image (must bundle ray == rayVersion). e.g. vllm/vllm-openai:v0.6.6.post1",
+                        "type": "string"
+                      },
+                      "maxModelLen": {
+                        "default": 4096,
+                        "description": "Max sequence length; bounded by per-GPU KV-cache headroom after weights.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "model": {
+                        "description": "HF model ref (safetensors), e.g. deepseek-ai/DeepSeek-Prover-V2-7B.",
+                        "type": "string"
+                      },
+                      "pipelineParallelSize": {
+                        "description": "Total GPUs to split the model across (= pipeline-parallel-size). 1 head + (n-1) workers.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "port": {
+                        "default": 8000,
+                        "description": "OpenAI API port vLLM serves on.",
+                        "format": "uint16",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "priorityClass": {
+                        "default": "mesh-high",
+                        "description": "Kueue WorkloadPriorityClass — `mesh-high` preempts default-priority spot.",
+                        "type": "string"
+                      },
+                      "queueName": {
+                        "default": "athena-gpu",
+                        "description": "Kueue LocalQueue name (maps to the GPU ClusterQueue).",
+                        "type": "string"
+                      },
+                      "rayVersion": {
+                        "default": "2.40.0",
+                        "description": "Ray version — MUST match the ray bundled in `image` or GCS registration fails.",
+                        "type": "string"
+                      },
+                      "runtimeClassName": {
+                        "default": "nvidia",
+                        "description": "runtimeClassName (nvidia on k3s GPU nodes).",
+                        "type": "string"
+                      },
+                      "tolerations": {
+                        "description": "Pod tolerations (raw JSON). Defaults to the nvidia GPU taint if empty.",
+                        "x-kubernetes-preserve-unknown-fields": true
+                      }
+                    },
+                    "required": [
+                      "image",
+                      "model",
+                      "pipelineParallelSize"
+                    ],
+                    "type": "object"
+                  },
                   "inferenceMesh": {
                     "description": "Optional ephemeral inference mesh (mesh-llm) brought up for the campaign's active lifetime and torn down when the campaign reaches terminal phase. While set, every experiment the campaign creates gets `LLM_BASE_URL` injected to point at the mesh Service, and experiment generation is gated on the mesh becoming Ready.",
                     "nullable": true,

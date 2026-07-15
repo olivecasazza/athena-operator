@@ -1,0 +1,33 @@
+# ResearchCampaign with an ephemeral MULTI-NODE vLLM inference cluster.
+#
+# For a model too big for one GPU: the operator creates a Kueue-admitted RayJob
+# (mesh-high priority → reclaims GPUs from checkpoint-safe spot) that serves the
+# model tensor/pipeline-parallel across `pipelineParallelSize` GPUs, plus a stable
+# head Service `vllm-<campaign>`. Experiments get LLM_BASE_URL injected; generation
+# holds until vLLM's /health passes; torn down at terminal phase.
+#
+# Verified live 2026-07-15: DeepSeek-Prover-V2-7B, PP=3 across hp01/02/03, served a
+# real Lean proof. Turing (RTX-4000) needs the defaults below (fp16, ray 2.40.0,
+# maxModelLen 4096 for the 8GB KV-cache). Requires the vLLM image + ray-2.40 match.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: prover-cluster-demo
+  namespace: apps
+spec:
+  templateRef: lean-prover
+  concurrency: 4
+  budget: { maxExperiments: 40, maxDuration: 8h }
+  strategy: { type: heuristic }
+  inferenceCluster:
+    image: vllm/vllm-openai:v0.6.6.post1
+    model: deepseek-ai/DeepSeek-Prover-V2-7B
+    pipelineParallelSize: 3      # 1 GPU head (driver) + 2 workers = 3 GPUs
+    # defaults shown for clarity (all optional):
+    port: 8000
+    rayVersion: "2.40.0"         # MUST match the ray bundled in `image`
+    maxModelLen: 4096            # 8GB RTX-4000 KV-cache ceiling
+    dtype: float16
+    gpuProduct: Quadro-RTX-4000
+    queueName: athena-gpu
+    priorityClass: mesh-high     # preempts default-priority spot

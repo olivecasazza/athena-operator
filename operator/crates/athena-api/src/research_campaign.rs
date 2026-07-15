@@ -57,6 +57,87 @@ pub struct ResearchCampaignSpec {
     /// on the mesh becoming Ready.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_mesh: Option<InferenceMeshSpec>,
+
+    /// Optional ephemeral MULTI-NODE inference cluster (vLLM tensor/pipeline
+    /// parallel over Ray) for models too big for one GPU. The operator creates a
+    /// Kueue-admitted RayJob (mesh-high priority → reclaims GPUs from spot) plus a
+    /// stable head Service; experiments get `LLM_BASE_URL` injected and generation
+    /// is gated on it serving. Torn down at terminal phase. Mutually exclusive with
+    /// inferenceMesh (single-node); if both set, inferenceCluster wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_cluster: Option<VllmClusterSpec>,
+}
+
+/// Ephemeral multi-node vLLM-on-Ray inference cluster. Serves one model split
+/// across `pipelineParallelSize` GPUs (head = driver + rank 0, plus N-1 workers)
+/// via a RayJob. Verified config: vLLM 0.6.6 / ray 2.40.0 on Quadro-RTX-4000
+/// (Turing) needs fp16 + XFORMERS + enforce-eager; head MUST carry a GPU (driver
+/// does CUDA device inference); max-model-len bounded by 8GB KV-cache headroom.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VllmClusterSpec {
+    /// vLLM OpenAI image (must bundle ray == rayVersion). e.g. vllm/vllm-openai:v0.6.6.post1
+    pub image: String,
+    /// HF model ref (safetensors), e.g. deepseek-ai/DeepSeek-Prover-V2-7B.
+    pub model: String,
+    /// Total GPUs to split the model across (= pipeline-parallel-size). 1 head + (n-1) workers.
+    pub pipeline_parallel_size: u32,
+    /// OpenAI API port vLLM serves on.
+    #[serde(default = "default_vllm_port")]
+    pub port: u16,
+    /// Ray version — MUST match the ray bundled in `image` or GCS registration fails.
+    #[serde(default = "default_ray_version")]
+    pub ray_version: String,
+    /// Max sequence length; bounded by per-GPU KV-cache headroom after weights.
+    #[serde(default = "default_max_model_len")]
+    pub max_model_len: u32,
+    /// vLLM dtype. Turing has no efficient bf16 → float16.
+    #[serde(default = "default_dtype")]
+    pub dtype: String,
+    /// nodeSelector `nvidia.com/gpu.product` value (the GPU pool to land on).
+    #[serde(default = "default_gpu_product")]
+    pub gpu_product: String,
+    /// Kueue LocalQueue name (maps to the GPU ClusterQueue).
+    #[serde(default = "default_cluster_queue_name")]
+    pub queue_name: String,
+    /// Kueue WorkloadPriorityClass — `mesh-high` preempts default-priority spot.
+    #[serde(default = "default_priority_class")]
+    pub priority_class: String,
+    /// Pod tolerations (raw JSON). Defaults to the nvidia GPU taint if empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(schema_with = "crate::common::json_value_schema")]
+    pub tolerations: Vec<serde_json::Value>,
+    /// runtimeClassName (nvidia on k3s GPU nodes).
+    #[serde(default = "default_nvidia_runtime_class")]
+    pub runtime_class_name: String,
+    /// Extra args appended to `vllm serve`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+fn default_vllm_port() -> u16 {
+    8000
+}
+fn default_ray_version() -> String {
+    "2.40.0".to_string()
+}
+fn default_max_model_len() -> u32 {
+    4096
+}
+fn default_dtype() -> String {
+    "float16".to_string()
+}
+fn default_gpu_product() -> String {
+    "Quadro-RTX-4000".to_string()
+}
+fn default_cluster_queue_name() -> String {
+    "athena-gpu".to_string()
+}
+fn default_priority_class() -> String {
+    "mesh-high".to_string()
+}
+fn default_nvidia_runtime_class() -> String {
+    "nvidia".to_string()
 }
 
 /// Ephemeral OpenAI-compatible inference endpoint (mesh-llm) the operator brings

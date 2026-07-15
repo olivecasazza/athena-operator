@@ -33,7 +33,7 @@ use athena_api::experiment::{
     CheckpointPolicy, Experiment, ExperimentDecision, ExperimentPhase, ExperimentSpec,
 };
 use athena_api::experiment_template::{ExperimentTemplate, ObjectiveGoal, ObjectiveSpec};
-use athena_api::research_campaign::{InferenceMeshSpec, ResearchCampaign};
+use athena_api::research_campaign::{InferenceMeshSpec, ResearchCampaign, VllmClusterSpec};
 use athena_api::runtime_profile::EnvVar;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
@@ -44,7 +44,11 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::ResourceExt;
-use kube::api::{Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams, PostParams};
+use kube::api::{
+    Api, ApiResource, DeleteParams, DynamicObject, ListParams, ObjectMeta, Patch, PatchParams,
+    PostParams,
+};
+use kube::core::GroupVersionKind;
 use kube::runtime::controller::Action;
 use serde_json::{Value, json};
 use tracing::{info, warn};
@@ -161,13 +165,25 @@ pub async fn reconcile(
     // endpoint until they finish. Keep the mesh up (ensure self-heals) through that
     // drain window; tear down only once nothing is left running.
     let all_done = at_budget && running == 0;
-    let mesh_ready = match &campaign.spec.inference_mesh {
-        Some(mesh) if !all_done => ensure_mesh(&ctx, &ns, &campaign, &name, mesh).await?,
-        Some(_) => {
-            teardown_mesh(&ctx, &ns, &name).await?;
+    // Two backends: multi-node vLLM cluster (RayJob) wins if set, else single-node
+    // mesh-llm (Deployment). Same lifecycle: ensure while active, tear down when
+    // all experiments are terminal.
+    let mesh_ready = if let Some(cluster) = &campaign.spec.inference_cluster {
+        if all_done {
+            teardown_vllm_cluster(&ctx, &ns, &name).await?;
             true
+        } else {
+            ensure_vllm_cluster(&ctx, &ns, &campaign, &name, cluster).await?
         }
-        None => true,
+    } else {
+        match &campaign.spec.inference_mesh {
+            Some(mesh) if !all_done => ensure_mesh(&ctx, &ns, &campaign, &name, mesh).await?,
+            Some(_) => {
+                teardown_mesh(&ctx, &ns, &name).await?;
+                true
+            }
+            None => true,
+        }
     };
 
     // 4. Generate next experiments within budget + concurrency.
@@ -547,13 +563,24 @@ fn build_experiment(
 /// its Service via `LLM_BASE_URL` (prove.py reads this env directly). Empty
 /// otherwise, so non-mesh campaigns are unchanged.
 fn mesh_env(campaign: &ResearchCampaign, campaign_name: &str, ns: &str) -> Vec<EnvVar> {
-    match &campaign.spec.inference_mesh {
-        Some(mesh) => vec![EnvVar {
-            name: "LLM_BASE_URL".to_string(),
-            value: Some(format!(
+    // Multi-node vLLM cluster wins over single-node mesh (mirrors ensure order).
+    let url = if let Some(cluster) = &campaign.spec.inference_cluster {
+        Some(format!(
+            "http://vllm-{campaign_name}.{ns}.svc.cluster.local:{}/v1",
+            cluster.port
+        ))
+    } else {
+        campaign.spec.inference_mesh.as_ref().map(|mesh| {
+            format!(
                 "http://mesh-llm-{campaign_name}.{ns}.svc.cluster.local:{}/v1",
                 mesh.port
-            )),
+            )
+        })
+    };
+    match url {
+        Some(u) => vec![EnvVar {
+            name: "LLM_BASE_URL".to_string(),
+            value: Some(u),
         }],
         None => Vec::new(),
     }
@@ -761,6 +788,251 @@ async fn teardown_mesh(ctx: &Arc<Context>, ns: &str, campaign_name: &str) -> Res
     if deployments.get_opt(&name).await?.is_some() {
         deployments.delete(&name, &DeleteParams::default()).await?;
         info!(campaign = %campaign_name, %name, "tore down inference mesh Deployment");
+    }
+    if services.get_opt(&name).await?.is_some() {
+        services.delete(&name, &DeleteParams::default()).await?;
+    }
+    Ok(())
+}
+
+/// Dynamic Api for the ray.io/v1 RayJob CRD (no k8s_openapi type).
+fn rayjob_api(ctx: &Arc<Context>, ns: &str) -> Api<DynamicObject> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk("ray.io", "v1", "RayJob"));
+    Api::namespaced_with(ctx.client.clone(), ns, &ar)
+}
+
+/// Ensure the campaign's ephemeral multi-node vLLM cluster (RayJob + stable head
+/// Service) exists, returning whether it is Ready (serving). Readiness = the head
+/// Service has ready endpoints; the head container's readinessProbe hits vLLM's
+/// /health, so an endpoint appears only once vLLM is actually serving (not merely
+/// when Ray started). Both objects owned by the campaign (GC backstop);
+/// terminal-phase teardown is the primary path.
+async fn ensure_vllm_cluster(
+    ctx: &Arc<Context>,
+    ns: &str,
+    campaign: &ResearchCampaign,
+    campaign_name: &str,
+    cluster: &VllmClusterSpec,
+) -> Result<bool, Error> {
+    let name = format!("vllm-{campaign_name}");
+    let owner = OwnerReference {
+        api_version: "research.nixlab.io/v1alpha1".to_string(),
+        kind: "ResearchCampaign".to_string(),
+        name: campaign_name.to_string(),
+        uid: campaign.uid().unwrap_or_default(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    };
+
+    // Stable head Service (selects the head pod by campaign label + ray head role).
+    let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+    if services.get_opt(&name).await?.is_none() {
+        let selector = BTreeMap::from([
+            (CAMPAIGN_LABEL.to_string(), campaign_name.to_string()),
+            ("ray.io/node-type".to_string(), "head".to_string()),
+        ]);
+        let svc = Service {
+            metadata: ObjectMeta {
+                name: Some(name.clone()),
+                namespace: Some(ns.to_string()),
+                owner_references: Some(vec![owner.clone()]),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                selector: Some(selector),
+                ports: Some(vec![ServicePort {
+                    name: Some("http".to_string()),
+                    port: cluster.port as i32,
+                    target_port: Some(IntOrString::Int(cluster.port as i32)),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        match services.create(&PostParams::default(), &svc).await {
+            Ok(_) => info!(campaign = %campaign_name, %name, "created vLLM head Service"),
+            Err(kube::Error::Api(e)) if e.code == 409 => {}
+            Err(e) => return Err(Error::Kube(e)),
+        }
+    }
+
+    // RayJob (dynamic).
+    let rayjobs = rayjob_api(ctx, ns);
+    match rayjobs.get_opt(&name).await? {
+        None => {
+            let rj = build_vllm_rayjob(&name, ns, campaign_name, cluster, owner);
+            match rayjobs.create(&PostParams::default(), &rj).await {
+                Ok(_) => info!(campaign = %campaign_name, %name, "created vLLM RayJob"),
+                Err(kube::Error::Api(e)) if e.code == 409 => {}
+                Err(e) => return Err(Error::Kube(e)),
+            }
+            return Ok(false);
+        }
+        Some(rj) => {
+            // Surface a Failed RayJob — it will NOT self-heal (get_opt sees it, so
+            // ensure never recreates), leaving the campaign hung at the readiness
+            // gate. Visible here; recreate-on-Failed is a future hardening.
+            let dep = rj
+                .data
+                .get("status")
+                .and_then(|s| s.get("jobDeploymentStatus"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if dep == "Failed" {
+                warn!(campaign = %campaign_name, %name,
+                    "vLLM RayJob is FAILED — campaign is gated with no experiments; \
+                     delete it to retry or inspect `kubectl logs`");
+            }
+        }
+    }
+
+    // Serving-readiness: poll vLLM's /health directly (the head has NO readinessProbe
+    // — that would deadlock KubeRay provisioning). /health 200s only once vLLM is up.
+    let health = format!(
+        "http://{name}.{ns}.svc.cluster.local:{}/health",
+        cluster.port
+    );
+    let ready = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c
+            .get(&health)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    Ok(ready)
+}
+
+/// Build the vLLM-on-Ray RayJob: GPU head (driver + rank 0) plus
+/// pipelineParallelSize-1 GPU workers, PP across all. Verified config on Turing:
+/// fp16 + enforce-eager + XFORMERS; head readinessProbe on vLLM /health.
+fn build_vllm_rayjob(
+    name: &str,
+    ns: &str,
+    campaign_name: &str,
+    cluster: &VllmClusterSpec,
+    owner: OwnerReference,
+) -> DynamicObject {
+    let workers = cluster.pipeline_parallel_size.saturating_sub(1);
+    let mut entrypoint = format!(
+        "vllm serve {} --pipeline-parallel-size {} --distributed-executor-backend ray \
+         --dtype {} --enforce-eager --gpu-memory-utilization 0.9 --max-model-len {} \
+         --host 0.0.0.0 --port {} --trust-remote-code",
+        cluster.model,
+        cluster.pipeline_parallel_size,
+        cluster.dtype,
+        cluster.max_model_len,
+        cluster.port
+    );
+    if !cluster.extra_args.is_empty() {
+        entrypoint.push(' ');
+        entrypoint.push_str(&cluster.extra_args.join(" "));
+    }
+
+    let tolerations = if cluster.tolerations.is_empty() {
+        json!([{ "key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule" }])
+    } else {
+        Value::Array(cluster.tolerations.clone())
+    };
+    let node_selector = json!({ "nvidia.com/gpu.product": cluster.gpu_product });
+    let env = json!([
+        { "name": "VLLM_ATTENTION_BACKEND", "value": "XFORMERS" },
+        { "name": "HF_HOME", "value": "/data/hf" },
+    ]);
+    let gpu_resources = json!({
+        "requests": { "cpu": "8", "memory": "24Gi", "nvidia.com/gpu": "1" },
+        "limits": { "memory": "40Gi", "nvidia.com/gpu": "1" },
+    });
+    let volumes = json!([{ "name": "hf", "emptyDir": { "sizeLimit": "40Gi" } }]);
+    let volume_mounts = json!([{ "name": "hf", "mountPath": "/data/hf" }]);
+
+    let body = json!({
+        "apiVersion": "ray.io/v1",
+        "kind": "RayJob",
+        "metadata": {
+            "name": name,
+            "namespace": ns,
+            "labels": {
+                "kueue.x-k8s.io/queue-name": cluster.queue_name,
+                "kueue.x-k8s.io/priority-class": cluster.priority_class,
+            },
+            "ownerReferences": [owner],
+        },
+        "spec": {
+            "shutdownAfterJobFinishes": true,
+            "entrypoint": entrypoint,
+            "rayClusterSpec": {
+                "rayVersion": cluster.ray_version,
+                "headGroupSpec": {
+                    "rayStartParams": { "dashboard-host": "0.0.0.0" },
+                    "template": {
+                        "metadata": { "labels": { CAMPAIGN_LABEL: campaign_name } },
+                        "spec": {
+                            "runtimeClassName": cluster.runtime_class_name,
+                            "nodeSelector": node_selector,
+                            "tolerations": tolerations,
+                            // NO readinessProbe on the head: HeadPodReady gates
+                            // KubeRay provisioning, which gates entrypoint submission,
+                            // which starts vLLM — a /health probe here deadlocks
+                            // (head never Ready → never provisioned → vLLM never runs).
+                            // Serving-readiness is polled by the reconciler over HTTP.
+                            "containers": [{
+                                "name": "ray-head",
+                                "image": cluster.image,
+                                "env": env,
+                                "resources": gpu_resources,
+                                "volumeMounts": volume_mounts,
+                            }],
+                            "volumes": volumes,
+                        },
+                    },
+                },
+                "workerGroupSpecs": [{
+                    "groupName": "gpu",
+                    "replicas": workers,
+                    "minReplicas": workers,
+                    "maxReplicas": workers,
+                    "numOfHosts": 1,
+                    "rayStartParams": {},
+                    "template": {
+                        "spec": {
+                            "runtimeClassName": cluster.runtime_class_name,
+                            "nodeSelector": node_selector,
+                            "tolerations": tolerations,
+                            "containers": [{
+                                "name": "ray-worker",
+                                "image": cluster.image,
+                                "env": env,
+                                "resources": gpu_resources,
+                                "volumeMounts": volume_mounts,
+                            }],
+                            "volumes": volumes,
+                        },
+                    },
+                }],
+            },
+        },
+    });
+    serde_json::from_value(body).expect("vLLM RayJob JSON is a valid DynamicObject")
+}
+
+/// Delete the campaign's vLLM RayJob + head Service at terminal phase. Idempotent.
+async fn teardown_vllm_cluster(
+    ctx: &Arc<Context>,
+    ns: &str,
+    campaign_name: &str,
+) -> Result<(), Error> {
+    let name = format!("vllm-{campaign_name}");
+    let rayjobs = rayjob_api(ctx, ns);
+    let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+    if rayjobs.get_opt(&name).await?.is_some() {
+        rayjobs.delete(&name, &DeleteParams::default()).await?;
+        info!(campaign = %campaign_name, %name, "tore down vLLM RayJob");
     }
     if services.get_opt(&name).await?.is_some() {
         services.delete(&name, &DeleteParams::default()).await?;
@@ -1033,6 +1305,7 @@ mod tests {
                 population_size: population,
                 perturb_factor: perturb,
                 inference_mesh: None,
+                inference_cluster: None,
             },
             status: None,
         }
@@ -1136,6 +1409,7 @@ mod tests {
                 population_size: None,
                 perturb_factor: None,
                 inference_mesh: None,
+                inference_cluster: None,
             },
             status: None,
         };
