@@ -47,6 +47,73 @@ pub struct RuntimeProfileSpec {
     /// Secrets mounted as files (e.g. a GCS service-account key).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_mounts: Vec<SecretMount>,
+    /// Optional SkyPilot cloud-burst layer. Absent = on-prem Kubernetes Job
+    /// (today's behavior). Present + enabled = the operator builds a small
+    /// launcher Job that renders a sky task from the experiment (same image /
+    /// command / env the k8s path would use) and runs `sky launch` — the chain
+    /// is sky -> kueue -> ray -> experiment: the LAUNCHER Job (not the cloud
+    /// node) is what Kueue admits, so cloud bursts still flow through quota
+    /// accounting. Quota then represents "concurrent experiments", not local
+    /// GPUs — intended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sky: Option<SkySpec>,
+}
+
+/// SkyPilot cloud-burst settings for a RuntimeProfile.
+///
+/// TTLs are belt-and-braces: `idleMinutesToAutostop` handles idleness,
+/// `ttlMinutes` is a HARD teardown enforced by the launcher (`timeout` around
+/// `sky launch --down` followed by an unconditional `sky down`) — a burst
+/// never leaves a zombie cloud node.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkySpec {
+    /// Burst this profile's experiments to the cloud (default true when the
+    /// block is present; the block being absent is the on-prem switch).
+    #[serde(default = "default_sky_enabled")]
+    pub enabled: bool,
+    /// SkyPilot accelerator string, e.g. `A10:8`. Unset = CPU-only task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accelerators: Option<String>,
+    /// Optional cloud pin (e.g. `gcp`). Unset = SkyPilot's ordered/cheapest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<String>,
+    /// Use spot/preemptible instances.
+    #[serde(default = "default_sky_use_spot")]
+    pub use_spot: bool,
+    /// Hard autostop/teardown in minutes — the launcher tears the cluster down
+    /// unconditionally once this elapses, even if the task hangs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_minutes: Option<u32>,
+    /// `sky launch --idle-minutes-to-autostop` window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_minutes_to_autostop: Option<u32>,
+    /// Secret (in the Job's namespace) whose keys are injected as env vars into
+    /// the launcher container for sky CLI cloud credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_secret_ref: Option<String>,
+}
+
+impl Default for SkySpec {
+    fn default() -> Self {
+        Self {
+            enabled: default_sky_enabled(),
+            accelerators: None,
+            cloud: None,
+            use_spot: default_sky_use_spot(),
+            ttl_minutes: None,
+            idle_minutes_to_autostop: None,
+            env_secret_ref: None,
+        }
+    }
+}
+
+fn default_sky_enabled() -> bool {
+    true
+}
+
+fn default_sky_use_spot() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]

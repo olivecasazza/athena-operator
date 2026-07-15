@@ -1,6 +1,7 @@
 pub mod benchmark_run;
 pub mod benchmark_suite;
 pub mod common;
+pub mod defaults;
 pub mod dossier;
 pub mod experiment;
 pub mod experiment_template;

@@ -11,12 +11,13 @@ use athena_api::experiment::{
 };
 use athena_api::experiment_template::{ExperimentTemplate, ObjectiveGoal};
 use athena_api::research_campaign::ResearchCampaign;
-use athena_api::runtime_profile::{ExecutionMode, RuntimeProfile};
+use athena_api::runtime_profile::{ExecutionMode, RuntimeProfile, SkySpec};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, LocalObjectReference, PersistentVolumeClaim,
+    Container, ContainerPort, EnvFromSource, EnvVar, LocalObjectReference, PersistentVolumeClaim,
     PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, Pod, PodSpec, PodTemplateSpec,
-    ResourceRequirements, SecretVolumeSource, Volume, VolumeMount, VolumeResourceRequirements,
+    ResourceRequirements, SecretEnvSource, SecretVolumeSource, Volume, VolumeMount,
+    VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -42,6 +43,10 @@ pub enum Error {
     },
     #[error("runtime profile {0} is not batchJob mode")]
     UnsupportedRuntimeMode(String),
+    #[error(
+        "runtime profile {0} is sky-enabled but has no command/args; a sky task needs an explicit run command (the container image's entrypoint is not visible to the launcher)"
+    )]
+    SkyCommandRequired(String),
 }
 
 #[tracing::instrument(skip(experiment, ctx), fields(
@@ -162,7 +167,7 @@ async fn ensure_experiment_job(
         })?;
 
     let profiles: Api<RuntimeProfile> = Api::namespaced(ctx.client.clone(), ns);
-    let profile = profiles
+    let applied_profile = profiles
         .get_opt(&template.spec.runtime_profile_ref)
         .await?
         .ok_or_else(|| Error::MissingRef {
@@ -170,6 +175,9 @@ async fn ensure_experiment_job(
             namespace: ns.to_string(),
             name: template.spec.runtime_profile_ref.clone(),
         })?;
+    // Operator-embedded defaults deep-merged UNDER the applied manifest; user
+    // fields win at any depth. Everything below sees the effective profile.
+    let profile = effective_profile(&applied_profile);
 
     if profile.spec.runtime.mode != ExecutionMode::BatchJob {
         return Err(Error::UnsupportedRuntimeMode(
@@ -177,11 +185,28 @@ async fn ensure_experiment_job(
         ));
     }
 
+    let sky_burst = profile.spec.sky.as_ref().is_some_and(|sky| sky.enabled);
     let job_name = format!("exp-{}", name);
     let workspace_path = format!("/workspace/runs/{}/{}", experiment.spec.campaign_ref, name);
     let metrics_path = resolve_metrics_path(&workspace_path, &template.spec.metrics.parser.path);
     let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
-    let workspace_claim = ensure_workspace_claim(ctx.clone(), ns, &profile).await?;
+    // A cloud burst runs on the SkyPilot cluster's own disk — no on-prem
+    // workspace PVC is created for it.
+    let workspace_claim = if sky_burst {
+        WorkspaceClaimStatus {
+            message: format!(
+                "sky launcher Job {job_name} bursts this experiment to the cloud via SkyPilot"
+            ),
+            condition: condition(
+                "WorkspaceClaimReady",
+                "Unknown",
+                "SkyBurst",
+                "cloud burst runs on the SkyPilot cluster's local disk; no workspace PVC is created",
+            ),
+        }
+    } else {
+        ensure_workspace_claim(ctx.clone(), ns, &profile).await?
+    };
     if jobs.get_opt(&job_name).await?.is_some() {
         // Job already exists: reconcile_experiment_status owns the phase from
         // here. Re-stamping the initial Running status on every pass would
@@ -189,9 +214,8 @@ async fn ensure_experiment_job(
         // (each patch re-triggering the watch → a permanent flap).
         return Ok(());
     }
-    jobs.create(
-        &PostParams::default(),
-        &build_job(
+    let job = if sky_burst {
+        build_sky_launcher_job(
             experiment,
             &profile,
             &job_name,
@@ -199,9 +223,19 @@ async fn ensure_experiment_job(
             &metrics_path,
             ns,
             name,
-        ),
-    )
-    .await?;
+        )?
+    } else {
+        build_job(
+            experiment,
+            &profile,
+            &job_name,
+            &workspace_path,
+            &metrics_path,
+            ns,
+            name,
+        )
+    };
+    jobs.create(&PostParams::default(), &job).await?;
 
     let status = ExperimentStatus {
         phase: ExperimentPhase::Running,
@@ -892,15 +926,40 @@ async fn patch_experiment_status(
     Ok(())
 }
 
-fn build_job(
+/// Apply the operator-embedded defaults layer to an applied RuntimeProfile:
+/// serialize the manifest's spec to a JSON tree, deep-merge the defaults under
+/// it (user fields win at any depth), and deserialize back. Falls back to the
+/// manifest as-is if the merged tree fails to deserialize (should not happen —
+/// the merge only adds well-typed fields).
+fn effective_profile(profile: &RuntimeProfile) -> RuntimeProfile {
+    let raw = match serde_json::to_value(&profile.spec) {
+        Ok(raw) => raw,
+        Err(err) => {
+            warn!(profile = %profile.name_any(), %err, "failed to serialize RuntimeProfile spec for defaulting; using manifest as-is");
+            return profile.clone();
+        }
+    };
+    let merged = athena_api::defaults::apply_runtime_profile_defaults(raw);
+    match serde_json::from_value(merged) {
+        Ok(spec) => RuntimeProfile {
+            metadata: profile.metadata.clone(),
+            spec,
+            status: profile.status.clone(),
+        },
+        Err(err) => {
+            warn!(profile = %profile.name_any(), %err, "failed to deserialize defaulted RuntimeProfile spec; using manifest as-is");
+            profile.clone()
+        }
+    }
+}
+
+/// Common labels for both the direct experiment Job and the sky launcher Job,
+/// including the Kueue queue label when the profile opts in.
+fn experiment_labels(
     experiment: &Experiment,
     profile: &RuntimeProfile,
-    job_name: &str,
-    workspace_path: &str,
-    metrics_path: &str,
-    namespace: &str,
     experiment_name: &str,
-) -> Job {
+) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::from([
         (
             "app.kubernetes.io/name".to_string(),
@@ -925,6 +984,21 @@ fn build_job(
     if let Some(queue) = &profile.spec.scheduling.queue_name {
         labels.insert("kueue.x-k8s.io/queue-name".to_string(), queue.clone());
     }
+    labels
+}
+
+/// The experiment's environment contract, identical for the on-prem Job path
+/// and the sky task a launcher renders: operator-managed vars first, then
+/// checkpointing controls, then the RuntimeProfile's additive env, then
+/// experiment-level overrides. Operator vars stay authoritative.
+fn experiment_env(
+    experiment: &Experiment,
+    profile: &RuntimeProfile,
+    workspace_path: &str,
+    metrics_path: &str,
+    namespace: &str,
+    experiment_name: &str,
+) -> Vec<EnvVar> {
     let spec_json = serde_json::to_string(&experiment.spec).unwrap_or_else(|_| "{}".to_string());
     let metrics_endpoint = &profile.spec.metrics_endpoint;
     let checkpoint_dir = format!("{workspace_path}/checkpoints");
@@ -1036,6 +1110,29 @@ fn build_job(
             });
         }
     }
+
+    container_env
+}
+
+fn build_job(
+    experiment: &Experiment,
+    profile: &RuntimeProfile,
+    job_name: &str,
+    workspace_path: &str,
+    metrics_path: &str,
+    namespace: &str,
+    experiment_name: &str,
+) -> Job {
+    let labels = experiment_labels(experiment, profile, experiment_name);
+    let metrics_endpoint = &profile.spec.metrics_endpoint;
+    let container_env = experiment_env(
+        experiment,
+        profile,
+        workspace_path,
+        metrics_path,
+        namespace,
+        experiment_name,
+    );
 
     // Workspace PVC mount plus any RuntimeProfile secret mounts. Volume names are
     // index-based so two mounts (or the same secret mounted twice) never collide.
@@ -1171,6 +1268,242 @@ fn build_job(
     }
 }
 
+/// Default image for the SkyPilot launcher container (built from
+/// Dockerfile.sky: python + skypilot[gcp] + gcloud). Overridable per-operator
+/// via the ATHENA_SKY_LAUNCHER_IMAGE env var.
+const DEFAULT_SKY_LAUNCHER_IMAGE: &str = "ghcr.io/olivecasazza/athena-sky-launcher:latest";
+
+fn sky_launcher_image() -> String {
+    std::env::var("ATHENA_SKY_LAUNCHER_IMAGE")
+        .unwrap_or_else(|_| DEFAULT_SKY_LAUNCHER_IMAGE.to_string())
+}
+
+/// Launcher entrypoint: write the operator-rendered task file, `sky launch`
+/// under a hard `timeout` (the TTL), then tear the cluster down
+/// unconditionally. `sky launch` streams the task's logs in the foreground, so
+/// the cloud run's output lands in this Job's log. `--down` autostops after
+/// the task; `sky down` after the (possibly timed-out) launch is the zombie
+/// guard — a burst never outlives its TTL.
+const SKY_LAUNCHER_SCRIPT: &str = r#"set -u
+printf '%s\n' "$SKY_TASK" > /tmp/task.yaml
+echo '--- sky task ---'
+cat /tmp/task.yaml
+echo '-----------------'
+timeout "${SKY_TTL_SECONDS}s" sky launch --yes --down \
+  --idle-minutes-to-autostop "$SKY_IDLE_MINUTES" \
+  --cluster "$SKY_CLUSTER_NAME" /tmp/task.yaml
+status=$?
+sky down --yes "$SKY_CLUSTER_NAME" || true
+exit "$status"
+"#;
+
+/// Sky cluster names must be DNS-ish; experiment names already are, but keep a
+/// defensive sanitize (lowercase, [a-z0-9-]) so a weird name can't break `sky
+/// down` and leak a cluster.
+fn sky_cluster_name(experiment_name: &str) -> String {
+    let sanitized: String = experiment_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("athena-{}", sanitized.trim_matches('-'))
+}
+
+/// POSIX single-quote shell quoting for the sky task's `run` line.
+fn shell_quote(part: &str) -> String {
+    if !part.is_empty()
+        && part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c))
+    {
+        part.to_string()
+    } else {
+        format!("'{}'", part.replace('\'', "'\\''"))
+    }
+}
+
+fn shell_join<'a>(parts: impl Iterator<Item = &'a String>) -> String {
+    parts
+        .map(|part| shell_quote(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Render the SkyPilot task for an experiment: the same container image,
+/// command, and env contract the on-prem Job path would use, expressed as a
+/// sky task file. Emitted as pretty JSON — JSON is a YAML subset, so sky's
+/// yaml.safe_load reads it directly and we avoid a yaml dependency.
+fn render_sky_task(
+    profile: &RuntimeProfile,
+    sky: &SkySpec,
+    task_name: &str,
+    env: &[EnvVar],
+) -> Result<String, Error> {
+    if profile.spec.command.is_empty() && profile.spec.args.is_empty() {
+        return Err(Error::SkyCommandRequired(profile.name_any()));
+    }
+    let run = shell_join(profile.spec.command.iter().chain(profile.spec.args.iter()));
+
+    let mut resources = serde_json::Map::new();
+    // Run the task inside the profile's container image so the cloud node
+    // executes exactly what an on-prem pod would.
+    resources.insert(
+        "image_id".to_string(),
+        json!(format!("docker:{}", profile.spec.image)),
+    );
+    resources.insert("use_spot".to_string(), json!(sky.use_spot));
+    if let Some(accelerators) = &sky.accelerators {
+        resources.insert("accelerators".to_string(), json!(accelerators));
+    }
+    // No pin => SkyPilot's ordered/cheapest cloud selection.
+    if let Some(cloud) = &sky.cloud {
+        resources.insert("cloud".to_string(), json!(cloud));
+    }
+
+    let envs: serde_json::Map<String, Value> = env
+        .iter()
+        .map(|var| {
+            (
+                var.name.clone(),
+                json!(var.value.clone().unwrap_or_default()),
+            )
+        })
+        .collect();
+
+    let task = json!({
+        "name": task_name,
+        "resources": Value::Object(resources),
+        "envs": Value::Object(envs),
+        "run": run,
+    });
+    // Serializing a serde_json::Value cannot fail (string keys, no NaN); the
+    // fallback keeps the operator panic-free regardless.
+    Ok(serde_json::to_string_pretty(&task).unwrap_or_else(|_| task.to_string()))
+}
+
+/// Build the LAUNCHER Job for a sky-enabled profile. The launcher — not the
+/// cloud node — is what Kueue admits: it carries the profile's queue label and
+/// starts suspended, so cloud bursts flow through the same quota accounting as
+/// on-prem runs (quota then means "concurrent experiments", not local GPUs —
+/// intended). The launcher itself is tiny and fixed-size; the profile's
+/// resources describe the workload, which runs on the SkyPilot cluster.
+fn build_sky_launcher_job(
+    experiment: &Experiment,
+    profile: &RuntimeProfile,
+    job_name: &str,
+    workspace_path: &str,
+    metrics_path: &str,
+    namespace: &str,
+    experiment_name: &str,
+) -> Result<Job, Error> {
+    let sky = profile.spec.sky.clone().unwrap_or_default();
+    let mut labels = experiment_labels(experiment, profile, experiment_name);
+    labels.insert(
+        "athena.nixlab.io/sky-launcher".to_string(),
+        "true".to_string(),
+    );
+
+    let cluster_name = sky_cluster_name(experiment_name);
+    let task_env = experiment_env(
+        experiment,
+        profile,
+        workspace_path,
+        metrics_path,
+        namespace,
+        experiment_name,
+    );
+    let task = render_sky_task(profile, &sky, &cluster_name, &task_env)?;
+
+    let ttl_minutes = sky.ttl_minutes.unwrap_or(480) as i64;
+    let idle_minutes = sky.idle_minutes_to_autostop.unwrap_or(30);
+    let launcher_env = vec![
+        EnvVar {
+            name: "SKY_TASK".to_string(),
+            value: Some(task),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "SKY_CLUSTER_NAME".to_string(),
+            value: Some(cluster_name),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "SKY_TTL_SECONDS".to_string(),
+            value: Some((ttl_minutes * 60).to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "SKY_IDLE_MINUTES".to_string(),
+            value: Some(idle_minutes.to_string()),
+            ..Default::default()
+        },
+    ];
+
+    // Cloud credentials for the sky CLI, injected as env vars.
+    let env_from = sky.env_secret_ref.as_ref().map(|secret| {
+        vec![EnvFromSource {
+            secret_ref: Some(SecretEnvSource {
+                name: secret.clone(),
+                optional: Some(false),
+            }),
+            ..Default::default()
+        }]
+    });
+
+    let launcher_resources = ResourceRequirements {
+        requests: Some(BTreeMap::from([
+            ("cpu".to_string(), Quantity("250m".to_string())),
+            ("memory".to_string(), Quantity("512Mi".to_string())),
+        ])),
+        ..Default::default()
+    };
+
+    Ok(Job {
+        metadata: ObjectMeta {
+            name: Some(job_name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels.clone()),
+            owner_references: kube::Resource::controller_owner_ref(experiment, &())
+                .map(|r| vec![r]),
+            ..Default::default()
+        },
+        spec: Some(JobSpec {
+            // No retries: a blind relaunch would spin up a second cloud
+            // cluster / re-bill the task. Failures surface loudly instead.
+            backoff_limit: Some(0),
+            // Belt-and-braces around the in-script timeout + sky down: the TTL
+            // plus margin for provisioning and teardown.
+            active_deadline_seconds: Some(ttl_minutes * 60 + 900),
+            suspend: profile.spec.scheduling.queue_name.as_ref().map(|_| true),
+            template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(labels),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    restart_policy: Some("Never".to_string()),
+                    containers: vec![Container {
+                        name: "sky-launcher".to_string(),
+                        image: Some(sky_launcher_image()),
+                        command: Some(vec![
+                            "bash".to_string(),
+                            "-c".to_string(),
+                            SKY_LAUNCHER_SCRIPT.to_string(),
+                        ]),
+                        env: Some(launcher_env),
+                        env_from,
+                        resources: Some(launcher_resources),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
 fn resource_requirements(
     resources: &athena_api::runtime_profile::ResourceProfile,
 ) -> ResourceRequirements {
@@ -1220,6 +1553,137 @@ pub fn error_policy(experiment: Arc<Experiment>, err: &Error, _ctx: Arc<Context>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use athena_api::experiment::ExperimentSpec;
+    use athena_api::runtime_profile::RuntimeProfileSpec;
+
+    fn test_experiment(name: &str) -> Experiment {
+        let mut experiment = Experiment::new(
+            name,
+            ExperimentSpec {
+                campaign_ref: "camp".to_string(),
+                hypothesis: "sky bursts work".to_string(),
+                parameters: BTreeMap::new(),
+                patch: None,
+                checkpoint_policy: None,
+                env: Vec::new(),
+            },
+        );
+        experiment.metadata.namespace = Some("athena".to_string());
+        experiment
+    }
+
+    fn sky_profile() -> RuntimeProfile {
+        let spec: RuntimeProfileSpec = serde_json::from_value(
+            athena_api::defaults::apply_runtime_profile_defaults(json!({
+                "runtime": { "type": "skypilot", "mode": "batchJob" },
+                "image": "ghcr.io/example/trainer:v1",
+                "command": ["python", "train.py"],
+                "args": ["--lr", "3e-4"],
+                "scheduling": { "queueName": "athena-local" },
+                "sky": { "accelerators": "A10:1" },
+            })),
+        )
+        .expect("profile spec deserializes");
+        RuntimeProfile::new("sky-a10", spec)
+    }
+
+    // The launcher Job — not the cloud node — is what Kueue admits: it must
+    // carry the profile's queue label and start suspended, and its hard TTL
+    // must bound the Job via activeDeadlineSeconds.
+    #[test]
+    fn sky_launcher_flows_through_kueue_with_hard_ttl() {
+        let experiment = test_experiment("burst-1");
+        let profile = sky_profile();
+        let job = build_sky_launcher_job(
+            &experiment,
+            &profile,
+            "exp-burst-1",
+            "/workspace/runs/camp/burst-1",
+            "/workspace/runs/camp/burst-1/metrics.json",
+            "athena",
+            "burst-1",
+        )
+        .expect("launcher job builds");
+
+        let labels = job.metadata.labels.as_ref().expect("labels");
+        assert_eq!(
+            labels.get("kueue.x-k8s.io/queue-name"),
+            Some(&"athena-local".to_string())
+        );
+        assert_eq!(
+            labels.get("athena.nixlab.io/sky-launcher"),
+            Some(&"true".to_string())
+        );
+
+        let spec = job.spec.as_ref().expect("job spec");
+        assert_eq!(spec.suspend, Some(true));
+        // Defaulted ttlMinutes=480 → hard deadline of TTL + 15min margin.
+        assert_eq!(spec.active_deadline_seconds, Some(480 * 60 + 900));
+        // No blind relaunch of cloud clusters.
+        assert_eq!(spec.backoff_limit, Some(0));
+
+        // The rendered task carries the profile's image, command, spot flag,
+        // and the experiment env contract.
+        let container = &spec.template.spec.as_ref().unwrap().containers[0];
+        let task_env = container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == "SKY_TASK")
+            .expect("SKY_TASK env");
+        let task: Value = serde_json::from_str(task_env.value.as_deref().unwrap())
+            .expect("task is valid JSON (a YAML subset sky can read)");
+        assert_eq!(
+            task["resources"]["image_id"],
+            json!("docker:ghcr.io/example/trainer:v1")
+        );
+        assert_eq!(task["resources"]["accelerators"], json!("A10:1"));
+        assert_eq!(task["resources"]["use_spot"], json!(true));
+        assert!(task["resources"].get("cloud").is_none(), "no cloud pin");
+        assert_eq!(task["run"], json!("python train.py --lr 3e-4"));
+        assert_eq!(task["envs"]["ATHENA_EXPERIMENT"], json!("burst-1"));
+        assert_eq!(
+            task["envs"]["ATHENA_WORKSPACE_PATH"],
+            json!("/workspace/runs/camp/burst-1")
+        );
+    }
+
+    // A sky profile without an explicit command cannot render a task (`run` is
+    // mandatory; the image entrypoint is invisible to the launcher).
+    #[test]
+    fn sky_without_command_is_rejected() {
+        let mut profile = sky_profile();
+        profile.spec.command = Vec::new();
+        profile.spec.args = Vec::new();
+        let experiment = test_experiment("burst-2");
+        let err = build_sky_launcher_job(
+            &experiment,
+            &profile,
+            "exp-burst-2",
+            "/workspace/runs/camp/burst-2",
+            "/workspace/runs/camp/burst-2/metrics.json",
+            "athena",
+            "burst-2",
+        )
+        .expect_err("no command must fail");
+        assert!(matches!(err, Error::SkyCommandRequired(_)));
+    }
+
+    // Shell quoting for the run line: safe tokens pass through, everything
+    // else is single-quoted with embedded quotes escaped.
+    #[test]
+    fn run_line_is_shell_quoted() {
+        let parts = vec![
+            "python".to_string(),
+            "-c".to_string(),
+            "print('hi world')".to_string(),
+        ];
+        assert_eq!(
+            shell_join(parts.iter()),
+            r#"python -c 'print('\''hi world'\'')'"#
+        );
+    }
 
     // A generic (non-ML) workload's metrics must survive ingestion: the operator
     // is domain-agnostic, so an arbitrary scalar like `tour_length` has to land in
