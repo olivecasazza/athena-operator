@@ -163,13 +163,44 @@ let
       apiGroups = [ "" ];
       # configmaps: the report reconciler publishes each assembled dossier into an
       # owner-referenced ConfigMap (<report>-dataset).
+      # services: campaign inference backends (inferenceMesh / inferenceCluster)
+      # create an ephemeral endpoint Service the operator owns.
       resources = [
         "pods"
         "pods/log"
         "persistentvolumeclaims"
         "events"
         "configmaps"
+        "services"
       ];
+      verbs = [
+        "get"
+        "list"
+        "watch"
+        "create"
+        "update"
+        "patch"
+        "delete"
+      ];
+    }
+    {
+      # deployments: the single-node inferenceMesh companion (mesh-llm).
+      apiGroups = [ "apps" ];
+      resources = [ "deployments" ];
+      verbs = [
+        "get"
+        "list"
+        "watch"
+        "create"
+        "update"
+        "patch"
+        "delete"
+      ];
+    }
+    {
+      # rayjobs: the multi-node inferenceCluster (vLLM-on-Ray) companion.
+      apiGroups = [ "ray.io" ];
+      resources = [ "rayjobs" ];
       verbs = [
         "get"
         "list"
