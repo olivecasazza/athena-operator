@@ -77,7 +77,11 @@ pub struct InferenceMeshSpec {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub node_selector: BTreeMap<String, String>,
     /// Pod tolerations (raw JSON, mirrors SchedulingProfile.tolerations).
+    /// json_value_schema is REQUIRED: schemars emits `items: {}` for
+    /// serde_json::Value and the apiserver rejects untyped array items
+    /// (caught live: helm CRD replace failed on this exact field).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(schema_with = "crate::common::json_value_schema")]
     pub tolerations: Vec<serde_json::Value>,
     /// GPU resource requests/limits, e.g. {"amd.com/gpu": "1"} or
     /// {"nvidia.com/gpu": "2"}. Empty = CPU-only.
