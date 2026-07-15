@@ -33,6 +33,12 @@ async fn main() -> anyhow::Result<()> {
             crd::export_crds();
             return Ok(());
         }
+        if arg == "scheduling-dump" {
+            let client = kube::Client::try_default().await?;
+            let snap = athena_api::scheduling::read_scheduling(&client).await;
+            println!("{}", serde_json::to_string_pretty(&snap)?);
+            return Ok(());
+        }
         if arg == "dossier" {
             let args: Vec<String> = std::env::args().collect();
             let mut campaign: Option<String> = None;
