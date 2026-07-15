@@ -5,7 +5,7 @@
 # is NOT yet — there's no AMD GPU on the build host. Smoke on traitor before using
 # as a campaign default: `docker run --device /dev/kfd --device /dev/dri ... serve
 # --model 0.5b --listen-all --headless` then curl :9337/v1/models.
-FROM rocm/dev-ubuntu-24.04:6.2-complete
+FROM rocm/dev-ubuntu-24.04:7.0-complete
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates libgomp1 && rm -rf /var/lib/apt/lists/*
