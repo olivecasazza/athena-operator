@@ -713,9 +713,8 @@
                         "type": "string"
                       },
                       "tolerations": {
-                        "description": "Pod tolerations (raw JSON, mirrors SchedulingProfile.tolerations).",
-                        "items": {},
-                        "type": "array"
+                        "description": "Pod tolerations (raw JSON, mirrors SchedulingProfile.tolerations). json_value_schema is REQUIRED: schemars emits `items: {}` for serde_json::Value and the apiserver rejects untyped array items (caught live: helm CRD replace failed on this exact field).",
+                        "x-kubernetes-preserve-unknown-fields": true
                       }
                     },
                     "required": [
