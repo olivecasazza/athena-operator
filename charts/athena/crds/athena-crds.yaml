@@ -265,6 +265,52 @@
                     },
                     "type": "array"
                   },
+                  "sky": {
+                    "description": "Optional SkyPilot cloud-burst layer. Absent = on-prem Kubernetes Job (today's behavior). Present + enabled = the operator builds a small launcher Job that renders a sky task from the experiment (same image / command / env the k8s path would use) and runs `sky launch` — the chain is sky -> kueue -> ray -> experiment: the LAUNCHER Job (not the cloud node) is what Kueue admits, so cloud bursts still flow through quota accounting. Quota then represents \"concurrent experiments\", not local GPUs — intended.",
+                    "nullable": true,
+                    "properties": {
+                      "accelerators": {
+                        "description": "SkyPilot accelerator string, e.g. `A10:8`. Unset = CPU-only task.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "cloud": {
+                        "description": "Optional cloud pin (e.g. `gcp`). Unset = SkyPilot's ordered/cheapest.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "enabled": {
+                        "default": true,
+                        "description": "Burst this profile's experiments to the cloud (default true when the block is present; the block being absent is the on-prem switch).",
+                        "type": "boolean"
+                      },
+                      "envSecretRef": {
+                        "description": "Secret (in the Job's namespace) whose keys are injected as env vars into the launcher container for sky CLI cloud credentials.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "idleMinutesToAutostop": {
+                        "description": "`sky launch --idle-minutes-to-autostop` window.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "ttlMinutes": {
+                        "description": "Hard autostop/teardown in minutes — the launcher tears the cluster down unconditionally once this elapses, even if the task hangs.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "useSpot": {
+                        "default": true,
+                        "description": "Use spot/preemptible instances.",
+                        "type": "boolean"
+                      }
+                    },
+                    "type": "object"
+                  },
                   "storage": {
                     "default": {
                       "createWorkspaceClaim": true,

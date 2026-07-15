@@ -1,0 +1,61 @@
+# Cloud-burst RuntimeProfiles via SkyPilot.
+#
+# athena abstracts the chain sky -> kueue -> ray -> experiment: adding a `sky`
+# block to a RuntimeProfile is the only change needed to burst its experiments
+# to the cloud. The operator swaps the direct workload Job for a small LAUNCHER
+# Job (Dockerfile.sky image) that renders a sky task from the experiment — the
+# SAME container image, command, and env contract the on-prem path would use —
+# and runs `sky launch --yes --down --idle-minutes-to-autostop <n>` under a
+# hard TTL. Sky's log stream lands in the launcher Job's log.
+#
+# Kueue still accounts for bursts: the LAUNCHER Job carries the profile's
+# `scheduling.queueName` label and starts suspended, so quota then represents
+# "concurrent experiments" rather than local GPUs. That is intended.
+#
+# Defaults (operator-embedded, deep-merged UNDER your manifest — your fields
+# win at any depth): enabled=true, useSpot=true, ttlMinutes=480,
+# idleMinutesToAutostop=30. Omitting `sky` entirely keeps today's on-prem
+# k8s Job behavior.
+---
+# Minimal: the 5-line sky block. Everything else is defaulted — spot instances,
+# SkyPilot's cheapest-cloud pick, 8h hard teardown, 30min idle autostop.
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: trainer-sky-minimal
+  namespace: apps
+spec:
+  runtime:
+    type: skypilot
+    mode: batchJob
+  image: ghcr.io/olivecasazza/athena-trainer:latest
+  command: ["sh", "-c", "python experiments/prepare.py && python experiments/train.py"]
+  scheduling:
+    queueName: athena-local # launcher Job is Kueue-admitted
+  sky:
+    enabled: true
+    accelerators: "A10:1"
+---
+# Power-user override: pin the cloud, keep on-demand capacity, shorten the hard
+# TTL, and hand the sky CLI its GCP credentials. Overrides merge field-by-field
+# — sibling defaults (e.g. idleMinutesToAutostop=30) survive untouched.
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: trainer-sky-pinned
+  namespace: apps
+spec:
+  runtime:
+    type: skypilot
+    mode: batchJob
+  image: ghcr.io/olivecasazza/athena-trainer:latest
+  command: ["sh", "-c", "python experiments/prepare.py && python experiments/train.py"]
+  scheduling:
+    queueName: athena-local
+  sky:
+    enabled: true
+    accelerators: "A10:8"
+    cloud: gcp # pin; unset = SkyPilot ordered/cheapest
+    useSpot: false # on-demand for the long run
+    ttlMinutes: 60 # hard teardown after 1h, no matter what
+    envSecretRef: sky-gcp-credentials # secret keys -> launcher env (sky CLI creds)
