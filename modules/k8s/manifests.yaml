@@ -208,6 +208,31 @@ rules:
       - persistentvolumeclaims
       - events
       - configmaps
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ray.io
+    resources:
+      - rayjobs
     verbs:
       - get
       - list
@@ -432,7 +457,7 @@ spec:
   runtimeProfileRef: hp-8gb-canary
   source:
     git:
-      url: "https://github.com/olivecasazza/n-autoresearch"
+      url: "https://github.com/olivecasazza/athena-operator"
       ref: "main"
   objective:
     metric: "val_bpb"
@@ -572,7 +597,7 @@ spec:
   runtimeProfileRef: gpu-small-grpo-smoke
   source:
     git:
-      url: "https://github.com/olivecasazza/n-autoresearch"
+      url: "https://github.com/olivecasazza/athena-operator"
       ref: "main"
   objective:
     metric: "reward_mean"
