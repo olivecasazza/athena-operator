@@ -1,0 +1,71 @@
+# Canary-gated ResearchCampaign.
+#
+# WHY
+# ---
+# We repeatedly burned full-length GPU training runs (25M-step recipes,
+# ~280 GPU-h per sweep) on configurations that a 2M-step canary plus
+# behavioral probes would have vetoed in ~40 minutes. `spec.canary` makes the
+# campaign generate exactly ONE cheap gate experiment (`<campaign>-canary`,
+# labeled athena.nixlab.io/canary=true) before anything else, and hold ALL
+# further experiment generation until the canary both Succeeds AND passes its
+# benchmark gates. This is the hard rule for cloud bursts: nothing reaches
+# `sky launch` without a green canary.
+#
+# SEMANTICS
+# ---------
+# 1. spec.canary set, no canary experiment yet -> the controller creates only
+#    "<campaign>-canary". Its parameters are the template defaults with
+#    spec.canary.parameters deep-merged on top (canary wins at any depth,
+#    arrays replace wholesale) — here total_timesteps drops 25M -> 2M.
+# 2. While the canary is non-terminal (or Succeeded but its BenchmarkRun has
+#    not ruled): no other experiments are generated. status.canaryState is
+#    "pending"/"running".
+# 3. Canary Succeeded + gate verdict Keep -> generation unblocks and the
+#    campaign runs exactly as it would without a canary. status.canaryState:
+#    "passed". The canary counts in status.totalExperiments but does NOT
+#    consume budget.maxExperiments.
+# 4. Canary Failed, or gate verdict Discard -> status.phase: CanaryFailed,
+#    status.canaryState: "failed", and nothing further is ever generated.
+#    Nothing is deleted: the canary and its BenchmarkRun remain as the record
+#    of why the recipe was vetoed.
+#
+# GATING SUITE
+# ------------
+# The canary flows through the same BenchmarkRun machinery as every other
+# succeeded experiment. spec.canary.benchmarkSuiteRef overrides the campaign's
+# benchmarkSuiteRef for the canary only (use a cheaper/faster probe suite); if
+# neither is set the gate is simply "the canary experiment Succeeded".
+#
+# See examples/benchmarks/suite-toy-rl.yaml for a suite shaped like the ones
+# referenced below, and examples/spot-pbt.yaml for the trainer/template this
+# campaign is modeled on.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: spot-walk-canary-gated
+  namespace: apps
+spec:
+  templateRef: spot-walk
+  strategy:
+    type: heuristic
+  concurrency: 3
+  budget:
+    # The canary is pre-budget: this still buys 16 real experiments.
+    maxExperiments: 16
+    maxDuration: "24h"
+  # Full-length experiments are gated on this suite (Keep/Discard verdict is
+  # written back onto each Experiment via promotionPolicy.updateExperimentStatus).
+  benchmarkSuiteRef: spot-walk-gates-v1
+  benchmarkRuntimeProfileRef: bench-cpu
+  canary:
+    # Deep-merged over the template's default parameters for the canary only.
+    # 2M steps instead of the template's 25M: ~40 minutes instead of ~28 GPU-h.
+    parameters:
+      total_timesteps: 2000000
+    # Cheaper behavioral-probe suite for the canary; falls back to the
+    # campaign's benchmarkSuiteRef when omitted.
+    benchmarkSuiteRef: spot-walk-canary-gates-v1
+    # Recorded for runners/humans; NOT enforced by the controller yet
+    # (budget.maxDuration is not enforced either).
+    maxDuration: "40m"

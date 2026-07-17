@@ -707,6 +707,27 @@
                     ],
                     "type": "object"
                   },
+                  "canary": {
+                    "description": "Optional canary stage: one cheap gate experiment generated before any budgeted experiments. Generation of further experiments is held until the canary succeeds AND (if a benchmark suite gates it) its gates pass.",
+                    "nullable": true,
+                    "properties": {
+                      "benchmarkSuiteRef": {
+                        "description": "Gate suite for the canary; falls back to the campaign's benchmarkSuiteRef. If neither is set, the gate is simply \"the canary experiment Succeeded\".",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "maxDuration": {
+                        "description": "Optional wall-clock bound for the canary. Recorded for runners/humans but NOT enforced by the controller yet — budget.maxDuration isn't enforced either, and the canary mirrors that mechanism rather than inventing a new one.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "parameters": {
+                        "description": "Parameter overrides deep-merged over the template's default parameters (canary wins at any depth; arrays replace wholesale) for the canary experiment only. Typical use: {\"total_timesteps\": 2000000}.",
+                        "x-kubernetes-preserve-unknown-fields": true
+                      }
+                    },
+                    "type": "object"
+                  },
                   "concurrency": {
                     "default": 0,
                     "format": "uint32",
@@ -898,6 +919,16 @@
                     "format": "double",
                     "nullable": true,
                     "type": "number"
+                  },
+                  "canaryExperiment": {
+                    "description": "Name of the canary gate Experiment, once created (spec.canary only).",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "canaryState": {
+                    "description": "Canary gate state: \"pending\" | \"running\" | \"passed\" | \"failed\".",
+                    "nullable": true,
+                    "type": "string"
                   },
                   "controllerVersion": {
                     "nullable": true,
