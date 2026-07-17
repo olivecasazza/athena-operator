@@ -326,10 +326,22 @@ pub async fn reconcile(
             let best_exp: Option<&Experiment> = best
                 .as_ref()
                 .and_then(|(bn, _)| completed.iter().find(|e| &e.name_any() == bn).copied());
+            // A canary seed's SCIENCE params are a valid hill-climb/PBT start,
+            // but its cheapness must not leak into budgeted children: keys the
+            // canary explicitly overrode (spec.canary.parameters, e.g.
+            // total_timesteps: 2M) are stripped so they revert to template
+            // defaults. Caught live: spot-recover-v70-001 ran at the canary's
+            // 2M budget instead of the template's 15M.
+            let seed_params: Option<BTreeMap<String, Value>> = best_exp.map(|e| {
+                canary_seed_params(
+                    &e.spec.parameters,
+                    campaign.spec.canary.as_ref().map(|c| &c.parameters),
+                )
+            });
             let best_ctx = best
                 .as_ref()
-                .zip(best_exp)
-                .map(|((bn, _), e)| (bn.as_str(), &e.spec.parameters));
+                .zip(seed_params.as_ref())
+                .map(|((bn, _), p)| (bn.as_str(), p));
             // PBT explore factor (guard against non-positive overrides).
             let perturb_factor = match campaign.spec.perturb_factor {
                 Some(f) if f > 0.0 => f,
@@ -727,6 +739,26 @@ fn canary_state(gate: CanaryGateAction, canary_phase: Option<&ExperimentPhase>) 
         CanaryGateAction::Unblock => "passed",
         CanaryGateAction::CanaryFailed => "failed",
     }
+}
+
+/// Seed params for generation: strip every key spec.canary.parameters
+/// overrides, from ANY seed, so budgeted children always fall back to
+/// template defaults for those keys. Canary overrides are canary-only by
+/// definition — and the leak is generational: a child that inherited the
+/// canary's cheap total_timesteps would pass it to ITS children even when it
+/// (not the canary) becomes the best seed, so a canary-seed-only strip is not
+/// enough.
+fn canary_seed_params(
+    params: &BTreeMap<String, Value>,
+    canary_overrides: Option<&Value>,
+) -> BTreeMap<String, Value> {
+    let strip: Option<&serde_json::Map<String, Value>> =
+        canary_overrides.and_then(Value::as_object);
+    params
+        .iter()
+        .filter(|(k, _)| strip.is_none_or(|m| !m.contains_key(*k)))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 /// Canary parameters: template defaults (spec.defaults + parameterSchema
@@ -1870,6 +1902,48 @@ mod tests {
             canary_state(CanaryFailed, Some(&ExperimentPhase::Failed)),
             "failed"
         );
+    }
+
+    #[test]
+    fn canary_seed_strips_only_canary_overrides() {
+        let params = BTreeMap::from([
+            ("alive".to_string(), json!(12.0)),
+            ("total_timesteps".to_string(), json!(2_000_000)),
+        ]);
+        let overrides = json!({ "total_timesteps": 2_000_000 });
+        // Any seed with a canary configured: the override key is stripped
+        // (falls back to template defaults downstream), science params
+        // survive. Unconditional because the leak is generational — a child
+        // that inherited the canary's cheap budget would re-leak it as the
+        // next seed.
+        let seeded = canary_seed_params(&params, Some(&overrides));
+        assert!(!seeded.contains_key("total_timesteps"));
+        assert_eq!(seeded.get("alive"), Some(&json!(12.0)));
+        // No canary configured: identity.
+        let seeded = canary_seed_params(&params, None);
+        assert_eq!(seeded, params);
+    }
+
+    #[test]
+    fn canary_seeded_child_reverts_to_template_budget() {
+        // End-to-end through next_experiment: template default 15M, canary ran
+        // at 2M, the budgeted child must climb from the canary's science but
+        // train at 15M.
+        let mut t = template_with_default_lr(0.1);
+        t.spec
+            .defaults
+            .insert("total_timesteps".to_string(), json!(15_000_000));
+        let canary_params = BTreeMap::from([
+            ("lr".to_string(), json!(0.2)),
+            ("total_timesteps".to_string(), json!(2_000_000)),
+        ]);
+        let seeded = canary_seed_params(
+            &canary_params,
+            Some(&json!({ "total_timesteps": 2_000_000 })),
+        );
+        let (params, _) = next_experiment(&t, Some(("c-canary", &seeded)), 1, 0);
+        assert_eq!(params.get("total_timesteps"), Some(&json!(15_000_000)));
+        assert_eq!(params.get("parentExperimentId"), Some(&json!("c-canary")));
     }
 
     #[test]
