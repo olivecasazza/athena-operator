@@ -66,6 +66,46 @@ pub struct ResearchCampaignSpec {
     /// inferenceMesh (single-node); if both set, inferenceCluster wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_cluster: Option<VllmClusterSpec>,
+
+    /// Optional canary stage: one cheap gate experiment generated before any
+    /// budgeted experiments. Generation of further experiments is held until the
+    /// canary succeeds AND (if a benchmark suite gates it) its gates pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary: Option<CanarySpec>,
+}
+
+/// One cheap gate experiment run before the campaign spends real budget.
+///
+/// Rationale: full-length training runs (e.g. 25M-step, ~280 GPU-h sweeps) have
+/// repeatedly been burned on recipes a 2M-step canary + behavioral probes would
+/// have vetoed in ~40 minutes. With a canary configured the campaign generates
+/// exactly one experiment (`<campaign>-canary`) and holds everything else until
+/// it Succeeds and its benchmark gates pass; a Failed canary (or a gate Discard)
+/// parks the campaign in phase `CanaryFailed` without generating anything
+/// further. Hard rule for cloud bursts: nothing reaches `sky launch` without a
+/// green canary.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CanarySpec {
+    /// Parameter overrides deep-merged over the template's default parameters
+    /// (canary wins at any depth; arrays replace wholesale) for the canary
+    /// experiment only. Typical use: {"total_timesteps": 2000000}.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    #[schemars(schema_with = "crate::common::json_value_schema")]
+    pub parameters: serde_json::Value,
+
+    /// Gate suite for the canary; falls back to the campaign's
+    /// benchmarkSuiteRef. If neither is set, the gate is simply "the canary
+    /// experiment Succeeded".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark_suite_ref: Option<String>,
+
+    /// Optional wall-clock bound for the canary. Recorded for runners/humans
+    /// but NOT enforced by the controller yet — budget.maxDuration isn't
+    /// enforced either, and the canary mirrors that mechanism rather than
+    /// inventing a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_duration: Option<String>,
 }
 
 /// Ephemeral multi-node vLLM-on-Ray inference cluster. Serves one model split
@@ -233,4 +273,10 @@ pub struct ResearchCampaignStatus {
     pub observed_generation: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_version: Option<String>,
+    /// Name of the canary gate Experiment, once created (spec.canary only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary_experiment: Option<String>,
+    /// Canary gate state: "pending" | "running" | "passed" | "failed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary_state: Option<String>,
 }

@@ -6,6 +6,11 @@
 //!   3. Evaluate succeeded experiments against the objective, pick the best, and
 //!      stamp each one's `status.decision` (Keep on the best, Discard otherwise).
 //!      The experiment reconciler owns phase/metrics; the campaign owns decision.
+//!   3d. Canary gate (spec.canary): before any budgeted experiment exists, the
+//!       campaign creates exactly ONE cheap probe (`<campaign>-canary`) and
+//!       holds ALL further generation until it Succeeds and (when a benchmark
+//!       suite gates it) its BenchmarkRun verdict is Keep. Failed/Discarded
+//!       canary → status.phase = CanaryFailed and nothing more is generated.
 //!   4. If under `budget.maxExperiments` and below the concurrency target,
 //!      generate the next experiment(s) via the strategy:
 //!        - "heuristic": hill-climb from the best (baseline from template
@@ -29,11 +34,14 @@ use athena_api::benchmark_run::{
     BenchmarkRun, BenchmarkRunOutput, BenchmarkRunSpec, PromotionPolicy,
 };
 use athena_api::common::{LocalObjectReference, TypedObjectReference};
+use athena_api::defaults::deep_merge;
 use athena_api::experiment::{
     CheckpointPolicy, Experiment, ExperimentDecision, ExperimentPhase, ExperimentSpec,
 };
 use athena_api::experiment_template::{ExperimentTemplate, ObjectiveGoal, ObjectiveSpec};
-use athena_api::research_campaign::{InferenceMeshSpec, ResearchCampaign, VllmClusterSpec};
+use athena_api::research_campaign::{
+    CanarySpec, InferenceMeshSpec, ResearchCampaign, ResearchCampaignSpec, VllmClusterSpec,
+};
 use athena_api::runtime_profile::EnvVar;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
@@ -57,6 +65,8 @@ use crate::Context;
 
 const MANAGER: &str = "athena-campaign";
 const CAMPAIGN_LABEL: &str = "athena.nixlab.io/campaign";
+/// Label marking a campaign's canary gate experiment.
+const CANARY_LABEL: &str = "athena.nixlab.io/canary";
 /// Multiplicative step for the hill-climb perturbation of a numeric parameter.
 const STEP: f64 = 0.5;
 /// Default PBT perturbation factor: explore at 1.2x up / ~0.83x (1/1.2) down.
@@ -117,7 +127,42 @@ pub async fn reconcile(
     }
     let total = exps.items.len() as u32;
 
+    // 2b. Canary gate. The canary is the campaign's single pre-budget probe
+    // experiment; while it hasn't passed, NOTHING else is generated. Everything
+    // here is a no-op for campaigns without spec.canary (gate = Unblock).
+    let canary_name = format!("{name}-canary");
+    // Only resolved when spec.canary is set, so a hand-made "<name>-canary"
+    // experiment can't change the behavior of a canary-less campaign.
+    let canary_exp = campaign
+        .spec
+        .canary
+        .as_ref()
+        .and_then(|_| exps.items.iter().find(|e| e.name_any() == canary_name));
+    // An existing canary with no status yet is Pending, not missing — mapping it
+    // to None would make the gate ask for a second create.
+    let canary_phase: Option<ExperimentPhase> = canary_exp.map(|e| {
+        e.status
+            .as_ref()
+            .map(|s| s.phase.clone())
+            .unwrap_or_default()
+    });
+    let canary_decision: Option<ExperimentDecision> = canary_exp
+        .and_then(|e| e.status.as_ref())
+        .and_then(|s| s.decision.clone());
+    let gate = canary_gate(
+        &campaign.spec,
+        canary_phase.as_ref(),
+        canary_decision.as_ref(),
+    );
+    let canary_dead = gate == CanaryGateAction::CanaryFailed;
+
     // 3. Evaluate: pick best by objective.
+    //
+    // The canary is deliberately NOT excluded here: it counts like any other
+    // succeeded experiment for bestExperiment/bestObjective. Its objective was
+    // produced under the same template/metric, so it is comparable in kind —
+    // just cheaper, so a real experiment should overtake it quickly. Excluding
+    // it would also leave hill-climb/PBT with no seed right after the gate opens.
     let best = pick_best(&completed, objective);
 
     // 3b. Decision. When a benchmark suite is configured, the campaign does NOT
@@ -125,8 +170,15 @@ pub async fn reconcile(
     // BenchmarkRun per succeeded experiment and lets the benchmark's gate results
     // drive `status.decision` (via promotionPolicy.updateExperimentStatus). Else,
     // keep the objective-based decision.
+    // The canary flows through the same BenchmarkRun machinery but may gate on
+    // its own suite (spec.canary.benchmarkSuiteRef falls back to the campaign's),
+    // so it is ensured separately below and skipped in both branches here.
+    let is_canary = |e: &Experiment| canary_exp.is_some() && e.name_any() == canary_name;
     if let Some(suite) = campaign.spec.benchmark_suite_ref.as_deref() {
         for e in &completed {
+            if is_canary(e) {
+                continue;
+            }
             ensure_benchmark_run(
                 &ctx,
                 &ns,
@@ -139,6 +191,12 @@ pub async fn reconcile(
         }
     } else {
         for e in &completed {
+            if is_canary(e) {
+                // No campaign-wide suite: the canary's decision belongs to its
+                // own gate suite (if any); don't stamp an objective decision
+                // that could race the benchmark's verdict.
+                continue;
+            }
             let en = e.name_any();
             let want = if Some(en.as_str()) == best.as_ref().map(|b| b.0.as_str()) {
                 ExperimentDecision::Keep
@@ -154,17 +212,48 @@ pub async fn reconcile(
         }
     }
 
+    // 3b-canary. Once the canary Succeeds and a suite gates it, run it through
+    // the SAME BenchmarkRun machinery as any other experiment; the gate then
+    // reads the Keep/Discard verdict the benchmark writes back onto the canary
+    // (promotionPolicy.updateExperimentStatus).
+    let canary_gate_suite = campaign.spec.canary.as_ref().and_then(|c| {
+        c.benchmark_suite_ref
+            .as_deref()
+            .or(campaign.spec.benchmark_suite_ref.as_deref())
+    });
+    if let (Some(suite), Some(c), Some(ExperimentPhase::Succeeded)) =
+        (canary_gate_suite, canary_exp, canary_phase.as_ref())
+    {
+        ensure_benchmark_run(
+            &ctx,
+            &ns,
+            &campaign,
+            c,
+            suite,
+            campaign.spec.benchmark_runtime_profile_ref.as_deref(),
+        )
+        .await?;
+    }
+
     // 3c. Ephemeral inference mesh (mesh-llm): bring it up while the campaign is
     // active, gate experiment generation on its readiness, and tear it down at
     // terminal phase (NOT object deletion — completed campaigns linger for
     // decision evaluation, so ownerReference-only GC would outlive the run).
-    let at_budget = total >= campaign.spec.budget.max_experiments;
+    //
+    // The canary is a pre-budget gate probe: it counts in status.totalExperiments
+    // but does NOT consume budget.maxExperiments (otherwise `maxExperiments: 1`
+    // plus a canary could never run a single real experiment). Identical to
+    // `total` when no canary exists.
+    let budgeted_total = total.saturating_sub(u32::from(canary_exp.is_some()));
+    let at_budget = budgeted_total >= campaign.spec.budget.max_experiments;
     // "The run ended" = budget reached AND all experiments terminal (running == 0).
     // at_budget alone only means "done generating": the final `concurrency`
     // experiments are still Running when total hits budget and must keep their mesh
     // endpoint until they finish. Keep the mesh up (ensure self-heals) through that
     // drain window; tear down only once nothing is left running.
-    let all_done = at_budget && running == 0;
+    // A dead canary also ends the run: nothing further will ever be generated,
+    // so the mesh must not idle forever behind a CanaryFailed campaign.
+    let all_done = (at_budget || canary_dead) && running == 0;
     // Two backends: multi-node vLLM cluster (RayJob) wins if set, else single-node
     // mesh-llm (Deployment). Same lifecycle: ensure while active, tear down when
     // all experiments are terminal.
@@ -200,107 +289,152 @@ pub async fn reconcile(
         campaign.spec.concurrency.max(1)
     };
     let mut created = 0u32;
+    let mut canary_created = false;
     // When an inference mesh is configured, hold experiment creation until it is
     // Ready so the first prover Jobs don't launch against a dead LLM_BASE_URL.
-    if !at_budget && mesh_ready {
-        let want = concurrency.saturating_sub(running);
-        let budget_left = campaign.spec.budget.max_experiments - total;
-        // The best succeeded experiment is the seed for both strategies: its
-        // params drive perturbation and (for PBT) its latest checkpoint warm-
-        // starts the children's weights.
-        let best_exp: Option<&Experiment> = best
-            .as_ref()
-            .and_then(|(bn, _)| completed.iter().find(|e| &e.name_any() == bn).copied());
-        let best_ctx = best
-            .as_ref()
-            .zip(best_exp)
-            .map(|((bn, _), e)| (bn.as_str(), &e.spec.parameters));
-        // PBT explore factor (guard against non-positive overrides).
-        let perturb_factor = match campaign.spec.perturb_factor {
-            Some(f) if f > 0.0 => f,
-            _ => PBT_FACTOR,
-        };
-        // Already-tried science points (all children, any phase) for duplicate
-        // detection; grows with the candidates created this pass.
-        let mut seen: std::collections::HashSet<String> = exps
-            .items
-            .iter()
-            .map(|e| science_key(&e.spec.parameters))
-            .collect();
-        for i in 0..want.min(budget_left) {
-            let idx = total + i;
-            let generate = |salt: u32| {
-                if is_pbt {
-                    let (params, hypothesis) =
-                        pbt_experiment(&template, best_ctx, perturb_factor, idx, salt);
-                    (params, hypothesis, pbt_checkpoint_policy(best_exp))
-                } else {
-                    let (params, hypothesis) = next_experiment(&template, best_ctx, idx, salt);
-                    (params, hypothesis, None)
-                }
-            };
-            // Dedup only applies when there is a best to perturb from — baselines
-            // have nothing to vary. Bounded re-rolls; if the local lattice is
-            // exhausted, accept the duplicate as a labeled replicate (liveness).
-            let mut chosen = generate(0);
-            if best_ctx.is_some() {
-                let mut deduped = false;
-                for salt in 0..=MAX_REROLLS {
-                    let candidate = generate(salt);
-                    if !seen.contains(&science_key(&candidate.0)) {
-                        chosen = candidate;
-                        deduped = true;
-                        break;
+    // The canary gate wraps around that: CreateCanary generates exactly the
+    // canary, Hold/CanaryFailed generate nothing, Unblock is today's behavior
+    // (and the only reachable arm when spec.canary is unset).
+    match gate {
+        CanaryGateAction::CreateCanary if mesh_ready => {
+            if let Some(canary_spec) = &campaign.spec.canary {
+                let exp = build_canary_experiment(&campaign, &name, &ns, &template, canary_spec);
+                match experiments.create(&PostParams::default(), &exp).await {
+                    Ok(_) => {
+                        canary_created = true;
+                        info!(campaign = %name, canary = %canary_name,
+                            "created canary gate experiment; holding generation until it passes");
+                    }
+                    Err(kube::Error::Api(e)) if e.code == 409 => {}
+                    Err(e) => {
+                        warn!(%e, canary = %canary_name, "failed to create canary experiment")
                     }
                 }
-                if !deduped {
-                    chosen.1 = format!("{} [replicate: local search space exhausted]", chosen.1);
+            }
+        }
+        // Canary waiting on the mesh, in flight, or awaiting its benchmark
+        // verdict — or dead: generate nothing.
+        CanaryGateAction::CreateCanary
+        | CanaryGateAction::Hold
+        | CanaryGateAction::CanaryFailed => {}
+        CanaryGateAction::Unblock if !at_budget && mesh_ready => {
+            let want = concurrency.saturating_sub(running);
+            let budget_left = campaign.spec.budget.max_experiments - budgeted_total;
+            // The best succeeded experiment is the seed for both strategies: its
+            // params drive perturbation and (for PBT) its latest checkpoint warm-
+            // starts the children's weights.
+            let best_exp: Option<&Experiment> = best
+                .as_ref()
+                .and_then(|(bn, _)| completed.iter().find(|e| &e.name_any() == bn).copied());
+            let best_ctx = best
+                .as_ref()
+                .zip(best_exp)
+                .map(|((bn, _), e)| (bn.as_str(), &e.spec.parameters));
+            // PBT explore factor (guard against non-positive overrides).
+            let perturb_factor = match campaign.spec.perturb_factor {
+                Some(f) if f > 0.0 => f,
+                _ => PBT_FACTOR,
+            };
+            // Already-tried science points (all children, any phase) for duplicate
+            // detection; grows with the candidates created this pass.
+            let mut seen: std::collections::HashSet<String> = exps
+                .items
+                .iter()
+                .map(|e| science_key(&e.spec.parameters))
+                .collect();
+            for i in 0..want.min(budget_left) {
+                let idx = total + i;
+                let generate = |salt: u32| {
+                    if is_pbt {
+                        let (params, hypothesis) =
+                            pbt_experiment(&template, best_ctx, perturb_factor, idx, salt);
+                        (params, hypothesis, pbt_checkpoint_policy(best_exp))
+                    } else {
+                        let (params, hypothesis) = next_experiment(&template, best_ctx, idx, salt);
+                        (params, hypothesis, None)
+                    }
+                };
+                // Dedup only applies when there is a best to perturb from — baselines
+                // have nothing to vary. Bounded re-rolls; if the local lattice is
+                // exhausted, accept the duplicate as a labeled replicate (liveness).
+                let mut chosen = generate(0);
+                if best_ctx.is_some() {
+                    let mut deduped = false;
+                    for salt in 0..=MAX_REROLLS {
+                        let candidate = generate(salt);
+                        if !seen.contains(&science_key(&candidate.0)) {
+                            chosen = candidate;
+                            deduped = true;
+                            break;
+                        }
+                    }
+                    if !deduped {
+                        chosen.1 =
+                            format!("{} [replicate: local search space exhausted]", chosen.1);
+                    }
+                }
+                seen.insert(science_key(&chosen.0));
+                let (params, hypothesis, checkpoint_policy) = chosen;
+                let exp = build_experiment(
+                    &campaign,
+                    &name,
+                    &ns,
+                    idx,
+                    params,
+                    hypothesis,
+                    checkpoint_policy,
+                );
+                match experiments.create(&PostParams::default(), &exp).await {
+                    Ok(_) => created += 1,
+                    Err(e) => warn!(%e, idx, "failed to create experiment"),
                 }
             }
-            seen.insert(science_key(&chosen.0));
-            let (params, hypothesis, checkpoint_policy) = chosen;
-            let exp = build_experiment(
-                &campaign,
-                &name,
-                &ns,
-                idx,
-                params,
-                hypothesis,
-                checkpoint_policy,
-            );
-            match experiments.create(&PostParams::default(), &exp).await {
-                Ok(_) => created += 1,
-                Err(e) => warn!(%e, idx, "failed to create experiment"),
+            if created > 0 {
+                info!(campaign = %name, created, total = total + created, "generated experiments");
             }
         }
-        if created > 0 {
-            info!(campaign = %name, created, total = total + created, "generated experiments");
-        }
+        // Unblocked but at budget / mesh not ready: nothing to generate this pass.
+        CanaryGateAction::Unblock => {}
     }
 
-    // 5. Update campaign status.
-    let status = json!({ "status": {
-        "runningExperiments": running + created,
+    // 5. Update campaign status. A dead canary parks the campaign in
+    // CanaryFailed (nothing is deleted; the canary experiment and its
+    // BenchmarkRun stay around as the record of WHY the recipe was vetoed).
+    let new = created + u32::from(canary_created);
+    let phase = if canary_dead {
+        "CanaryFailed"
+    } else if at_budget {
+        "Completed"
+    } else {
+        "Running"
+    };
+    let mut status = json!({ "status": {
+        "runningExperiments": running + new,
         "succeededExperiments": succeeded,
         "failedExperiments": failed,
-        "totalExperiments": total + created,
+        "totalExperiments": total + new,
         "bestExperiment": best.as_ref().map(|b| b.0.clone()),
         "bestObjective": best.as_ref().map(|b| b.1),
-        "phase": if at_budget { "Completed" } else { "Running" },
+        "phase": phase,
         "observedGeneration": campaign.metadata.generation,
         "controllerVersion": env!("CARGO_PKG_VERSION"),
     }});
+    // Canary status is only ever written for canary campaigns, so existing CRs
+    // are untouched (merge-patch: keys we don't send are left alone).
+    if campaign.spec.canary.is_some() && (canary_exp.is_some() || canary_created) {
+        status["status"]["canaryExperiment"] = json!(canary_name);
+        status["status"]["canaryState"] = json!(canary_state(gate, canary_phase.as_ref()));
+    }
     let campaigns: Api<ResearchCampaign> = Api::namespaced(ctx.client.clone(), &ns);
     campaigns
         .patch_status(&name, &PatchParams::apply(MANAGER), &Patch::Merge(&status))
         .await?;
 
     // Poll faster while the loop is active so it advances promptly between runs.
-    Ok(Action::requeue(Duration::from_secs(if at_budget {
-        300
-    } else {
-        15
-    })))
+    // A CanaryFailed campaign is as terminal as a completed one.
+    Ok(Action::requeue(Duration::from_secs(
+        if at_budget || canary_dead { 300 } else { 15 },
+    )))
 }
 
 /// Read an experiment's objective value from its status metrics.
@@ -516,6 +650,157 @@ fn pbt_checkpoint_policy(best_exp: Option<&Experiment>) -> Option<CheckpointPoli
         resume_from: Some(uri),
         ..Default::default()
     })
+}
+
+/// What the campaign loop must do about its canary gate this pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanaryGateAction {
+    /// spec.canary is set and the canary experiment doesn't exist yet: create
+    /// exactly it, and generate nothing else.
+    CreateCanary,
+    /// Canary exists but hasn't passed (non-terminal, or Succeeded and still
+    /// awaiting its benchmark verdict / flagged NeedsReview): hold generation.
+    Hold,
+    /// No canary configured, or the canary passed: normal generation.
+    Unblock,
+    /// Canary Failed/Errored, or its benchmark gates rejected it (Discard):
+    /// the recipe is vetoed; generate nothing further, ever.
+    CanaryFailed,
+}
+
+/// Pure canary gating decision.
+///
+/// `canary_phase` is None when the canary experiment does not exist yet (an
+/// existing experiment with no status is Pending, not missing). The benchmark
+/// verdict arrives as the canary experiment's `status.decision`, written back
+/// by its BenchmarkRun (promotionPolicy.updateExperimentStatus).
+///
+/// The gate is Succeeded-only when no suite applies; with a suite (the canary's
+/// own `benchmarkSuiteRef`, falling back to the campaign's), Succeeded is
+/// necessary but the Keep verdict is what opens the gate.
+fn canary_gate(
+    spec: &ResearchCampaignSpec,
+    canary_phase: Option<&ExperimentPhase>,
+    canary_decision: Option<&ExperimentDecision>,
+) -> CanaryGateAction {
+    // No canary configured: the gate does not exist. Everything downstream is
+    // guarded on this, keeping canary-less campaigns byte-identical to before.
+    let Some(canary) = &spec.canary else {
+        return CanaryGateAction::Unblock;
+    };
+    let Some(phase) = canary_phase else {
+        return CanaryGateAction::CreateCanary;
+    };
+    match phase {
+        ExperimentPhase::Failed | ExperimentPhase::Error => CanaryGateAction::CanaryFailed,
+        ExperimentPhase::Succeeded => {
+            let gated = canary
+                .benchmark_suite_ref
+                .as_deref()
+                .or(spec.benchmark_suite_ref.as_deref())
+                .is_some();
+            if !gated {
+                return CanaryGateAction::Unblock;
+            }
+            match canary_decision {
+                Some(ExperimentDecision::Keep) => CanaryGateAction::Unblock,
+                Some(ExperimentDecision::Discard) => CanaryGateAction::CanaryFailed,
+                // No verdict yet, or NeedsReview: the benchmark hasn't ruled
+                // (or a human must) — keep holding rather than guessing.
+                _ => CanaryGateAction::Hold,
+            }
+        }
+        _ => CanaryGateAction::Hold,
+    }
+}
+
+/// status.canaryState string for the current gate outcome.
+fn canary_state(gate: CanaryGateAction, canary_phase: Option<&ExperimentPhase>) -> &'static str {
+    match gate {
+        CanaryGateAction::CreateCanary => "pending",
+        CanaryGateAction::Hold => match canary_phase {
+            // Succeeded-but-awaiting-verdict reads as "running": the gate work
+            // (the BenchmarkRun) is still in flight.
+            Some(ExperimentPhase::Pending) | None => "pending",
+            _ => "running",
+        },
+        CanaryGateAction::Unblock => "passed",
+        CanaryGateAction::CanaryFailed => "failed",
+    }
+}
+
+/// Canary parameters: template defaults (spec.defaults + parameterSchema
+/// defaults) with the canary overrides deep-merged on top — canary wins at any
+/// depth, arrays replace wholesale, and an explicit null falls back to the
+/// default (same semantics as RuntimeProfile defaulting). A non-object,
+/// non-null override can't describe a parameter map and is ignored rather than
+/// wiping the defaults.
+fn merge_canary_parameters(
+    base: BTreeMap<String, Value>,
+    overrides: &Value,
+) -> BTreeMap<String, Value> {
+    if !overrides.is_object() && !overrides.is_null() {
+        return base;
+    }
+    match deep_merge(Value::Object(base.into_iter().collect()), overrides.clone()) {
+        Value::Object(m) => m.into_iter().collect(),
+        // object/null merged over an object is always an object.
+        _ => unreachable!("deep_merge of object base with object/null overrides"),
+    }
+}
+
+/// Build the campaign's single canary gate experiment: `<campaign>-canary`,
+/// labeled `athena.nixlab.io/canary=true` (plus the usual campaign label),
+/// parameters = template defaults ⊕ spec.canary.parameters.
+fn build_canary_experiment(
+    campaign: &ResearchCampaign,
+    campaign_name: &str,
+    ns: &str,
+    template: &ExperimentTemplate,
+    canary: &CanarySpec,
+) -> Experiment {
+    // Same base the generation strategies start from.
+    let mut base: BTreeMap<String, Value> = template.spec.defaults.clone();
+    for (k, spec) in &template.spec.parameter_schema {
+        if let Some(d) = &spec.default {
+            base.entry(k.clone()).or_insert_with(|| d.clone());
+        }
+    }
+    let mut params = merge_canary_parameters(base, &canary.parameters);
+    // Bookkeeping the runners read from the spec: the canary is iteration 0
+    // with no parent (budgeted experiments start at idx = total, i.e. 1).
+    params.insert("experimentIteration".into(), json!(0));
+    params.insert("parentExperimentId".into(), Value::Null);
+
+    let owner = OwnerReference {
+        api_version: "research.nixlab.io/v1alpha1".to_string(),
+        kind: "ResearchCampaign".to_string(),
+        name: campaign_name.to_string(),
+        uid: campaign.uid().unwrap_or_default(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    };
+    Experiment {
+        metadata: ObjectMeta {
+            name: Some(format!("{campaign_name}-canary")),
+            namespace: Some(ns.to_string()),
+            labels: Some(BTreeMap::from([
+                (CAMPAIGN_LABEL.to_string(), campaign_name.to_string()),
+                (CANARY_LABEL.to_string(), "true".to_string()),
+            ])),
+            owner_references: Some(vec![owner]),
+            ..Default::default()
+        },
+        spec: ExperimentSpec {
+            campaign_ref: campaign_name.to_string(),
+            hypothesis: "canary gate: cheap probe of the recipe before spending budget".to_string(),
+            parameters: params,
+            patch: None,
+            checkpoint_policy: None,
+            env: mesh_env(campaign, campaign_name, ns),
+        },
+        status: None,
+    }
 }
 
 fn build_experiment(
@@ -1181,7 +1466,6 @@ mod tests {
         );
     }
 
-    #[test]
     // Dedup machinery: the salt must move a candidate to a DIFFERENT science
     // point (both strategies), and science_key must ignore bookkeeping params —
     // otherwise every child would look unique and dedup would never fire.
@@ -1216,6 +1500,7 @@ mod tests {
         assert_eq!(science_key(&a), science_key(&b));
     }
 
+    #[test]
     fn pick_best_none_when_no_metric() {
         let a = exp_with("a", ExperimentPhase::Succeeded, "other", 2.0);
         assert_eq!(
@@ -1306,6 +1591,7 @@ mod tests {
                 perturb_factor: perturb,
                 inference_mesh: None,
                 inference_cluster: None,
+                canary: None,
             },
             status: None,
         }
@@ -1410,11 +1696,239 @@ mod tests {
                 perturb_factor: None,
                 inference_mesh: None,
                 inference_cluster: None,
+                canary: None,
             },
             status: None,
         };
         let (params, hypothesis) = next_experiment(&t, None, 0, 0);
         let child = build_experiment(&campaign, "c", "default", 0, params, hypothesis, None);
         assert!(child.spec.checkpoint_policy.is_none());
+    }
+
+    // ---- Canary gate ----
+
+    /// Campaign spec with an optional canary and optional campaign-level suite.
+    fn campaign_spec_with_canary(
+        canary: Option<CanarySpec>,
+        campaign_suite: Option<&str>,
+    ) -> ResearchCampaignSpec {
+        ResearchCampaignSpec {
+            template_ref: "t".into(),
+            concurrency: 1,
+            budget: Default::default(),
+            strategy: Default::default(),
+            benchmark_suite_ref: campaign_suite.map(str::to_string),
+            benchmark_runtime_profile_ref: None,
+            population_size: None,
+            perturb_factor: None,
+            inference_mesh: None,
+            inference_cluster: None,
+            canary,
+        }
+    }
+
+    fn canary_spec(suite: Option<&str>) -> CanarySpec {
+        CanarySpec {
+            parameters: json!({ "total_timesteps": 2_000_000 }),
+            benchmark_suite_ref: suite.map(str::to_string),
+            max_duration: None,
+        }
+    }
+
+    #[test]
+    fn gate_without_canary_is_always_unblock() {
+        // Requirement 5: campaigns without spec.canary behave exactly as today,
+        // whatever junk the other inputs carry.
+        let spec = campaign_spec_with_canary(None, Some("suite"));
+        for phase in [
+            None,
+            Some(ExperimentPhase::Pending),
+            Some(ExperimentPhase::Running),
+            Some(ExperimentPhase::Succeeded),
+            Some(ExperimentPhase::Failed),
+        ] {
+            for decision in [None, Some(ExperimentDecision::Discard)] {
+                assert_eq!(
+                    canary_gate(&spec, phase.as_ref(), decision.as_ref()),
+                    CanaryGateAction::Unblock
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gate_creates_canary_once_then_holds_while_nonterminal() {
+        let spec = campaign_spec_with_canary(Some(canary_spec(None)), None);
+        // Not created yet.
+        assert_eq!(
+            canary_gate(&spec, None, None),
+            CanaryGateAction::CreateCanary
+        );
+        // Created (even before it has any status → Pending) through Running: hold.
+        for phase in [
+            ExperimentPhase::Pending,
+            ExperimentPhase::Preparing,
+            ExperimentPhase::Running,
+        ] {
+            assert_eq!(
+                canary_gate(&spec, Some(&phase), None),
+                CanaryGateAction::Hold,
+                "{phase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_ungated_canary_passes_on_success_alone() {
+        // No suite on the canary or the campaign: Succeeded IS the gate.
+        let spec = campaign_spec_with_canary(Some(canary_spec(None)), None);
+        assert_eq!(
+            canary_gate(&spec, Some(&ExperimentPhase::Succeeded), None),
+            CanaryGateAction::Unblock
+        );
+    }
+
+    #[test]
+    fn gate_failed_canary_is_terminal() {
+        let spec = campaign_spec_with_canary(Some(canary_spec(None)), None);
+        for phase in [ExperimentPhase::Failed, ExperimentPhase::Error] {
+            assert_eq!(
+                canary_gate(&spec, Some(&phase), None),
+                CanaryGateAction::CanaryFailed,
+                "{phase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_with_suite_waits_for_benchmark_verdict() {
+        // Suite from the campaign (canary falls back to it): Succeeded alone is
+        // NOT enough — the gate opens on Keep, closes forever on Discard, and
+        // holds on no-verdict-yet or NeedsReview.
+        let spec = campaign_spec_with_canary(Some(canary_spec(None)), Some("gates"));
+        let succeeded = ExperimentPhase::Succeeded;
+        assert_eq!(
+            canary_gate(&spec, Some(&succeeded), None),
+            CanaryGateAction::Hold
+        );
+        assert_eq!(
+            canary_gate(
+                &spec,
+                Some(&succeeded),
+                Some(&ExperimentDecision::NeedsReview)
+            ),
+            CanaryGateAction::Hold
+        );
+        assert_eq!(
+            canary_gate(&spec, Some(&succeeded), Some(&ExperimentDecision::Keep)),
+            CanaryGateAction::Unblock
+        );
+        assert_eq!(
+            canary_gate(&spec, Some(&succeeded), Some(&ExperimentDecision::Discard)),
+            CanaryGateAction::CanaryFailed
+        );
+    }
+
+    #[test]
+    fn gate_canary_suite_override_gates_without_campaign_suite() {
+        // The canary can carry its own (cheaper) suite even when the campaign
+        // has none — the gate must still wait for the verdict.
+        let spec = campaign_spec_with_canary(Some(canary_spec(Some("canary-gates"))), None);
+        let succeeded = ExperimentPhase::Succeeded;
+        assert_eq!(
+            canary_gate(&spec, Some(&succeeded), None),
+            CanaryGateAction::Hold
+        );
+        assert_eq!(
+            canary_gate(&spec, Some(&succeeded), Some(&ExperimentDecision::Keep)),
+            CanaryGateAction::Unblock
+        );
+    }
+
+    #[test]
+    fn canary_state_strings_cover_the_lifecycle() {
+        use CanaryGateAction::*;
+        assert_eq!(canary_state(CreateCanary, None), "pending");
+        assert_eq!(
+            canary_state(Hold, Some(&ExperimentPhase::Pending)),
+            "pending"
+        );
+        assert_eq!(
+            canary_state(Hold, Some(&ExperimentPhase::Running)),
+            "running"
+        );
+        // Succeeded but the BenchmarkRun hasn't ruled: gate work still running.
+        assert_eq!(
+            canary_state(Hold, Some(&ExperimentPhase::Succeeded)),
+            "running"
+        );
+        assert_eq!(
+            canary_state(Unblock, Some(&ExperimentPhase::Succeeded)),
+            "passed"
+        );
+        assert_eq!(
+            canary_state(CanaryFailed, Some(&ExperimentPhase::Failed)),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn canary_parameters_deep_merge_over_defaults() {
+        let base = BTreeMap::from([
+            ("lr".to_string(), json!(0.001)),
+            ("total_timesteps".to_string(), json!(25_000_000)),
+            ("opt".to_string(), json!({ "beta1": 0.9, "beta2": 0.999 })),
+        ]);
+        // Canary wins; untouched defaults survive, nested siblings survive.
+        let merged = merge_canary_parameters(
+            base.clone(),
+            &json!({ "total_timesteps": 2_000_000, "opt": { "beta1": 0.5 } }),
+        );
+        assert_eq!(merged.get("total_timesteps"), Some(&json!(2_000_000)));
+        assert_eq!(merged.get("lr"), Some(&json!(0.001)));
+        assert_eq!(
+            merged.get("opt"),
+            Some(&json!({ "beta1": 0.5, "beta2": 0.999 }))
+        );
+        // Null / non-object overrides leave the defaults alone.
+        assert_eq!(merge_canary_parameters(base.clone(), &Value::Null), base);
+        assert_eq!(merge_canary_parameters(base.clone(), &json!(42)), base);
+    }
+
+    #[test]
+    fn canary_experiment_is_named_labeled_and_merged() {
+        let t = template_with_default_lr(0.1);
+        let spec = campaign_spec_with_canary(Some(canary_spec(None)), None);
+        let campaign = ResearchCampaign {
+            metadata: ObjectMeta {
+                name: Some("c".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            spec,
+            status: None,
+        };
+        let canary = campaign.spec.canary.clone().unwrap();
+        let exp = build_canary_experiment(&campaign, "c", "default", &t, &canary);
+
+        assert_eq!(exp.metadata.name.as_deref(), Some("c-canary"));
+        let labels = exp.metadata.labels.as_ref().unwrap();
+        assert_eq!(labels.get(CANARY_LABEL).map(String::as_str), Some("true"));
+        assert_eq!(labels.get(CAMPAIGN_LABEL).map(String::as_str), Some("c"));
+        // Template default survives, canary override lands, bookkeeping stamped.
+        assert_eq!(exp.spec.parameters.get("lr"), Some(&json!(0.1)));
+        assert_eq!(
+            exp.spec.parameters.get("total_timesteps"),
+            Some(&json!(2_000_000))
+        );
+        assert_eq!(
+            exp.spec.parameters.get("experimentIteration"),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            exp.spec.parameters.get("parentExperimentId"),
+            Some(&Value::Null)
+        );
+        assert!(exp.spec.hypothesis.contains("canary gate"));
     }
 }
