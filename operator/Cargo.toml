@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/iii-experimental/n-autoresearch"
+repository = "https://github.com/olivecasazza/athena-operator"
 
 [workspace.dependencies]
 athena-api = { path = "crates/athena-api" }

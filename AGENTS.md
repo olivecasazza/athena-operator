@@ -4,7 +4,7 @@ Guidance for coding agents working in this repository.
 
 ## Prime Directive
 
-`n-autoresearch` is Athena: a Kubernetes-native autonomous ML/RL research platform. Treat Kubernetes as the product API and source of truth. If a feature matters to research execution, benchmarking, observability, scheduling, state, policy, or operator control, model it as a Kubernetes-native component first.
+This repository is Athena (`athena-operator`): a Kubernetes-native autonomous ML/RL research platform. Treat Kubernetes as the product API and source of truth. If a feature matters to research execution, benchmarking, observability, scheduling, state, policy, or operator control, model it as a Kubernetes-native component first.
 
 Do not add or preserve durable product behavior in ad-hoc scripts, local files, SQLite, local KV stores, log scraping, bespoke daemons, legacy workers, or out-of-band REST state. Athena product state must be owned by Kubernetes objects, controller reconciliation, status fields, events, metrics, and GitOps-rendered artifacts. Non-Kubernetes code may exist only as stateless runner implementation behind CRD-owned desired state and controller-owned observed state.
 
@@ -25,8 +25,7 @@ Do not add or preserve durable product behavior in ad-hoc scripts, local files, 
 ## No Legacy Support
 
 - Do not preserve old orchestration APIs, worker flows, local experiment loops, or compatibility behavior.
-- Do not extend `workers/orchestrator/` or `workers/gpu/` for Athena behavior. Do not add features, state, scheduling, benchmarking, metrics, or orchestration there.
-- If old behavior is useful, re-express it as CRD schema, controller reconciliation, Kubernetes Job behavior, status, metrics, events, dashboard panels, or console views.
+- The legacy `workers/orchestrator/` and `workers/gpu/` paths have been removed. Do not reintroduce local worker/orchestrator flows; re-express useful behavior as CRD schema, controller reconciliation, Kubernetes Job behavior, status, metrics, events, dashboard panels, or console views.
 - When legacy and Athena-native behavior conflict, remove, bypass, or quarantine the legacy path instead of bridging to it.
 - Ignore legacy experiment-loop instructions in older docs unless the task is explicitly to remove or migrate them.
 - `AGENTS.md` and `docs/openspec.md` override older docs whenever legacy local loops conflict with Athena Kubernetes-native design.
@@ -34,13 +33,12 @@ Do not add or preserve durable product behavior in ad-hoc scripts, local files, 
 ## Project Shape
 
 - `docs/openspec.md` is the build spec for Athena architecture, CRD/API shape, benchmark behavior, observability, and rollout order.
-- `README.md` and `docs/README.md` provide overview and usage context.
+- `README.md` provides overview and usage context.
 - `operator/` contains the Rust kube-rs operator and CRD API crates.
 - `operator/crates/athena-console/` contains the Rust/Iced console for watching and comparing Athena resources through local kubeconfig.
 - `nix/athena/` and `modules/k8s/` define Nix-rendered Helm/Kubernetes deployment artifacts.
 - `examples/` contains example Athena custom resources and canaries.
 - `experiments/` contains stateless train/eval workload code invoked by Kubernetes-managed `Experiment` or `BenchmarkRun` Jobs. It must not own scheduling, durable state, status, promotion decisions, benchmark comparison, or orchestration.
-- `workers/orchestrator/` and `workers/gpu/` are legacy paths. Leave them untouched unless explicitly removing, quarantining, or migrating behavior into Athena Kubernetes-native components.
 
 ## Implementation Rules
 
@@ -146,7 +144,6 @@ Do not add or preserve durable product behavior in ad-hoc scripts, local files, 
 - For Nix/deployment changes, run `nix fmt` and relevant `nix build` checks when practical.
 - For console changes, run the relevant Rust/Iced checks when present and practical.
 - For Python workload/runner code under `experiments/`, run local smoke tests only when the task explicitly concerns workload behavior. Do not use local runs to create or infer authoritative `Experiment`, `BenchmarkRun`, `ResearchCampaign`, or metric status.
-- Do not modify legacy worker code under `workers/orchestrator/` or `workers/gpu/` unless explicitly asked to remove, quarantine, or migrate it into Athena Kubernetes-native components. If such work touches legacy code, run the smallest relevant checks and report pre-existing failures separately.
 - Do not fix unrelated failures; report them clearly.
 
 ## Generated / Deployment Artifacts

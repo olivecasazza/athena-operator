@@ -24,7 +24,7 @@ Acceptance criteria:
 
 ## 2. Current repository context
 
-Repository: `/home/olive/Repositories/n-autoresearch`
+Repository: `/home/olive/Repositories/athena-operator`
 
 Relevant code:
 
@@ -1211,7 +1211,7 @@ Use the exact commands available in the repo; if a command does not exist, add o
 Expected baseline checks:
 
 ```bash
-cd /home/olive/Repositories/n-autoresearch
+cd /home/olive/Repositories/athena-operator
 cargo test --workspace
 cargo fmt --check
 ```
@@ -1221,7 +1221,7 @@ If the operator has a CRD generation command, run it and fail the task if genera
 For console changes:
 
 ```bash
-cd /home/olive/Repositories/n-autoresearch/operator
+cd /home/olive/Repositories/athena-operator/operator
 cargo check -p athena-console
 nix build .#athena-console
 ```

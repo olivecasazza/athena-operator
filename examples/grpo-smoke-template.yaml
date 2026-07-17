@@ -51,7 +51,7 @@ spec:
   runtimeProfileRef: gpu-small-grpo-smoke
   source:
     git:
-      url: "https://github.com/olivecasazza/n-autoresearch"
+      url: "https://github.com/olivecasazza/athena-operator"
       ref: "main"
   objective:
     metric: "reward_mean"

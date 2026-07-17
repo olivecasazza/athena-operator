@@ -4,6 +4,7 @@ __pycache__/
 dist/
 .venv/
 node_modules/
+result*
 *.log
 run-*.log
 results.tsv
@@ -11,7 +12,6 @@ data/
 target/
 .uv/
 uv.lock
-workers/orchestrator/dist/
 package-lock.json
 .athena-workflow/
 *.tsbuildinfo
@@ -29,3 +29,4 @@ hooks/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+.claude/

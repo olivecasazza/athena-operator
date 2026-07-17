@@ -1,7 +1,7 @@
 [project]
-name = "n-autoresearch"
+name = "athena-experiments"
 version = "0.1.0"
-description = "Autonomous ML research on iii-engine"
+description = "Stateless train/eval workload code for Athena Kubernetes Jobs"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,7 +15,6 @@ dependencies = [
     "tiktoken>=0.11.0",
     "torch==2.9.1",
     "torchvision==0.24.1",
-    "iii-sdk>=0.11.0",
     "opentelemetry-api>=1.42.0",
     "opentelemetry-sdk>=1.42.0",
     "opentelemetry-exporter-otlp>=1.42.0",

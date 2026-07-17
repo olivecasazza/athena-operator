@@ -97,7 +97,7 @@ spec:
   runtimeProfileRef: hp-8gb-canary
   source:
     git:
-      url: "https://github.com/olivecasazza/n-autoresearch"
+      url: "https://github.com/olivecasazza/athena-operator"
       ref: "main"
   objective:
     metric: "val_bpb"
