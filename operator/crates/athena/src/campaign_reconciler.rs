@@ -67,6 +67,15 @@ const MANAGER: &str = "athena-campaign";
 const CAMPAIGN_LABEL: &str = "athena.nixlab.io/campaign";
 /// Label marking a campaign's canary gate experiment.
 const CANARY_LABEL: &str = "athena.nixlab.io/canary";
+/// Prefix stamped on a control-slot experiment's hypothesis. Control runs are
+/// re-measurements of the incumbent, not search points, so they must be
+/// identifiable when computing the seed-noise estimate.
+const CONTROL_HYPOTHESIS_PREFIX: &str = "control: re-measure incumbent";
+
+/// True for an experiment generated as a control-slot re-measurement.
+fn is_control_hypothesis(h: &str) -> bool {
+    h.starts_with(CONTROL_HYPOTHESIS_PREFIX)
+}
 /// Multiplicative step for the hill-climb perturbation of a numeric parameter.
 const STEP: f64 = 0.5;
 /// Default PBT perturbation factor: explore at 1.2x up / ~0.83x (1/1.2) down.
@@ -163,7 +172,63 @@ pub async fn reconcile(
     // produced under the same template/metric, so it is comparable in kind —
     // just cheaper, so a real experiment should overtake it quickly. Excluding
     // it would also leave hill-climb/PBT with no seed right after the gate opens.
-    let best = pick_best(&completed, objective);
+    let best_observed = pick_best(&completed, objective);
+
+    // Control-slot runs: experiments whose hypothesis marks them as an
+    // incumbent re-measurement rather than a search point. Repeated scores of
+    // the SAME config are the only unconfounded seed-noise sample available.
+    let control_scores: Vec<f64> = completed
+        .iter()
+        .filter(|e| is_control_hypothesis(&e.spec.hypothesis))
+        .filter_map(|e| objective_value(e, &objective.metric))
+        .collect();
+    let sigma = seed_noise_sigma(&control_scores);
+    let incumbent_remeasured = control_scores.last().copied();
+
+    // The incumbent only changes when the challenger clears the measured noise
+    // floor. Below that, `best_observed` is indistinguishable from a lucky seed,
+    // and adopting it would warm-start the entire next generation from noise.
+    // The previously-adopted parent, carried in status across reconciles. This
+    // is what "holding the incumbent" means: the loop keeps warm-starting from
+    // the same config until something genuinely clears the noise floor.
+    let prior_incumbent: Option<(String, f64)> = campaign
+        .status
+        .as_ref()
+        .and_then(|s| s.best_experiment.clone())
+        .and_then(|n| {
+            completed
+                .iter()
+                .find(|e| e.name_any() == n)
+                .and_then(|e| objective_value(e, &objective.metric))
+                .map(|v| (n, v))
+        });
+
+    let best = match (&best_observed, &prior_incumbent) {
+        (Some((bn, bv)), Some((inc_name, inc_v))) if bn != inc_name => {
+            // Prefer the control slot's fresh re-measurement of the incumbent
+            // over its original (max-selected, upward-biased) score.
+            let baseline = incumbent_remeasured.unwrap_or(*inc_v);
+            if beats_incumbent(*bv, baseline, sigma, &objective.goal) {
+                info!(
+                    challenger = %bn, challenger_score = bv, incumbent = %inc_name,
+                    incumbent_score = baseline, sigma = ?sigma,
+                    "incumbent displaced: challenger cleared the seed-noise floor"
+                );
+                best_observed.clone()
+            } else {
+                info!(
+                    challenger = %bn, challenger_score = bv, incumbent = %inc_name,
+                    incumbent_score = baseline, sigma = ?sigma,
+                    "holding incumbent: challenger is within seed noise, so its lead \
+                     is not distinguishable from a lucky seed"
+                );
+                prior_incumbent.clone()
+            }
+        }
+        // No prior incumbent (first generation) — adopt the observed best so the
+        // loop has something to warm-start from.
+        _ => best_observed.clone(),
+    };
 
     // 3b. Decision. When a benchmark suite is configured, the campaign does NOT
     // stamp Keep/Discard from the raw training objective — instead it ensures a
@@ -354,8 +419,52 @@ pub async fn reconcile(
                 .iter()
                 .map(|e| science_key(&e.spec.parameters))
                 .collect();
+            // CONTROL SLOT. One slot per generation re-runs the incumbent's
+            // EXACT config on a fresh seed instead of exploring. It costs a
+            // third of a population-3 budget and pays for itself three ways:
+            // it supplies the live sigma that calibrates `beats_incumbent`
+            // (without it every threshold is uncalibrated), it re-measures the
+            // incumbent unbiasedly so progress can be reported from something
+            // that is allowed to go DOWN, and the gap between it and
+            // `best_objective` is the maximization bias made visible.
+            //
+            // 2 candidates + 1 control beats 3 candidates: maximization bias
+            // grows with the number of arms, so the third arm actively costs
+            // selection honesty on top of buying no measurement.
+            let control_idx = if is_pbt && best_ctx.is_some() && want.min(budget_left) > 0 {
+                Some(total)
+            } else {
+                None
+            };
+
             for i in 0..want.min(budget_left) {
                 let idx = total + i;
+                if control_idx == Some(idx) {
+                    // Replicate of the incumbent: same params, no perturbation,
+                    // and deliberately exempt from the science_key dedup below —
+                    // a duplicate point is the entire purpose of a control.
+                    let (bn, bp) = best_ctx.expect("control slot requires an incumbent");
+                    let mut params = bp.clone();
+                    params.insert("experimentIteration".into(), json!(idx));
+                    params.insert("parentExperimentId".into(), json!(bn));
+                    let exp = build_experiment(
+                        &campaign,
+                        &name,
+                        &ns,
+                        idx,
+                        params,
+                        format!(
+                            "{CONTROL_HYPOTHESIS_PREFIX} {bn} on a fresh seed \
+                             (calibrates sigma; not a search point)"
+                        ),
+                        pbt_checkpoint_policy(best_exp),
+                    );
+                    match experiments.create(&PostParams::default(), &exp).await {
+                        Ok(_) => created += 1,
+                        Err(e) => warn!(%e, "failed to create control experiment"),
+                    }
+                    continue;
+                }
                 let generate = |salt: u32| {
                     if is_pbt {
                         let (params, hypothesis) =
@@ -426,7 +535,12 @@ pub async fn reconcile(
         "failedExperiments": failed,
         "totalExperiments": total + new,
         "bestExperiment": best.as_ref().map(|b| b.0.clone()),
-        "bestObjective": best.as_ref().map(|b| b.1),
+        // NOTE: max over N noisy draws — monotone by construction, NOT progress.
+        // `incumbentRemeasured` is the honest signal; it is allowed to go down.
+        "bestObjective": best_observed.as_ref().map(|b| b.1),
+        "incumbentRemeasured": incumbent_remeasured,
+        "seedNoiseSigma": sigma,
+        "controlRuns": control_scores.len() as u32,
         "phase": phase,
         "observedGeneration": campaign.metadata.generation,
         "controllerVersion": env!("CARGO_PKG_VERSION"),
@@ -464,6 +578,14 @@ fn value_as_f64(v: &Value) -> Option<f64> {
 }
 
 /// Best (name, objective value) among succeeded experiments per the goal.
+///
+/// Raw argmax. This is a BIASED estimator of the best config: E[max of N noisy
+/// draws] >= max of the true means, and the gap grows with N, so on its own it
+/// both overstates the winner and can pick a worse config. With this stack's
+/// measured seed noise (sd ~740 on mean ~4026 from three byte-identical runs) a
+/// 3% true effect is selected correctly only Phi(0.115) ~ 55% of the time — a
+/// coin flip. Callers must gate it through [`select_parent`], which requires a
+/// margin over the incumbent before acting on it.
 fn pick_best(completed: &[&Experiment], objective: &ObjectiveSpec) -> Option<(String, f64)> {
     completed
         .iter()
@@ -475,6 +597,56 @@ fn pick_best(completed: &[&Experiment], objective: &ObjectiveSpec) -> Option<(St
             };
             if better { b } else { a }
         })
+}
+
+/// Sample standard deviation of the control slot's repeated runs of the SAME
+/// config — the live seed-noise estimate that calibrates selection.
+///
+/// None below two samples (sd is undefined at n=1). Uses the n-1 denominator:
+/// at these sample sizes the population form is biased low, and a low sigma
+/// makes the selection gate too eager, which is the failure direction we care
+/// about.
+fn seed_noise_sigma(control_scores: &[f64]) -> Option<f64> {
+    if control_scores.len() < 2 {
+        return None;
+    }
+    let n = control_scores.len() as f64;
+    let mean = control_scores.iter().sum::<f64>() / n;
+    let var = control_scores
+        .iter()
+        .map(|v| (v - mean).powi(2))
+        .sum::<f64>()
+        / (n - 1.0);
+    let sd = var.sqrt();
+    sd.is_finite().then_some(sd)
+}
+
+/// Whether a challenger should displace the incumbent parent.
+///
+/// The no-change default: keep the incumbent unless the challenger beats it by
+/// more than one sigma of measured seed noise. Without this the loop hill-climbs
+/// on whichever seed got lucky and then warm-starts the whole next generation
+/// from it.
+///
+/// With the current effect size (epsilon ~0.2) this will rarely fire. That is
+/// the honest outcome, not a bug — it means the perturbation is too small to
+/// resolve, and the fix is a wider perturbation (required seeds scale ~1/eps^2),
+/// not a looser threshold.
+///
+/// Until the control slot has produced two runs there is no sigma, and we hold
+/// the incumbent rather than guess a threshold: acting on an uncalibrated
+/// comparison is exactly the behaviour being removed.
+fn beats_incumbent(
+    challenger: f64,
+    incumbent: f64,
+    sigma: Option<f64>,
+    goal: &ObjectiveGoal,
+) -> bool {
+    let Some(sigma) = sigma else { return false };
+    match goal {
+        ObjectiveGoal::Maximize => challenger > incumbent + sigma,
+        ObjectiveGoal::Minimize => challenger < incumbent - sigma,
+    }
 }
 
 /// Numeric parameters from a base map, sorted by key for deterministic cycling.
@@ -1685,6 +1857,50 @@ mod tests {
             "{:?}",
             params2.get("lr")
         );
+    }
+
+    #[test]
+    fn sigma_needs_two_samples_and_uses_the_n_minus_1_denominator() {
+        assert_eq!(seed_noise_sigma(&[]), None);
+        assert_eq!(seed_noise_sigma(&[4000.0]), None, "sd undefined at n=1");
+        // The real measurement from three byte-identical spot runs.
+        let s = seed_noise_sigma(&[4838.16, 3849.36, 3390.02]).unwrap();
+        assert!((s - 740.0).abs() < 15.0, "expected sample sd ~740, got {s}");
+        // Population form would give ~604; the n-1 form must be LARGER, because a
+        // low sigma makes the selection gate too eager.
+        assert!(s > 604.0, "n-1 denominator must not understate the noise");
+    }
+
+    #[test]
+    fn a_challenger_inside_the_noise_floor_does_not_displace_the_incumbent() {
+        let sigma = Some(740.0);
+        // +400 on ~4000 is a 10% lead and still pure noise at this sigma.
+        assert!(!beats_incumbent(4400.0, 4000.0, sigma, &ObjectiveGoal::Maximize));
+        // Clearing one sigma does displace.
+        assert!(beats_incumbent(4800.0, 4000.0, sigma, &ObjectiveGoal::Maximize));
+        // Minimize direction is mirrored.
+        assert!(beats_incumbent(3200.0, 4000.0, sigma, &ObjectiveGoal::Minimize));
+        assert!(!beats_incumbent(3600.0, 4000.0, sigma, &ObjectiveGoal::Minimize));
+    }
+
+    #[test]
+    fn without_a_calibrated_sigma_the_incumbent_is_never_displaced() {
+        // No control runs yet -> no sigma -> hold. Acting on an uncalibrated
+        // comparison is exactly the behaviour this rule removes, so an absent
+        // sigma must fail CLOSED, not fall back to argmax.
+        assert!(!beats_incumbent(9999.0, 1.0, None, &ObjectiveGoal::Maximize));
+        assert!(!beats_incumbent(0.0, 9999.0, None, &ObjectiveGoal::Minimize));
+    }
+
+    #[test]
+    fn control_hypotheses_are_distinguishable_from_search_points() {
+        assert!(is_control_hypothesis(
+            "control: re-measure incumbent foo-000 on a fresh seed"
+        ));
+        assert!(!is_control_hypothesis(
+            "pbt exploit+explore from foo-000: gait x2.0000"
+        ));
+        assert!(!is_control_hypothesis("pbt cold start: baseline"));
     }
 
     #[test]
