@@ -263,9 +263,30 @@ pub struct ResearchCampaignStatus {
     #[serde(default)]
     pub total_experiments: u32,
     /// Best objective value observed across succeeded experiments (per the
-    /// template objective goal). Lets you watch the loop improve over iterations.
+    /// template objective goal).
+    ///
+    /// WARNING: this is the max over an increasing number of noisy draws, so it
+    /// rises with experiment count even under zero true improvement. It is
+    /// monotone BY CONSTRUCTION and is therefore not evidence of progress.
+    /// Read `incumbent_remeasured` instead. See RQ5 in
+    /// docs/selection-under-noise.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_objective: Option<f64>,
+    /// Fresh-seed score of the current incumbent, from the per-generation
+    /// control slot. Unlike `best_objective` this is an unbiased re-measurement
+    /// and CAN go down, which is what makes it honest — report progress from
+    /// this. Systematic divergence between the two IS the maximization bias,
+    /// made directly visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incumbent_remeasured: Option<f64>,
+    /// Live seed-noise estimate (sample sd) from repeated control-slot runs of
+    /// the same incumbent config. Calibrates the selection threshold; None
+    /// until at least two control runs have completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_noise_sigma: Option<f64>,
+    /// Control-slot runs completed so far (the sample behind `seed_noise_sigma`).
+    #[serde(default)]
+    pub control_runs: u32,
     /// Loop phase: Running while generating/evaluating, Completed at budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,

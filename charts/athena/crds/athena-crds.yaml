@@ -915,7 +915,7 @@
                     "type": "string"
                   },
                   "bestObjective": {
-                    "description": "Best objective value observed across succeeded experiments (per the template objective goal). Lets you watch the loop improve over iterations.",
+                    "description": "Best objective value observed across succeeded experiments (per the template objective goal).\n\nWARNING: this is the max over an increasing number of noisy draws, so it rises with experiment count even under zero true improvement. It is monotone BY CONSTRUCTION and is therefore not evidence of progress. Read `incumbent_remeasured` instead. See RQ5 in docs/selection-under-noise.md.",
                     "format": "double",
                     "nullable": true,
                     "type": "number"
@@ -930,6 +930,13 @@
                     "nullable": true,
                     "type": "string"
                   },
+                  "controlRuns": {
+                    "default": 0,
+                    "description": "Control-slot runs completed so far (the sample behind `seed_noise_sigma`).",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
                   "controllerVersion": {
                     "nullable": true,
                     "type": "string"
@@ -938,6 +945,12 @@
                     "format": "uint32",
                     "minimum": 0.0,
                     "type": "integer"
+                  },
+                  "incumbentRemeasured": {
+                    "description": "Fresh-seed score of the current incumbent, from the per-generation control slot. Unlike `best_objective` this is an unbiased re-measurement and CAN go down, which is what makes it honest — report progress from this. Systematic divergence between the two IS the maximization bias, made directly visible.",
+                    "format": "double",
+                    "nullable": true,
+                    "type": "number"
                   },
                   "observedGeneration": {
                     "format": "int64",
@@ -953,6 +966,12 @@
                     "format": "uint32",
                     "minimum": 0.0,
                     "type": "integer"
+                  },
+                  "seedNoiseSigma": {
+                    "description": "Live seed-noise estimate (sample sd) from repeated control-slot runs of the same incumbent config. Calibrates the selection threshold; None until at least two control runs have completed.",
+                    "format": "double",
+                    "nullable": true,
+                    "type": "number"
                   },
                   "succeededExperiments": {
                     "format": "uint32",
