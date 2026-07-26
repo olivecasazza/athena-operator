@@ -587,7 +587,43 @@ fn pbt_experiment(
     }
 
     let hypothesis = match best {
-        None => "pbt cold start: no successful parent yet".to_string(),
+        // Cold start: there is no parent to exploit, but returning the template
+        // defaults unchanged makes the whole first generation N identical runs
+        // — populationSize GPUs spending a full generation to sample one point.
+        // Real PBT seeds a SPREAD. Child 0 stays the exact baseline (so the
+        // campaign always has an unperturbed reference to compare against);
+        // children 1..N fan out from it, each stepping a different subset of
+        // params, reusing the same perturb_factor as the explore step.
+        None if idx == 0 => "pbt cold start: baseline (template defaults)".to_string(),
+        None => {
+            let down = 1.0 / perturb_factor;
+            let keys = numeric_params(&params);
+            let mut spread = Vec::new();
+            for (j, key) in keys.iter().enumerate() {
+                // Vary which params move and in which direction per child, so
+                // children 1..N are distinct from the baseline AND each other.
+                if (idx as usize + j) % 2 == 0 {
+                    continue;
+                }
+                if let Some(cur) = params.get(key).and_then(value_as_f64) {
+                    let up = ((idx as usize / 2 + j) % 2 == 0) ^ ((salt >> j) & 1 == 1);
+                    let factor = if up { perturb_factor } else { down };
+                    let next = cur * factor;
+                    params.insert(
+                        key.clone(),
+                        serde_json::Number::from_f64(next)
+                            .map(Value::Number)
+                            .unwrap_or(Value::Null),
+                    );
+                    spread.push(format!("{key} x{factor:.4}"));
+                }
+            }
+            if spread.is_empty() {
+                "pbt cold start: no numeric params to spread".to_string()
+            } else {
+                format!("pbt cold start: seed spread from defaults: {}", spread.join(", "))
+            }
+        }
         Some((best_name, best_params)) => {
             // Exploit: inherit the best's hyperparameters.
             for (k, v) in best_params.iter() {
@@ -1623,10 +1659,31 @@ mod tests {
     fn pbt_cold_start_when_no_best() {
         let t = template_with_default_lr(0.1);
         let (params, hyp) = pbt_experiment(&t, None, 1.2, 0, 0);
+        // Child 0 is the untouched baseline reference.
         assert_eq!(params.get("lr"), Some(&json!(0.1)));
         assert_eq!(params.get("parentExperimentId"), Some(&Value::Null));
         assert!(hyp.contains("cold start"), "{hyp}");
         assert!(pbt_checkpoint_policy(None).is_none());
+    }
+
+    #[test]
+    fn pbt_cold_start_spreads_the_population_instead_of_cloning_defaults() {
+        // The whole point of populationSize is to sample >1 point per
+        // generation. Before this, every cold-start child came back with the
+        // template defaults, so generation 1 burned N GPUs on one config.
+        let t = template_with_default_lr(0.1);
+        let seeds: Vec<_> = (0..3)
+            .map(|i| pbt_experiment(&t, None, 1.2, i, 0).0)
+            .collect();
+        assert_eq!(seeds[0].get("lr"), Some(&json!(0.1)), "child 0 is baseline");
+        let distinct: std::collections::BTreeSet<String> = seeds
+            .iter()
+            .map(|p| format!("{:?}", p.get("lr")))
+            .collect();
+        assert!(
+            distinct.len() > 1,
+            "cold-start population must not be N clones, got {distinct:?}"
+        );
     }
 
     #[test]
