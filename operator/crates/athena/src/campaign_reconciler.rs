@@ -182,7 +182,10 @@ pub async fn reconcile(
         .filter(|e| is_control_hypothesis(&e.spec.hypothesis))
         .filter_map(|e| objective_value(e, &objective.metric))
         .collect();
+    // Reported for observability; the GATE uses the upper confidence limit so a
+    // poorly-determined sigma cannot make the threshold falsely tight.
     let sigma = seed_noise_sigma(&control_scores);
+    let sigma_gate = sigma_upper_bound(&control_scores);
     let incumbent_remeasured = control_scores.last().copied();
 
     // The incumbent only changes when the challenger clears the measured noise
@@ -208,7 +211,7 @@ pub async fn reconcile(
             // Prefer the control slot's fresh re-measurement of the incumbent
             // over its original (max-selected, upward-biased) score.
             let baseline = incumbent_remeasured.unwrap_or(*inc_v);
-            if beats_incumbent(*bv, baseline, sigma, &objective.goal) {
+            if beats_incumbent(*bv, baseline, sigma_gate, &objective.goal) {
                 info!(
                     challenger = %bn, challenger_score = bv, incumbent = %inc_name,
                     incumbent_score = baseline, sigma = ?sigma,
@@ -218,7 +221,7 @@ pub async fn reconcile(
             } else {
                 info!(
                     challenger = %bn, challenger_score = bv, incumbent = %inc_name,
-                    incumbent_score = baseline, sigma = ?sigma,
+                    incumbent_score = baseline, sigma = ?sigma, sigma_gate = ?sigma_gate,
                     "holding incumbent: challenger is within seed noise, so its lead \
                      is not distinguishable from a lucky seed"
                 );
@@ -619,6 +622,50 @@ fn seed_noise_sigma(control_scores: &[f64]) -> Option<f64> {
         / (n - 1.0);
     let sd = var.sqrt();
     sd.is_finite().then_some(sd)
+}
+
+/// Minimum control runs before the selection gate may fire at all.
+///
+/// At n=2 the sd has 1 degree of freedom and its 95% chi-square interval spans
+/// more than an order of magnitude — a threshold built on it is meaningless.
+/// Below this the gate holds the incumbent rather than acting on a number it
+/// cannot trust.
+const MIN_CONTROL_RUNS: usize = 3;
+
+/// One-sided 80% upper confidence limit on sigma: `s * sqrt(df / chi2_{0.20,df})`.
+///
+/// A sample sd from a handful of runs is biased LOW and wildly scattered (the
+/// measured s=740 from n=3 carries a 95% interval of roughly [385, 4651]).
+/// Using the point estimate as a selection threshold is therefore
+/// over-confident exactly when the estimate is worst. Taking the upper limit
+/// makes the gate strict while sigma is poorly determined and lets it relax
+/// naturally as control runs accumulate — fail closed under uncertainty, the
+/// same principle as requiring a sigma at all.
+///
+/// Factors are chi-square quantiles for df = n-1 (exact for df<=5; the tail
+/// uses Wilson-Hilferty, which agrees to <1% there). df=1 is deliberately
+/// absent: MIN_CONTROL_RUNS makes it unreachable, and W-H is poor at df=1.
+fn sigma_upper_bound(control_scores: &[f64]) -> Option<f64> {
+    if control_scores.len() < MIN_CONTROL_RUNS {
+        return None;
+    }
+    let s = seed_noise_sigma(control_scores)?;
+    const FACTORS: [f64; 8] = [
+        2.1169, // n=3
+        1.7276, // n=4
+        1.5576, // n=5
+        1.4610, // n=6
+        1.3949, // n=7
+        1.3509, // n=8
+        1.3178, // n=9
+        1.2918, // n=10
+    ];
+    let idx = control_scores.len() - MIN_CONTROL_RUNS;
+    // Beyond the table the factor keeps shrinking toward 1; holding the last
+    // tabulated value is conservative (slightly wider than truth), which is the
+    // safe direction for a gate.
+    let factor = FACTORS.get(idx).copied().unwrap_or(1.2918);
+    Some(s * factor)
 }
 
 /// Whether a challenger should displace the incumbent parent.
@@ -1869,6 +1916,30 @@ mod tests {
         // Population form would give ~604; the n-1 form must be LARGER, because a
         // low sigma makes the selection gate too eager.
         assert!(s > 604.0, "n-1 denominator must not understate the noise");
+    }
+
+    #[test]
+    fn sigma_gate_is_the_upper_confidence_limit_not_the_point_estimate() {
+        // n=2: below MIN_CONTROL_RUNS -> no gate at all. A sd on 1 dof has a
+        // 95% interval spanning an order of magnitude; acting on it is worse
+        // than not acting.
+        assert_eq!(sigma_upper_bound(&[4000.0, 4500.0]), None);
+
+        // The real n=3 measurement. Point estimate ~740; the gate must use the
+        // inflated bound so a badly-determined sigma cannot make it too eager.
+        let scores = [4838.16, 3849.36, 3390.02];
+        let point = seed_noise_sigma(&scores).unwrap();
+        let gate = sigma_upper_bound(&scores).unwrap();
+        assert!(gate > point, "gate {gate} must exceed point estimate {point}");
+        assert!(
+            (gate / point - 2.1169).abs() < 1e-3,
+            "n=3 factor should be the chi-square 80% one-sided limit"
+        );
+
+        // More control runs -> the bound tightens toward the point estimate.
+        let many = [4838.16, 3849.36, 3390.02, 4100.0, 4300.0, 3950.0];
+        let ratio = sigma_upper_bound(&many).unwrap() / seed_noise_sigma(&many).unwrap();
+        assert!(ratio < 1.5, "factor must shrink as n grows, got {ratio}");
     }
 
     #[test]
