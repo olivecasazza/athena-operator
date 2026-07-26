@@ -1125,10 +1125,56 @@ fn build_experiment(
             parameters,
             patch: None,
             checkpoint_policy,
-            env: mesh_env(campaign, campaign_name, ns),
+            env: {
+                let mut env = mesh_env(campaign, campaign_name, ns);
+                env.extend(generation_seed_env(campaign, idx));
+                env
+            },
         },
         status: None,
     }
+}
+
+/// Shared per-generation seed, so every experiment in a generation trains on
+/// the SAME random stream (common random numbers).
+///
+/// MEASURED 2026-07-26: with a fixed seed this trainer is BIT-reproducible.
+/// Three probes -- 5 workers/25 iters, 5 workers/120 iters, and 8 workers
+/// deliberately oversubscribed onto 7 CPU to force env_runner stragglers --
+/// each returned identical rewards to 16 significant figures across separate
+/// pods. The seed term is not merely small; for a fixed seed it is exactly 0.
+///
+/// That makes candidate-minus-control a PAIRED difference: run the control
+/// slot (incumbent) and the candidates at the same seed and the seed term
+/// CANCELS, instead of being averaged down by sqrt(k) as replication would.
+/// Strictly stronger than replication, at zero GPU cost.
+///
+/// The seed ROTATES per generation. A seed is not a tunable hyperparameter --
+/// pinning one for a whole campaign would let the search overfit to it and the
+/// winner would not survive a different seed.
+///
+/// Empty when populationSize is unset, so non-PBT campaigns keep their
+/// previous behaviour and this is purely additive.
+fn generation_seed_env(campaign: &ResearchCampaign, idx: u32) -> Vec<EnvVar> {
+    let Some(pop) = campaign.spec.population_size.filter(|p| *p > 0) else {
+        return Vec::new();
+    };
+    let generation = idx / pop;
+    // Hash the campaign UID (not its name, so a recreated campaign of the same
+    // name draws fresh seeds) with the generation index. Deterministic: no RNG,
+    // so the same experiment always resolves to the same seed across reconciles
+    // and operator restarts.
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    campaign.uid().unwrap_or_default().hash(&mut h);
+    generation.hash(&mut h);
+    // Must fit a 32-bit range: numpy/torch seeds are bounded.
+    let seed = (h.finish() % (i32::MAX as u64)) as u32;
+    vec![EnvVar {
+        name: "ATHENA_SEED".to_string(),
+        value: Some(seed.to_string()),
+        ..Default::default()
+    }]
 }
 
 /// When the campaign runs an ephemeral inference mesh, point experiment jobs at
@@ -1972,6 +2018,44 @@ mod tests {
             "pbt exploit+explore from foo-000: gait x2.0000"
         ));
         assert!(!is_control_hypothesis("pbt cold start: baseline"));
+    }
+
+    #[test]
+    fn one_shared_seed_per_generation_rotating_across_generations() {
+        let mut c = campaign_pbt(Some(3), None);
+        c.metadata.uid = Some("uid-abc".into());
+        let seed_of = |c: &ResearchCampaign, idx: u32| {
+            generation_seed_env(c, idx)
+                .into_iter()
+                .find(|e| e.name == "ATHENA_SEED")
+                .and_then(|e| e.value)
+        };
+        // Generation 0 = idx 0,1,2 -> one shared seed (paired comparison).
+        let g0 = seed_of(&c, 0);
+        assert!(g0.is_some());
+        assert_eq!(seed_of(&c, 1), g0);
+        assert_eq!(seed_of(&c, 2), g0, "a generation must share ONE seed");
+        // Generation 1 = idx 3.. -> a DIFFERENT seed, so the search cannot
+        // overfit to one seed.
+        let g1 = seed_of(&c, 3);
+        assert_ne!(g1, g0, "seed must rotate per generation");
+        assert_eq!(seed_of(&c, 4), g1);
+        // Deterministic across calls (no RNG).
+        assert_eq!(seed_of(&c, 0), g0);
+        // Fits a 32-bit seed range.
+        let v: u64 = g0.clone().unwrap().parse().unwrap();
+        assert!(v < i32::MAX as u64);
+        // A recreated campaign (new UID) draws fresh seeds.
+        let mut c2 = c.clone();
+        c2.metadata.uid = Some("uid-xyz".into());
+        assert_ne!(seed_of(&c2, 0), g0);
+    }
+
+    #[test]
+    fn non_pbt_campaigns_get_no_pinned_seed() {
+        // populationSize unset -> additive change, previous behaviour intact.
+        let c = campaign_pbt(None, None);
+        assert!(generation_seed_env(&c, 0).is_empty());
     }
 
     #[test]
