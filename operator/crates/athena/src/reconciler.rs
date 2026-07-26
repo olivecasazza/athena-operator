@@ -1198,6 +1198,13 @@ fn build_job(
             // Small >0 budget so a pod lost to preemption / node scale-down is
             // recreated instead of failing the whole experiment.
             backoff_limit: Some(3),
+            // Wall-clock cap so a *hung* (non-crashing) trainer can't squat a GPU
+            // forever — backoff_limit only catches crashes, not freezes. A real
+            // RLlib freeze once burned a node for 32h at 0% progress. 8h matches
+            // the sky ttl default; any single on-prem experiment (15M timesteps
+            // ~2-5h) finishes well under it. ponytail: blanket cap; make it a
+            // RuntimeProfile field if a legit run ever needs >8h.
+            active_deadline_seconds: Some(8 * 3600),
             // Kueue requires managed Jobs to start suspended; it unsuspends on
             // admission. Only when a queue is set — otherwise schedule directly.
             suspend: profile.spec.scheduling.queue_name.as_ref().map(|_| true),
@@ -1668,6 +1675,38 @@ mod tests {
         )
         .expect_err("no command must fail");
         assert!(matches!(err, Error::SkyCommandRequired(_)));
+    }
+
+    fn onprem_profile() -> RuntimeProfile {
+        let spec: RuntimeProfileSpec = serde_json::from_value(
+            athena_api::defaults::apply_runtime_profile_defaults(json!({
+                "runtime": { "type": "pytorch", "mode": "batchJob" },
+                "image": "ghcr.io/example/trainer:v1",
+                "command": ["python", "train.py"],
+                "scheduling": { "queueName": "athena-gpu" },
+            })),
+        )
+        .expect("profile spec deserializes");
+        RuntimeProfile::new("onprem", spec)
+    }
+
+    // On-prem batchJobs must carry a wall-clock deadline so a hung (non-crashing)
+    // trainer can't squat a GPU indefinitely — backoff_limit only catches crashes.
+    #[test]
+    fn onprem_job_has_hard_deadline() {
+        let experiment = test_experiment("recover-1");
+        let job = build_job(
+            &experiment,
+            &onprem_profile(),
+            "exp-recover-1",
+            "/workspace/runs/camp/recover-1",
+            "/workspace/runs/camp/recover-1/metrics.json",
+            "athena",
+            "recover-1",
+        );
+        let spec = job.spec.expect("job spec present");
+        assert_eq!(spec.active_deadline_seconds, Some(8 * 3600));
+        assert_eq!(spec.backoff_limit, Some(3));
     }
 
     // Shell quoting for the run line: safe tokens pass through, everything
