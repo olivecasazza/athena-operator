@@ -1611,6 +1611,21 @@ mod tests {
         assert_eq!(cites_to_footnotes("σ rose [@a] — ok"), "σ rose [^a] — ok");
     }
 
+    /// Writes a rendered dossier to OKF_DUMP so the REAL `openknowledge
+    /// validate` can check it. Ignored by default; this exists so conformance
+    /// is verified against the actual spec implementation rather than my
+    /// reading of it.
+    #[test]
+    #[ignore]
+    fn dump_dossier_for_external_validation() {
+        let exps = vec![experiment("e", "h", 2.0, ExperimentDecision::Keep)];
+        let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
+        let mut doc = String::new();
+        render(&mut doc, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
+        let path = std::env::var("OKF_DUMP").expect("set OKF_DUMP");
+        std::fs::write(path, doc).unwrap();
+    }
+
     #[test]
     fn rendered_dossier_is_valid_okf() {
         let exps = vec![experiment("e", "h", 2.0, ExperimentDecision::Keep)];
@@ -1627,7 +1642,7 @@ mod tests {
     fn okf_check_catches_each_hard_rule() {
         // FM_REQ — no opening delimiter at all (the pre-OKF dossier shape).
         let v = okf_check("# Title\n\nbody").violations;
-        assert!(v.iter().any(|x| x.starts_with("FM_REQ")), "{v:?}");
+        assert!(v.iter().any(|x| x.starts_with("concept-frontmatter")), "{v:?}");
 
         // FM_REQ — opened but never closed.
         let v = okf_check("---\ntype: X\nstill going").violations;
@@ -1635,7 +1650,7 @@ mod tests {
 
         // TYPE_REQ — well-formed block, no type.
         let v = okf_check("---\ntitle: \"x\"\n---\nbody").violations;
-        assert!(v.iter().any(|x| x.starts_with("TYPE_REQ")), "{v:?}");
+        assert!(v.iter().any(|x| x.starts_with("concept-type")), "{v:?}");
 
         // TYPE_REQ — present but empty.
         let v = okf_check("---\ntype: \n---\nbody").violations;
@@ -2244,13 +2259,13 @@ impl OkfCheck {
 /// remains the conformance authority for CI.
 pub fn okf_check(doc: &str) -> OkfCheck {
     let mut violations = Vec::new();
-    let mut warnings = link_warnings(doc);
+    let warnings = link_warnings(doc);
 
-    // FM_REQ: the block must open on the very first line and close later.
+    // concept-frontmatter: the block must open on line 1 and close later.
     let mut lines = doc.lines();
     if lines.next().map(str::trim_end) != Some("---") {
         violations.push(
-            "FM_REQ: document does not open with a `---` frontmatter delimiter".to_string(),
+            "concept-frontmatter: concept document is missing YAML frontmatter".to_string(),
         );
         return OkfCheck { violations, warnings };
     }
@@ -2264,7 +2279,9 @@ pub fn okf_check(doc: &str) -> OkfCheck {
         fm.push(line);
     }
     if !closed {
-        violations.push("FM_REQ: frontmatter block is never closed with `---`".to_string());
+        violations.push(
+            "concept-frontmatter: frontmatter block is never closed with `---`".to_string(),
+        );
         return OkfCheck { violations, warnings };
     }
 
@@ -2274,7 +2291,7 @@ pub fn okf_check(doc: &str) -> OkfCheck {
         .iter()
         .any(|l| l.chars().any(|c| c.is_control() && c != '\t'))
     {
-        violations.push("UTF8_REQ: frontmatter contains a control character".to_string());
+        violations.push("utf8-content: frontmatter contains a control character".to_string());
     }
 
     // TYPE_REQ: a top-level `type:` key with a non-empty value.
@@ -2283,8 +2300,12 @@ pub fn okf_check(doc: &str) -> OkfCheck {
         .find(|l| l.starts_with("type:"))
         .map(|l| l.trim_start_matches("type:").trim().trim_matches('"'));
     match type_value {
-        None => violations.push("TYPE_REQ: no top-level `type` field".to_string()),
-        Some("") => violations.push("TYPE_REQ: `type` is present but empty".to_string()),
+        None => violations.push(
+            "concept-type: concept frontmatter must include non-empty type".to_string(),
+        ),
+        Some("") => violations.push(
+            "concept-type: concept frontmatter must include non-empty type (empty)".to_string(),
+        ),
         Some(_) => {}
     }
 
@@ -2340,7 +2361,9 @@ pub fn link_warnings(doc: &str) -> Vec<String> {
     dangling.sort();
     dangling.dedup();
     for d in dangling {
-        out.push(format!("LINK_TOL: citation [^{d}] has no matching source definition"));
+        out.push(format!(
+            "link-target: citation [^{d}] has no matching source definition"
+        ));
     }
 
     // Artifact pointers rendered into the document. A URI that is empty, or
@@ -2354,7 +2377,7 @@ pub fn link_warnings(doc: &str) -> Vec<String> {
             for scheme in ["gs://", "s3://", "http://", "https://", "configmap://"] {
                 if let Some(rest) = t.strip_prefix(scheme) {
                     if rest.is_empty() || rest.starts_with('/') {
-                        out.push(format!("LINK_TOL: malformed URI `{t}`"));
+                        out.push(format!("link-target: malformed URI `{t}`"));
                     }
                 }
             }
