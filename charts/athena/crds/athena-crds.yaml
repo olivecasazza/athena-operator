@@ -3040,6 +3040,35 @@
               "spec": {
                 "description": "A scientist's curation of a ResearchCampaign's results into a research-paper dataset. The **spec** is human/console-authored desired state (which experiments are included, narrative overrides, seeded hypotheses); the **status** is controller-owned (assembled dataset location, completeness).\n\nThe composed dossier is regenerable from spec at any time via `athena dossier --report <name>` or the console BFF, so v1 needs no reconciler — the durable product state is the curation spec.",
                 "properties": {
+                  "about": {
+                    "description": "What this document is ABOUT, when it is narrower than the whole campaign.\n\nA report could previously only bind to a `campaignRef`, so there was no way to attach an analysis to one experiment or to a branch of the search tree — every document was campaign-wide. Pointing `about` at an Experiment scopes the dossier to that node and its DESCENDANTS via `spec.lineage`, which is what makes \"write up this branch\" expressible.\n\n`motivation` follows the W3C Web Annotation vocabulary, so the reason a document is attached is itself typed rather than implied.",
+                    "nullable": true,
+                    "properties": {
+                      "kind": {
+                        "description": "Kind of the subject — `Experiment` or `ResearchCampaign`.",
+                        "type": "string"
+                      },
+                      "motivation": {
+                        "description": "Why a document is attached to its subject.\n\nBorrowed from the W3C Web Annotation Data Model's motivation vocabulary (`oa:describing`, `oa:assessing`, ...), so an offhand note and a formal assessment are distinguishable instead of both being \"a report\".",
+                        "enum": [
+                          "Describing",
+                          "Assessing",
+                          "Questioning",
+                          "Commenting"
+                        ],
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "name"
+                    ],
+                    "type": "object"
+                  },
                   "campaignRef": {
                     "description": "The ResearchCampaign whose experiments this report composes.",
                     "type": "string"

@@ -36,6 +36,8 @@ pub struct Curation<'a> {
     pub seeded_hypotheses: &'a [String],
     /// External citations from the report spec.
     pub references: &'a [Reference],
+    /// Narrow the document to one experiment and its descendants.
+    pub about: Option<&'a crate::research_report::ReportSubject>,
 }
 
 impl<'a> Curation<'a> {
@@ -47,6 +49,7 @@ impl<'a> Curation<'a> {
             sections: &spec.sections,
             seeded_hypotheses: &spec.seeded_hypotheses,
             references: &spec.references,
+            about: spec.about.as_ref(),
         }
     }
 }
@@ -55,16 +58,59 @@ impl<'a> Curation<'a> {
 /// drop `excluded`, preserving input order. Returns borrowed refs so callers can
 /// also compute counts. `None` = every experiment, unfiltered.
 pub fn curate<'a>(experiments: &'a [Experiment], curation: Option<&Curation>) -> Vec<&'a Experiment> {
+    // `about` narrows the document to a branch of the search tree BEFORE the
+    // explicit include/exclude lists are applied, so a scientist can still
+    // prune within the subtree they scoped to.
+    let subtree: Option<std::collections::HashSet<String>> = curation
+        .and_then(|c| c.about)
+        .filter(|a| a.kind == "Experiment")
+        .map(|a| descendants_of(experiments, &a.name));
     experiments
         .iter()
         .filter(|e| {
             let Some(c) = curation else { return true };
             let name = e.name_any();
+            if let Some(sub) = &subtree {
+                if !sub.contains(&name) {
+                    return false;
+                }
+            }
             let included = c.included.is_empty() || c.included.iter().any(|n| n == &name);
             let excluded = c.excluded.iter().any(|n| n == &name);
             included && !excluded
         })
         .collect()
+}
+
+/// `root` plus every experiment transitively derived from it via `spec.lineage`.
+///
+/// Breadth-first over the parent pointers rather than recursion, and it tracks
+/// visited names so a malformed cycle terminates instead of hanging the
+/// controller. Returns just the root when nothing derives from it.
+pub fn descendants_of(
+    experiments: &[Experiment],
+    root: &str,
+) -> std::collections::HashSet<String> {
+    let mut children_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for e in experiments {
+        if let Some(parent) = e.spec.lineage.as_ref().and_then(|l| l.parent.as_ref()) {
+            children_of
+                .entry(parent.clone())
+                .or_default()
+                .push(e.name_any());
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    let mut queue = vec![root.to_string()];
+    while let Some(n) = queue.pop() {
+        if !out.insert(n.clone()) {
+            continue; // already seen — also the cycle guard
+        }
+        if let Some(kids) = children_of.get(&n) {
+            queue.extend(kids.iter().cloned());
+        }
+    }
+    out
 }
 
 /// Assemble the dossier Markdown into `out`. Writing to a `String` is infallible;
@@ -1457,6 +1503,57 @@ mod tests {
     }
 
     #[test]
+    fn about_scopes_the_document_to_a_subtree() {
+        use crate::experiment::DerivationRelation as R;
+        use crate::research_report::{ReportMotivation, ReportSubject};
+        // c-000 -> c-001 -> c-003 ; c-002 is a separate branch off the root.
+        let exps = vec![
+            with_lineage(experiment("c-000", "root", 1.0, ExperimentDecision::Keep), R::Baseline, None, 0),
+            with_lineage(experiment("c-001", "a", 2.0, ExperimentDecision::Keep), R::Perturb, Some("c-000"), 1),
+            with_lineage(experiment("c-002", "b", 3.0, ExperimentDecision::Keep), R::Perturb, Some("c-000"), 1),
+            with_lineage(experiment("c-003", "a2", 4.0, ExperimentDecision::Keep), R::Perturb, Some("c-001"), 2),
+        ];
+        let sub = descendants_of(&exps, "c-001");
+        assert!(sub.contains("c-001") && sub.contains("c-003"), "{sub:?}");
+        assert!(!sub.contains("c-002"), "sibling branch must be excluded: {sub:?}");
+        assert!(!sub.contains("c-000"), "ancestor must be excluded: {sub:?}");
+
+        let empty: Vec<String> = vec![];
+        let sections = BTreeMap::new();
+        let refs: Vec<Reference> = vec![];
+        let subject = ReportSubject {
+            kind: "Experiment".into(),
+            name: "c-001".into(),
+            motivation: Some(ReportMotivation::Assessing),
+        };
+        let cur = Curation {
+            title: None,
+            included: &empty,
+            excluded: &empty,
+            sections: &sections,
+            seeded_hypotheses: &empty,
+            references: &refs,
+            about: Some(&subject),
+        };
+        let kept: Vec<String> = curate(&exps, Some(&cur)).iter().map(|e| e.name_any()).collect();
+        assert_eq!(kept, vec!["c-001".to_string(), "c-003".to_string()], "{kept:?}");
+    }
+
+    #[test]
+    fn descendants_terminates_on_a_malformed_cycle() {
+        use crate::experiment::DerivationRelation as R;
+        // A cycle cannot be produced by the generator (parents are always
+        // already-complete experiments), but a hand-edited object could create
+        // one, and the controller must not hang on it.
+        let exps = vec![
+            with_lineage(experiment("x", "", 1.0, ExperimentDecision::Keep), R::Perturb, Some("y"), 1),
+            with_lineage(experiment("y", "", 1.0, ExperimentDecision::Keep), R::Perturb, Some("x"), 1),
+        ];
+        let sub = descendants_of(&exps, "x");
+        assert_eq!(sub.len(), 2, "must terminate and cover both: {sub:?}");
+    }
+
+    #[test]
     fn search_tree_nests_by_lineage_and_surfaces_role_counts() {
         use crate::experiment::DerivationRelation as R;
         let exps = vec![
@@ -1561,6 +1658,7 @@ mod tests {
             sections: &sections,
             seeded_hypotheses: &seeds,
             references: &[],
+            about: None,
         };
         let mut doc = String::new();
         render(&mut doc, "camp", "research", &campaign(), &template(), &exps, &runs, Some(&cur))
@@ -1623,6 +1721,7 @@ mod tests {
             sections: &sections,
             seeded_hypotheses: &seeds,
             references: &[],
+            about: None,
         };
         let mut doc = String::new();
         render_latex(
@@ -1774,6 +1873,7 @@ mod tests {
             sections: &sections,
             seeded_hypotheses: &seeds,
             references: &refs,
+            about: None,
         };
 
         // ── Markdown checks ───────────────────────────────────────────────────

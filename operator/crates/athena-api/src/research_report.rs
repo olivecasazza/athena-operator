@@ -41,6 +41,18 @@ pub struct ResearchReportSpec {
     /// Experiments to prune from the dataset by name (applied after inclusion).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_experiments: Vec<String>,
+    /// What this document is ABOUT, when it is narrower than the whole campaign.
+    ///
+    /// A report could previously only bind to a `campaignRef`, so there was no
+    /// way to attach an analysis to one experiment or to a branch of the search
+    /// tree — every document was campaign-wide. Pointing `about` at an
+    /// Experiment scopes the dossier to that node and its DESCENDANTS via
+    /// `spec.lineage`, which is what makes "write up this branch" expressible.
+    ///
+    /// `motivation` follows the W3C Web Annotation vocabulary, so the reason a
+    /// document is attached is itself typed rather than implied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<ReportSubject>,
     /// Scientist-authored narrative, keyed by section name (e.g. `relatedWork`,
     /// `limitations`, `discussion`). Rendered as extra sections in the dossier.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -57,6 +69,34 @@ pub struct ResearchReportSpec {
     /// adversarial audit workload, never self-asserted here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<Reference>,
+}
+
+/// Why a document is attached to its subject.
+///
+/// Borrowed from the W3C Web Annotation Data Model's motivation vocabulary
+/// (`oa:describing`, `oa:assessing`, ...), so an offhand note and a formal
+/// assessment are distinguishable instead of both being "a report".
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum ReportMotivation {
+    /// Describes what the subject is / what happened.
+    Describing,
+    /// Evaluates the subject — a verdict, not a description.
+    Assessing,
+    /// Raises an open question about the subject.
+    Questioning,
+    /// Commentary that is neither a description nor a verdict.
+    Commenting,
+}
+
+/// The node a report is about, when narrower than the campaign.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportSubject {
+    /// Kind of the subject — `Experiment` or `ResearchCampaign`.
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motivation: Option<ReportMotivation>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
