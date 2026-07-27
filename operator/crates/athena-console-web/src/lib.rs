@@ -10,8 +10,10 @@
 //!   `athena-api` + `kube` to serve the [`models`] DTOs as JSON.
 //!
 //! The headline view, [`Panel::ExperimentDetail`], embeds the learning-metric
-//! Grafana dashboard via [`panel_kit::GrafanaPanel`] and the manifest editor via
-//! [`panel_kit::IdePanel`].
+//! Grafana dashboard via [`panel_kit::GrafanaDashboard`] and the manifest editor
+//! via [`panel_kit::IdePanel`]. (Its sibling [`panel_kit::GrafanaPanel`] embeds
+//! one `/d-solo/` chart — unusable here until the dashboard's panel ids are
+//! pinned in nixlab, since provisioning reassigns them.)
 
 pub mod models;
 
@@ -21,7 +23,7 @@ use models::{
     TemplateSummary,
 };
 use std::collections::{BTreeMap, HashSet};
-use panel_kit::{GrafanaPanel, IdePanel, LayoutBuilder, PanelKind, PanelWin, use_workspace};
+use panel_kit::{GrafanaDashboard, IdePanel, LayoutBuilder, PanelKind, PanelWin, use_workspace};
 use serde::{Deserialize, Serialize};
 
 /// Grafana base URL for the embedded learning-metric dashboards.
@@ -81,11 +83,12 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
     vec![
         b.at(Panel::Experiments, 16.0, 16.0, 640.0, 460.0),
         b.at(Panel::ExperimentDetail, 672.0, 16.0, 620.0, 200.0),
-        b.at(Panel::ExperimentMetrics, 672.0, 232.0, 620.0, 360.0),
-        b.at(Panel::ExperimentManifest, 672.0, 608.0, 620.0, 360.0),
+        // Tall by default: this hosts a whole Grafana dashboard, not one chart.
+        b.at(Panel::ExperimentMetrics, 672.0, 232.0, 620.0, 560.0),
+        b.at(Panel::ExperimentManifest, 672.0, 808.0, 620.0, 360.0),
         b.at(Panel::Templates, 16.0, 492.0, 640.0, 320.0),
         b.at(Panel::Campaigns, 16.0, 828.0, 640.0, 260.0),
-        b.at(Panel::Benchmarks, 672.0, 984.0, 620.0, 320.0),
+        b.at(Panel::Benchmarks, 672.0, 1184.0, 620.0, 320.0),
         b.at(Panel::RuntimeProfiles, 16.0, 1104.0, 640.0, 260.0),
         b.at(Panel::ReportCurator, 16.0, 1380.0, 640.0, 520.0),
         b.at(Panel::Reports, 16.0, 1916.0, 640.0, 260.0),
@@ -154,7 +157,11 @@ const APP_CSS: &str = "
 .admin-toggle { margin-left:auto; color:var(--pink); border-color:var(--pink); }
 .btn:hover { border-color:var(--pink); }
 .section-label { font-size:.78rem; color:var(--fg); margin:.5rem 0 .25rem; }
-.embed-block { height:340px; margin:.4rem 0; }
+/* The Grafana embed tracks the panel's height instead of a fixed 340px, so
+   resizing/maximizing the panel actually gives the dashboard more room (it is
+   ~1400px tall and scrolls internally otherwise). 100% resolves against
+   .panel-body's CONTENT box, so its padding is already excluded. */
+.embed-block { height:100%; min-height:260px; margin:0; }
 .ide-block { height:260px; margin:.4rem 0; }
 .todo { color:var(--yellow); font-size:.74rem; }
 .err { color:var(--red); font-size:.76rem; }
@@ -456,7 +463,7 @@ fn experiment_metrics_view(selected: Signal<Option<ResourceSummary>>) -> Element
 
     rsx! {
         div { class: "embed-block",
-            GrafanaPanel {
+            GrafanaDashboard {
                 base_url: GRAFANA_BASE,
                 dashboard_uid: GRAFANA_DASHBOARD_UID,
                 vars,
