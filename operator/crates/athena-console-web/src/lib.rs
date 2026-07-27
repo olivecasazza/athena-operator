@@ -231,8 +231,13 @@ const APP_CSS: &str = "
 /// App root.
 #[component]
 pub fn App() -> Element {
-    let ws = use_workspace("athena_console_web", default_layout);
-    let admin_ws = use_workspace("athena_console_web_admin", admin_layout);
+    // Versioned localStorage keys. `merge_defaults` only appends panels that
+    // don't exist yet, so a saved layout pins its old geometry forever —
+    // bump the suffix whenever default_layout/admin_layout change materially
+    // and the stale entry is simply ignored. v2: taller metrics panel + the
+    // tile_min_h that stops it collapsing to 150px when tiled.
+    let ws = use_workspace("athena_console_web_v2", default_layout);
+    let admin_ws = use_workspace("athena_console_web_admin_v2", admin_layout);
     // Admin page toggle — a separate panel set (GPU/Kueue/inference). Researchers
     // stay on the default page; access itself is gated at the ingress (Zero Trust).
     let mut admin = use_signal(|| false);
