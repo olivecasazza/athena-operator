@@ -434,15 +434,25 @@ pub async fn reconcile(
             // 2 candidates + 1 control beats 3 candidates: maximization bias
             // grows with the number of arms, so the third arm actively costs
             // selection honesty on top of buying no measurement.
-            let control_idx = if is_pbt && best_ctx.is_some() && want.min(budget_left) > 0 {
-                Some(total)
-            } else {
-                None
-            };
+            // ONE control per GENERATION, keyed off the absolute index, not the
+            // position in this reconcile batch.
+            //
+            // The previous `Some(total)` marked slot 0 of EVERY batch. Once the
+            // population saturates, slots free one at a time, so want==1 and
+            // that single slot was always the control -- spot-walk-pbt-v72
+            // generated 9 controls and ZERO candidates after generation 1, and
+            // the search did nothing while looking healthy.
+            //
+            // idx % populationSize == 0 is stateless and reconcile-count
+            // independent: exactly one control per generation of `pop`.
+            let control_pop = campaign.spec.population_size.filter(|p| *p > 0);
 
             for i in 0..want.min(budget_left) {
                 let idx = total + i;
-                if control_idx == Some(idx) {
+                let is_control_slot = is_pbt
+                    && best_ctx.is_some()
+                    && control_pop.is_some_and(|pop| idx % pop == 0);
+                if is_control_slot {
                     // Replicate of the incumbent: same params, no perturbation,
                     // and deliberately exempt from the science_key dedup below —
                     // a duplicate point is the entire purpose of a control.
@@ -2049,6 +2059,22 @@ mod tests {
         let mut c2 = c.clone();
         c2.metadata.uid = Some("uid-xyz".into());
         assert_ne!(seed_of(&c2, 0), g0);
+    }
+
+    #[test]
+    fn exactly_one_control_slot_per_generation_regardless_of_batch_shape() {
+        // The v72 bug: control was slot 0 of every reconcile BATCH. Once the
+        // population saturates, slots free one at a time (want==1), so every
+        // new experiment became a control -- 9 controls, 0 candidates, and the
+        // search silently did nothing. Keying off the absolute index makes the
+        // decision independent of how work is batched.
+        let pop = 3u32;
+        let is_control = |idx: u32| idx % pop == 0;
+        let controls: Vec<u32> = (0..12).filter(|i| is_control(*i)).collect();
+        assert_eq!(controls, vec![0, 3, 6, 9], "one per generation of 3");
+        // 12 experiments -> 4 generations -> 4 controls and 8 candidates.
+        assert_eq!(controls.len(), 4);
+        assert_eq!(12 - controls.len(), 8, "the rest must be search points");
     }
 
     #[test]
