@@ -222,7 +222,11 @@ pub fn render(
         for (heading, body) in c.sections {
             writeln!(out, "## {}", heading)?;
             writeln!(out)?;
-            writeln!(out, "{}", body)?;
+            // Authored sections cite as `[@key]` (the existing curation
+            // contract); OKF v0.2 wants `[^key]` footnotes keyed to a source
+            // id. Rewrite on render so authors keep one syntax and the emitted
+            // document is conformant.
+            writeln!(out, "{}", cites_to_footnotes(body))?;
             writeln!(out)?;
         }
     }
@@ -578,8 +582,14 @@ pub fn render(
         if !c.references.is_empty() {
             writeln!(out, "## References")?;
             writeln!(out)?;
+            // OKF v0.2 keys citations to a source `id` using markdown footnote
+            // notation, so the reference list is emitted as footnote
+            // DEFINITIONS (`[^id]: ...`). Inline `[@id]` in authored sections is
+            // rewritten to `[^id]` on render, which makes every citation
+            // resolve to one of these — and makes an unresolved one detectable
+            // by link_warnings instead of rendering as literal text.
             for r in c.references {
-                let mut line = format!("- **[{}]** {}", r.key, r.title);
+                let mut line = format!("[^{}]: {}", r.key, r.title);
                 if let Some(url) = &r.url {
                     line.push_str(&format!(" — <{}>", url));
                 }
@@ -1568,6 +1578,40 @@ mod tests {
     }
 
     #[test]
+    fn broken_links_warn_but_never_block_publication() {
+        // OKF LINK_TOL: links are warnings, so a dangling citation must NOT
+        // make the document invalid. If this ever fails we have made the gate
+        // stricter than the spec and would be refusing to publish valid OKF.
+        let doc = "---\ntype: X\n---\nbody citing [^nowhere] and gs://\n";
+        let c = okf_check(doc);
+        assert!(c.ok(), "must remain valid: {:?}", c.violations);
+        assert!(
+            c.warnings.iter().any(|w| w.contains("[^nowhere]")),
+            "dangling citation must warn: {:?}",
+            c.warnings
+        );
+        assert!(
+            c.warnings.iter().any(|w| w.contains("malformed URI")),
+            "bare scheme must warn: {:?}",
+            c.warnings
+        );
+
+        // A citation WITH a definition is silent.
+        let ok = "---\ntype: X\n---\ncites [^src]\n\n[^src]: A title — <https://example.com/p>\n";
+        assert!(okf_check(ok).warnings.is_empty(), "{:?}", okf_check(ok).warnings);
+    }
+
+    #[test]
+    fn authored_citations_are_rewritten_to_okf_footnotes() {
+        assert_eq!(cites_to_footnotes("see [@smith24] here"), "see [^smith24] here");
+        // Malformed patterns are left exactly as authored rather than mangled.
+        assert_eq!(cites_to_footnotes("[@] and [@unclosed"), "[@] and [@unclosed");
+        assert_eq!(cites_to_footnotes("no citations"), "no citations");
+        // Multibyte content survives the byte-wise scan.
+        assert_eq!(cites_to_footnotes("σ rose [@a] — ok"), "σ rose [^a] — ok");
+    }
+
+    #[test]
     fn rendered_dossier_is_valid_okf() {
         let exps = vec![experiment("e", "h", 2.0, ExperimentDecision::Keep)];
         let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
@@ -2163,7 +2207,13 @@ pub fn data_cutoff(exps: &[&Experiment]) -> Option<String> {
 /// Outcome of checking a rendered document against OKF's v0.1 hard rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OkfCheck {
+    /// Hard-rule breaches. Non-empty means the reference validator would exit
+    /// non-zero, so publication is blocked.
     pub violations: Vec<String>,
+    /// Link problems. OKF's LINK_TOL makes these WARNINGS — they must never
+    /// block publication — but the reference validator still reports them, and
+    /// a dangling artifact pointer in a research record is worth surfacing.
+    pub warnings: Vec<String>,
 }
 
 impl OkfCheck {
@@ -2194,6 +2244,7 @@ impl OkfCheck {
 /// remains the conformance authority for CI.
 pub fn okf_check(doc: &str) -> OkfCheck {
     let mut violations = Vec::new();
+    let mut warnings = link_warnings(doc);
 
     // FM_REQ: the block must open on the very first line and close later.
     let mut lines = doc.lines();
@@ -2201,7 +2252,7 @@ pub fn okf_check(doc: &str) -> OkfCheck {
         violations.push(
             "FM_REQ: document does not open with a `---` frontmatter delimiter".to_string(),
         );
-        return OkfCheck { violations };
+        return OkfCheck { violations, warnings };
     }
     let mut fm = Vec::new();
     let mut closed = false;
@@ -2214,7 +2265,7 @@ pub fn okf_check(doc: &str) -> OkfCheck {
     }
     if !closed {
         violations.push("FM_REQ: frontmatter block is never closed with `---`".to_string());
-        return OkfCheck { violations };
+        return OkfCheck { violations, warnings };
     }
 
     // UTF8_REQ: &str is UTF-8 by construction; what can still break a YAML
@@ -2237,5 +2288,110 @@ pub fn okf_check(doc: &str) -> OkfCheck {
         Some(_) => {}
     }
 
-    OkfCheck { violations }
+    OkfCheck {
+        violations,
+        warnings,
+    }
+}
+
+/// Static link integrity for a rendered dossier.
+///
+/// OKF's LINK_TOL makes broken links warnings rather than failures, so these
+/// never block publication — but the reference validator does report them, and
+/// an artifact pointer that goes nowhere is exactly the kind of rot that makes
+/// a research record untrustworthy while still "passing".
+///
+/// STATIC ONLY — deliberately no network. A reconcile loop that fetched every
+/// URL would be slow, flaky, and non-deterministic, which would defeat the
+/// content-diff that stops the controller hot-looping. Liveness is already
+/// covered where it belongs: the citation audit workload fetches sources and
+/// returns UNREACHABLE.
+pub fn link_warnings(doc: &str) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // Footnote citations must resolve to a definition. OKF v0.2 keys citations
+    // to a source `id` via `[^id]`, so a reference with no definition is a
+    // citation pointing at nothing.
+    let mut refs: Vec<String> = Vec::new();
+    let mut defs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in doc.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("[^") {
+            if let Some(end) = rest.find("]:") {
+                defs.insert(rest[..end].to_string());
+                continue;
+            }
+        }
+        let mut rest = line;
+        while let Some(i) = rest.find("[^") {
+            rest = &rest[i + 2..];
+            let Some(end) = rest.find(']') else { break };
+            // A definition line was handled above; this is a use.
+            if !rest[end..].starts_with("]:") {
+                refs.push(rest[..end].to_string());
+            }
+            rest = &rest[end + 1..];
+        }
+    }
+    let mut dangling: Vec<String> = refs
+        .into_iter()
+        .filter(|r| !defs.contains(r))
+        .collect();
+    dangling.sort();
+    dangling.dedup();
+    for d in dangling {
+        out.push(format!("LINK_TOL: citation [^{d}] has no matching source definition"));
+    }
+
+    // Artifact pointers rendered into the document. A URI that is empty, or
+    // that is a bare scheme with nothing after it, is a dead pointer written
+    // by convention rather than by observation — exactly what
+    // ExperimentArtifacts does when it stamps paths whether or not the file
+    // exists.
+    for line in doc.lines() {
+        for tok in line.split(|c: char| c.is_whitespace() || c == '|' || c == '`') {
+            let t = tok.trim();
+            for scheme in ["gs://", "s3://", "http://", "https://", "configmap://"] {
+                if let Some(rest) = t.strip_prefix(scheme) {
+                    if rest.is_empty() || rest.starts_with('/') {
+                        out.push(format!("LINK_TOL: malformed URI `{t}`"));
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Rewrite `[@key]` citations to OKF v0.2 footnote form `[^key]`.
+///
+/// Only well-formed keys are rewritten, using the same charset as
+/// `extract_citation_keys`, so malformed patterns are left exactly as the
+/// author wrote them rather than being silently mangled.
+pub fn cites_to_footnotes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'[' && i + 1 < bytes.len() && bytes[i + 1] == b'@' {
+            let start = i + 2;
+            let mut j = start;
+            while j < bytes.len() && is_key_char(bytes[j]) {
+                j += 1;
+            }
+            if j > start && j < bytes.len() && bytes[j] == b']' {
+                out.push_str("[^");
+                out.push_str(&text[start..j]);
+                out.push(']');
+                i = j + 1;
+                continue;
+            }
+        }
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }

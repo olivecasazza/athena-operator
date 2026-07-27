@@ -206,6 +206,17 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
 
     // Deterministic citation/formatting reconciliation: pure check over the
     // spec; surfaced as a condition so the console and dossier agree about it.
+    // Link integrity is reported, never enforced: OKF's LINK_TOL makes broken
+    // links warnings, so a dangling pointer must not block a document that is
+    // otherwise valid. Surfacing them as a condition is what stops them rotting
+    // silently — the whole point of a trust signal is that it is visible.
+    let link_ok = okf.warnings.is_empty();
+    let link_detail = if link_ok {
+        "all links resolve".to_string()
+    } else {
+        okf.warnings.join("; ")
+    };
+
     let cc = dossier::citation_check(&report.spec.sections, &report.spec.references);
     let citations_ok = cc.cited_undefined.is_empty() && cc.defined_uncited.is_empty();
     let citation_condition = if citations_ok {
@@ -223,6 +234,13 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
             ),
         )
     };
+
+    let link_condition = condition(
+        "LinksResolved",
+        if link_ok { "True" } else { "False" },
+        if link_ok { "LinksResolve" } else { "BrokenLinks" },
+        &link_detail,
+    );
 
     // Stamp status only when something meaningful changed — otherwise a fresh
     // condition timestamp every pass would re-trigger reconcile forever. In steady
@@ -258,6 +276,7 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
                     &format!("assembled {included} experiment(s) into ConfigMap {cm_name}"),
                 ),
                 citation_condition,
+                link_condition,
             ],
         });
         // lastAssembledTime advances only when the dossier content actually changed.
