@@ -1102,6 +1102,90 @@
                   "hypothesis": {
                     "type": "string"
                   },
+                  "lineage": {
+                    "description": "Structured record of WHY this experiment exists: which node it came from, by what operation, and what changed.\n\nBefore this field, the entire search decision lived in the free-text `hypothesis` string, and the parent pointer was smuggled into `parameters` as an untyped `parentExperimentId` entry that then had to be filtered back out in two independent places. Worse, the selection gate detected control runs by PREFIX-MATCHING the hypothesis prose — editing that string silently emptied the sigma sample and froze the incumbent forever with no error. Prose is not a type tag.\n\nDeliberately NOT an ownerReference: an ownerRef to the parent would cascade-delete an entire subtree when one node is removed. Lifecycle ownership belongs to the campaign; derivation is a plain reference.",
+                    "nullable": true,
+                    "properties": {
+                      "generation": {
+                        "description": "Generation index (idx / populationSize). Previously computed only to hash a seed and then discarded, so the tree had no depth coordinate.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "parent": {
+                        "description": "Parent experiment name. None for a baseline/seed/canary with no parent.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "parentUid": {
+                        "description": "Parent UID. Names are reused when a campaign is recreated; the UID makes a stale edge detectable rather than silently wrong.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "perturbations": {
+                        "description": "Exactly what moved. Empty for a Remeasure/Replicate by definition.",
+                        "items": {
+                          "description": "One parameter's movement between parent and child.",
+                          "properties": {
+                            "factor": {
+                              "description": "Multiplicative factor applied, when the operation was multiplicative.",
+                              "format": "double",
+                              "nullable": true,
+                              "type": "number"
+                            },
+                            "from": {
+                              "description": "Value on the parent (absent for a cold start with no parent).",
+                              "format": "double",
+                              "nullable": true,
+                              "type": "number"
+                            },
+                            "param": {
+                              "type": "string"
+                            },
+                            "to": {
+                              "format": "double",
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "param",
+                            "to"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "relation": {
+                        "description": "How an experiment relates to the node it derived from.\n\nA closed enum, not prose: enums aggregate and can be selected on, prose cannot. This is what the selection gate keys off to find control runs, and what a provenance export maps to a predicate.",
+                        "enum": [
+                          "Baseline",
+                          "Seed",
+                          "Perturb",
+                          "Remeasure",
+                          "Replicate",
+                          "Canary"
+                        ],
+                        "type": "string"
+                      },
+                      "salt": {
+                        "description": "Dedup re-roll counter that produced this point, for reproducibility.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "strategy": {
+                        "description": "Strategy that produced this child (\"pbt\", \"heuristic\", ...).",
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "relation"
+                    ],
+                    "type": "object"
+                  },
                   "parameters": {
                     "additionalProperties": true,
                     "type": "object"

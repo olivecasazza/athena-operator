@@ -27,11 +27,141 @@ pub struct ExperimentSpec {
     pub patch: Option<PatchSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_policy: Option<CheckpointPolicy>,
+    /// Structured record of WHY this experiment exists: which node it came
+    /// from, by what operation, and what changed.
+    ///
+    /// Before this field, the entire search decision lived in the free-text
+    /// `hypothesis` string, and the parent pointer was smuggled into
+    /// `parameters` as an untyped `parentExperimentId` entry that then had to
+    /// be filtered back out in two independent places. Worse, the selection
+    /// gate detected control runs by PREFIX-MATCHING the hypothesis prose —
+    /// editing that string silently emptied the sigma sample and froze the
+    /// incumbent forever with no error. Prose is not a type tag.
+    ///
+    /// Deliberately NOT an ownerReference: an ownerRef to the parent would
+    /// cascade-delete an entire subtree when one node is removed. Lifecycle
+    /// ownership belongs to the campaign; derivation is a plain reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<ExperimentLineage>,
     /// Extra env vars merged into the job container AFTER the RuntimeProfile env,
     /// overriding same-named profile vars. The campaign controller uses this to
     /// inject `LLM_BASE_URL` for an ephemeral inference mesh.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<crate::runtime_profile::EnvVar>,
+}
+
+/// How an experiment relates to the node it derived from.
+///
+/// A closed enum, not prose: enums aggregate and can be selected on, prose
+/// cannot. This is what the selection gate keys off to find control runs, and
+/// what a provenance export maps to a predicate.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum DerivationRelation {
+    /// Campaign's first point — template defaults, no parent.
+    Baseline,
+    /// Cold-start population spread: perturbed from defaults, no parent yet.
+    Seed,
+    /// Parameters perturbed away from the parent (the ordinary search step).
+    Perturb,
+    /// Parent's parameters re-run UNCHANGED on a fresh seed, to measure noise
+    /// rather than to search. This is the control slot.
+    Remeasure,
+    /// Same science point re-run because the local search space was exhausted.
+    Replicate,
+    /// Cheap gate probe of the recipe before the campaign spends budget.
+    Canary,
+}
+
+/// One parameter's movement between parent and child.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterDelta {
+    pub param: String,
+    /// Value on the parent (absent for a cold start with no parent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<f64>,
+    pub to: f64,
+    /// Multiplicative factor applied, when the operation was multiplicative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub factor: Option<f64>,
+}
+
+/// Structured provenance for one experiment.
+///
+/// PROV-O export note: an Experiment is a RUN, i.e. a `prov:Activity`, so the
+/// correct predicate for this edge is `prov:wasInformedBy` (Activity ->
+/// Activity). `prov:wasDerivedFrom` would be wrong — its domain and range are
+/// both `prov:Entity`. PROV-O has no native slot for "by perturbing X", which
+/// is what `perturbations` carries.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentLineage {
+    pub relation: DerivationRelation,
+    /// Parent experiment name. None for a baseline/seed/canary with no parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Parent UID. Names are reused when a campaign is recreated; the UID makes
+    /// a stale edge detectable rather than silently wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_uid: Option<String>,
+    /// Generation index (idx / populationSize). Previously computed only to
+    /// hash a seed and then discarded, so the tree had no depth coordinate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+    /// Strategy that produced this child ("pbt", "heuristic", ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    /// Exactly what moved. Empty for a Remeasure/Replicate by definition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub perturbations: Vec<ParameterDelta>,
+    /// Dedup re-roll counter that produced this point, for reproducibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salt: Option<u32>,
+}
+
+impl ExperimentLineage {
+    /// Human-readable rendering, so `hypothesis` stays a DERIVED view of the
+    /// structured record rather than the record itself.
+    pub fn describe(&self) -> String {
+        let deltas = self
+            .perturbations
+            .iter()
+            .map(|d| match (d.from, d.factor) {
+                (Some(f), Some(x)) => format!("{} {:.4}->{:.4} (x{:.4})", d.param, f, d.to, x),
+                (Some(f), None) => format!("{} {:.4}->{:.4}", d.param, f, d.to),
+                (None, Some(x)) => format!("{} x{:.4}", d.param, x),
+                (None, None) => format!("{}={:.4}", d.param, d.to),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let strategy = self.strategy.as_deref().unwrap_or("search");
+        match (&self.relation, &self.parent) {
+            (DerivationRelation::Baseline, _) => "baseline: template defaults".to_string(),
+            (DerivationRelation::Canary, _) => {
+                "canary gate: cheap probe of the recipe before spending budget".to_string()
+            }
+            (DerivationRelation::Seed, _) if deltas.is_empty() => {
+                format!("{strategy} cold start: no numeric params to spread")
+            }
+            (DerivationRelation::Seed, _) => {
+                format!("{strategy} cold start: seed spread from defaults: {deltas}")
+            }
+            (DerivationRelation::Remeasure, Some(p)) => format!(
+                "control: re-measure incumbent {p} on a fresh seed \
+                 (calibrates sigma; not a search point)"
+            ),
+            (DerivationRelation::Replicate, Some(p)) => {
+                format!("replicate of {p}: local search space exhausted")
+            }
+            (DerivationRelation::Perturb, Some(p)) if deltas.is_empty() => {
+                format!("{strategy} exploit from {p} (no numeric params to perturb)")
+            }
+            (DerivationRelation::Perturb, Some(p)) => {
+                format!("{strategy} exploit+explore from {p}: {deltas}")
+            }
+            (_, None) => format!("{strategy}: no successful parent yet"),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default, PartialEq)]

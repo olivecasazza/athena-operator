@@ -36,7 +36,8 @@ use athena_api::benchmark_run::{
 use athena_api::common::{LocalObjectReference, TypedObjectReference};
 use athena_api::defaults::deep_merge;
 use athena_api::experiment::{
-    CheckpointPolicy, Experiment, ExperimentDecision, ExperimentPhase, ExperimentSpec,
+    CheckpointPolicy, DerivationRelation, Experiment, ExperimentDecision, ExperimentLineage,
+    ExperimentPhase, ExperimentSpec, ParameterDelta,
 };
 use athena_api::experiment_template::{ExperimentTemplate, ObjectiveGoal, ObjectiveSpec};
 use athena_api::research_campaign::{
@@ -67,14 +68,29 @@ const MANAGER: &str = "athena-campaign";
 const CAMPAIGN_LABEL: &str = "athena.nixlab.io/campaign";
 /// Label marking a campaign's canary gate experiment.
 const CANARY_LABEL: &str = "athena.nixlab.io/canary";
+/// Derivation edge, mirrored from `spec.lineage.parent` so the search tree is
+/// queryable. Kubernetes selects on labels only, never annotations.
+const PARENT_LABEL: &str = "research.nixlab.io/parent";
+/// Generation depth, mirrored from `spec.lineage.generation`.
+const GENERATION_LABEL: &str = "research.nixlab.io/generation";
+/// Node role, mirrored from `spec.lineage.relation`.
+const ROLE_LABEL: &str = "research.nixlab.io/role";
 /// Prefix stamped on a control-slot experiment's hypothesis. Control runs are
 /// re-measurements of the incumbent, not search points, so they must be
 /// identifiable when computing the seed-noise estimate.
 const CONTROL_HYPOTHESIS_PREFIX: &str = "control: re-measure incumbent";
 
 /// True for an experiment generated as a control-slot re-measurement.
-fn is_control_hypothesis(h: &str) -> bool {
-    h.starts_with(CONTROL_HYPOTHESIS_PREFIX)
+///
+/// Prefers the typed lineage relation. The prose fallback exists only for
+/// experiments created before `spec.lineage` existed — without it, upgrading
+/// the operator mid-campaign would silently discard the accumulated sigma
+/// sample and freeze the incumbent.
+fn is_control_experiment(e: &Experiment) -> bool {
+    match &e.spec.lineage {
+        Some(l) => l.relation == DerivationRelation::Remeasure,
+        None => e.spec.hypothesis.starts_with(CONTROL_HYPOTHESIS_PREFIX),
+    }
 }
 /// Multiplicative step for the hill-climb perturbation of a numeric parameter.
 const STEP: f64 = 0.5;
@@ -177,9 +193,16 @@ pub async fn reconcile(
     // Control-slot runs: experiments whose hypothesis marks them as an
     // incumbent re-measurement rather than a search point. Repeated scores of
     // the SAME config are the only unconfounded seed-noise sample available.
+    // Control runs are identified by the TYPED lineage relation. This used to
+    // prefix-match the free-text hypothesis, which made the entire selection
+    // gate depend on a prose string: editing it emptied the sigma sample,
+    // sigma_upper_bound returned None, beats_incumbent returned false
+    // unconditionally, and the incumbent froze forever with no error anywhere.
+    // Falls back to the legacy prefix so experiments created before this field
+    // existed still contribute their sigma sample.
     let control_scores: Vec<f64> = completed
         .iter()
-        .filter(|e| is_control_hypothesis(&e.spec.hypothesis))
+        .filter(|e| is_control_experiment(e))
         .filter_map(|e| objective_value(e, &objective.metric))
         .collect();
     // Reported for observability; the GATE uses the upper confidence limit so a
@@ -460,17 +483,24 @@ pub async fn reconcile(
                     let mut params = bp.clone();
                     params.insert("experimentIteration".into(), json!(idx));
                     params.insert("parentExperimentId".into(), json!(bn));
+                    let lineage = ExperimentLineage {
+                        relation: DerivationRelation::Remeasure,
+                        parent: Some(bn.to_string()),
+                        parent_uid: best_exp.and_then(|e| e.uid()),
+                        generation: control_pop.map(|pop| idx / pop),
+                        strategy: Some(campaign.spec.strategy.strategy_type.clone()),
+                        perturbations: Vec::new(),
+                        salt: None,
+                    };
                     let exp = build_experiment(
                         &campaign,
                         &name,
                         &ns,
                         idx,
                         params,
-                        format!(
-                            "{CONTROL_HYPOTHESIS_PREFIX} {bn} on a fresh seed \
-                             (calibrates sigma; not a search point)"
-                        ),
+                        lineage.describe(),
                         pbt_checkpoint_policy(best_exp),
+                        Some(lineage),
                     );
                     match experiments.create(&PostParams::default(), &exp).await {
                         Ok(_) => created += 1,
@@ -492,23 +522,53 @@ pub async fn reconcile(
                 // have nothing to vary. Bounded re-rolls; if the local lattice is
                 // exhausted, accept the duplicate as a labeled replicate (liveness).
                 let mut chosen = generate(0);
+                let mut chosen_salt = 0u32;
+                let mut replicated = false;
                 if best_ctx.is_some() {
                     let mut deduped = false;
                     for salt in 0..=MAX_REROLLS {
                         let candidate = generate(salt);
                         if !seen.contains(&science_key(&candidate.0)) {
                             chosen = candidate;
+                            chosen_salt = salt;
                             deduped = true;
                             break;
                         }
                     }
                     if !deduped {
+                        replicated = true;
                         chosen.1 =
                             format!("{} [replicate: local search space exhausted]", chosen.1);
                     }
                 }
                 seen.insert(science_key(&chosen.0));
                 let (params, hypothesis, checkpoint_policy) = chosen;
+                // Reconstruct the structured record from the parent/child
+                // parameter diff, so lineage is exact rather than parsed back
+                // out of the prose we just formatted.
+                let relation = if replicated {
+                    DerivationRelation::Replicate
+                } else if best_ctx.is_none() {
+                    if idx == 0 {
+                        DerivationRelation::Baseline
+                    } else {
+                        DerivationRelation::Seed
+                    }
+                } else {
+                    DerivationRelation::Perturb
+                };
+                let lineage = ExperimentLineage {
+                    relation,
+                    parent: best_ctx.map(|(bn, _)| bn.to_string()),
+                    parent_uid: best_exp.and_then(|e| e.uid()),
+                    generation: control_pop.map(|pop| idx / pop),
+                    strategy: Some(campaign.spec.strategy.strategy_type.clone()),
+                    perturbations: parameter_deltas(
+                        best_ctx.map(|(_, bp)| bp),
+                        &params,
+                    ),
+                    salt: Some(chosen_salt),
+                };
                 let exp = build_experiment(
                     &campaign,
                     &name,
@@ -517,6 +577,7 @@ pub async fn reconcile(
                     params,
                     hypothesis,
                     checkpoint_policy,
+                    Some(lineage),
                 );
                 match experiments.create(&PostParams::default(), &exp).await {
                     Ok(_) => created += 1,
@@ -719,6 +780,38 @@ const BOOKKEEPING: [&str; 2] = ["experimentIteration", "parentExperimentId"];
 
 /// Canonical string of the science parameters (bookkeeping stripped) for
 /// duplicate-point detection across a campaign's children.
+/// Exactly which numeric parameters differ between parent and child.
+///
+/// Derived from the actual parameter maps rather than from the perturbation
+/// code, so it stays correct no matter which strategy produced the child —
+/// including the canary-override reversion, which changes params in a way the
+/// perturbation loop never sees.
+fn parameter_deltas(
+    parent: Option<&BTreeMap<String, Value>>,
+    child: &BTreeMap<String, Value>,
+) -> Vec<ParameterDelta> {
+    let mut out = Vec::new();
+    for (k, v) in child {
+        if BOOKKEEPING.contains(&k.as_str()) {
+            continue;
+        }
+        let Some(to) = value_as_f64(v) else { continue };
+        let from = parent.and_then(|p| p.get(k)).and_then(value_as_f64);
+        if from.is_some_and(|f| (f - to).abs() < f64::EPSILON) {
+            continue; // unchanged
+        }
+        // Only meaningful for a multiplicative step from a non-zero base.
+        let factor = from.filter(|f| f.abs() > f64::EPSILON).map(|f| to / f);
+        out.push(ParameterDelta {
+            param: k.clone(),
+            from,
+            to,
+            factor,
+        });
+    }
+    out
+}
+
 fn science_key(params: &BTreeMap<String, Value>) -> String {
     params
         .iter()
@@ -1094,6 +1187,17 @@ fn build_canary_experiment(
             parameters: params,
             patch: None,
             checkpoint_policy: None,
+            // The canary is a gate probe, not a search point: generation 0, no
+            // parent, no perturbation to record.
+            lineage: Some(ExperimentLineage {
+                relation: DerivationRelation::Canary,
+                parent: None,
+                parent_uid: None,
+                generation: Some(0),
+                strategy: Some(campaign.spec.strategy.strategy_type.clone()),
+                perturbations: Vec::new(),
+                salt: None,
+            }),
             env: mesh_env(campaign, campaign_name, ns),
         },
         status: None,
@@ -1108,6 +1212,7 @@ fn build_experiment(
     parameters: BTreeMap<String, Value>,
     hypothesis: String,
     checkpoint_policy: Option<CheckpointPolicy>,
+    lineage: Option<ExperimentLineage>,
 ) -> Experiment {
     let exp_name = format!("{campaign_name}-{idx:03}");
     let owner = OwnerReference {
@@ -1122,10 +1227,28 @@ fn build_experiment(
         metadata: ObjectMeta {
             name: Some(exp_name),
             namespace: Some(ns.to_string()),
-            labels: Some(BTreeMap::from([(
-                CAMPAIGN_LABEL.to_string(),
-                campaign_name.to_string(),
-            )])),
+            labels: Some({
+                // Labels, not annotations: only labels are selectable, so this
+                // is what makes the tree queryable with
+                //   kubectl get exp -l research.nixlab.io/parent=<name>
+                //   kubectl get exp -l research.nixlab.io/role=Remeasure
+                let mut l = BTreeMap::from([(
+                    CAMPAIGN_LABEL.to_string(),
+                    campaign_name.to_string(),
+                )]);
+                if let Some(lin) = &lineage {
+                    l.insert(ROLE_LABEL.to_string(), format!("{:?}", lin.relation));
+                    if let Some(g) = lin.generation {
+                        l.insert(GENERATION_LABEL.to_string(), g.to_string());
+                    }
+                    // Label values are capped at 63 chars; a longer parent name
+                    // is dropped from the label but kept in spec.lineage.
+                    if let Some(pn) = lin.parent.as_deref().filter(|p| p.len() <= 63) {
+                        l.insert(PARENT_LABEL.to_string(), pn.to_string());
+                    }
+                }
+                l
+            }),
             owner_references: Some(vec![owner]),
             ..Default::default()
         },
@@ -1135,6 +1258,7 @@ fn build_experiment(
             parameters,
             patch: None,
             checkpoint_policy,
+            lineage,
             env: {
                 let mut env = mesh_env(campaign, campaign_name, ns);
                 env.extend(generation_seed_env(campaign, idx));
@@ -1771,6 +1895,7 @@ mod tests {
                 ..Default::default()
             },
             spec: ExperimentSpec {
+                lineage: None,
                 campaign_ref: "c".into(),
                 hypothesis: String::new(),
                 parameters: BTreeMap::new(),
@@ -2020,14 +2145,92 @@ mod tests {
     }
 
     #[test]
-    fn control_hypotheses_are_distinguishable_from_search_points() {
-        assert!(is_control_hypothesis(
-            "control: re-measure incumbent foo-000 on a fresh seed"
-        ));
-        assert!(!is_control_hypothesis(
-            "pbt exploit+explore from foo-000: gait x2.0000"
-        ));
-        assert!(!is_control_hypothesis("pbt cold start: baseline"));
+    fn parameter_deltas_capture_what_actually_moved() {
+        let parent = BTreeMap::from([
+            ("gait".to_string(), json!(2.0)),
+            ("jerk".to_string(), json!(-0.6)),
+            ("unchanged".to_string(), json!(1.0)),
+            ("experimentIteration".to_string(), json!(3)),
+        ]);
+        let child = BTreeMap::from([
+            ("gait".to_string(), json!(4.0)),
+            ("jerk".to_string(), json!(-0.6)),
+            ("unchanged".to_string(), json!(1.0)),
+            ("experimentIteration".to_string(), json!(4)),
+        ]);
+        let d = parameter_deltas(Some(&parent), &child);
+        assert_eq!(d.len(), 1, "only the moved param is recorded: {d:?}");
+        assert_eq!(d[0].param, "gait");
+        assert_eq!(d[0].from, Some(2.0));
+        assert_eq!(d[0].to, 4.0);
+        assert_eq!(d[0].factor, Some(2.0));
+        // Bookkeeping must never surface as a science delta, even though it
+        // changed — that conflation is what the typed lineage exists to end.
+        assert!(!d.iter().any(|x| x.param == "experimentIteration"));
+    }
+
+    #[test]
+    fn hypothesis_is_a_derived_view_of_the_structured_record() {
+        // The prose must be reconstructible FROM the record, so the record is
+        // the source of truth and the string is only a rendering.
+        let l = ExperimentLineage {
+            relation: DerivationRelation::Remeasure,
+            parent: Some("camp-003".into()),
+            parent_uid: None,
+            generation: Some(1),
+            strategy: Some("pbt".into()),
+            perturbations: Vec::new(),
+            salt: None,
+        };
+        // Byte-identical to the legacy string, so the prose fallback in
+        // is_control_experiment still matches objects written by this version.
+        assert!(l.describe().starts_with(CONTROL_HYPOTHESIS_PREFIX), "{}", l.describe());
+
+        let p = ExperimentLineage {
+            relation: DerivationRelation::Perturb,
+            parent: Some("camp-001".into()),
+            parent_uid: None,
+            generation: Some(2),
+            strategy: Some("pbt".into()),
+            perturbations: vec![ParameterDelta {
+                param: "gait".into(),
+                from: Some(2.0),
+                to: 4.0,
+                factor: Some(2.0),
+            }],
+            salt: Some(0),
+        };
+        let d = p.describe();
+        assert!(d.contains("camp-001") && d.contains("gait"), "{d}");
+    }
+
+    #[test]
+    fn control_runs_are_identified_by_typed_relation_not_prose() {
+        let mut e = exp_with("c", ExperimentPhase::Succeeded, "r", 1.0);
+        // Typed relation wins.
+        e.spec.lineage = Some(ExperimentLineage {
+            relation: DerivationRelation::Remeasure,
+            parent: Some("p".into()),
+            parent_uid: None,
+            generation: Some(1),
+            strategy: Some("pbt".into()),
+            perturbations: Vec::new(),
+            salt: None,
+        });
+        e.spec.hypothesis = "totally unrelated prose".into();
+        assert!(is_control_experiment(&e), "relation must decide, not prose");
+
+        e.spec.lineage.as_mut().unwrap().relation = DerivationRelation::Perturb;
+        assert!(!is_control_experiment(&e));
+
+        // Legacy objects (no lineage) still contribute their sigma sample via
+        // the prose fallback — without this, upgrading mid-campaign would empty
+        // the control set and freeze the incumbent.
+        e.spec.lineage = None;
+        e.spec.hypothesis = "control: re-measure incumbent foo-000 on a fresh seed".into();
+        assert!(is_control_experiment(&e), "legacy prose fallback must survive");
+        e.spec.hypothesis = "pbt exploit+explore from foo-000: gait x2.0".into();
+        assert!(!is_control_experiment(&e));
     }
 
     #[test]
@@ -2146,7 +2349,7 @@ mod tests {
         let (params, hypothesis) =
             pbt_experiment(&t, Some(("c-000", &best_exp.spec.parameters)), 1.2, 2, 0);
         let cp = pbt_checkpoint_policy(Some(&best_exp));
-        let child = build_experiment(&campaign, "c", "default", 2, params, hypothesis, cp);
+        let child = build_experiment(&campaign, "c", "default", 2, params, hypothesis, cp, None);
 
         assert_eq!(
             child
@@ -2187,7 +2390,7 @@ mod tests {
             status: None,
         };
         let (params, hypothesis) = next_experiment(&t, None, 0, 0);
-        let child = build_experiment(&campaign, "c", "default", 0, params, hypothesis, None);
+        let child = build_experiment(&campaign, "c", "default", 0, params, hypothesis, None, None);
         assert!(child.spec.checkpoint_policy.is_none());
     }
 

@@ -1567,6 +1567,7 @@ mod tests {
         let mut experiment = Experiment::new(
             name,
             ExperimentSpec {
+                lineage: None,
                 campaign_ref: "camp".to_string(),
                 hypothesis: "sky bursts work".to_string(),
                 parameters: BTreeMap::new(),
