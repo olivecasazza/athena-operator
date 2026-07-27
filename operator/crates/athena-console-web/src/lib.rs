@@ -90,7 +90,13 @@ fn column<K: Copy>(b: &mut LayoutBuilder, x: f64, w: f64, panels: &[(K, f64)]) -
     panels
         .iter()
         .map(|&(kind, h)| {
-            let win = b.at(kind, x, y, w, h);
+            let mut win = b.at(kind, x, y, w, h);
+            // Tiling mode sizes a panel to its content, and an iframe has no
+            // intrinsic height — the Grafana embed collapses to panel-kit's
+            // 150px tile default however tall the dashboard is. Reuse the
+            // height declared right here, so a panel is never shorter tiled
+            // than floating and no second number gets invented.
+            win.tile_min_h = Some(h);
             y += h + GUTTER;
             win
         })
