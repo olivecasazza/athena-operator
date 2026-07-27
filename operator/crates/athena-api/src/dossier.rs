@@ -127,11 +127,76 @@ pub fn render(
 ) -> std::fmt::Result {
     let exps = curate(experiments, curation);
 
-    // ── 1. Title ─────────────────────────────────────────────────────────────
     let title = curation
         .and_then(|c| c.title)
         .map(|t| t.to_string())
         .unwrap_or_else(|| format!("Research Dossier: {}", campaign_name));
+
+    // ── 0. OKF frontmatter ───────────────────────────────────────────────────
+    // Open Knowledge Format (Google Cloud, 2026). v0.1 hard rules the validator
+    // exits non-zero on: valid UTF-8, a parseable YAML block delimited by `---`,
+    // and a non-empty `type`. Broken links are warnings only. Without this block
+    // the dossier fails FM_REQ and TYPE_REQ immediately.
+    //
+    // v0.2 trust signals answer "how much should I trust this?" for a document
+    // an agent will read: `generated` (machine authorship), `verified` (human or
+    // adversarial confirmation), `sources` (provenance), `status` (lifecycle).
+    //
+    // DETERMINISM: `generated.at` is the latest experiment completion time, NOT
+    // a wall clock. render() must be a pure function of its inputs — the
+    // reconciler content-diffs the output to decide whether to rewrite the
+    // ConfigMap, so any clock in the body defeats that diff and hot-loops the
+    // controller. A data-derived cutoff is both stable and more honest: it says
+    // what the document is current AS OF.
+    writeln!(out, "---")?;
+    writeln!(out, "type: Research Report")?;
+    writeln!(out, "title: {}", yaml_scalar(&title))?;
+    writeln!(
+        out,
+        "status: {}",
+        match campaign.status.as_ref().and_then(|s| s.phase.as_deref()) {
+            Some("Completed") => "stable",
+            _ => "draft",
+        }
+    )?;
+    writeln!(out, "generated:")?;
+    writeln!(out, "  by: athena/{}", env!("CARGO_PKG_VERSION"))?;
+    if let Some(at) = data_cutoff(&exps) {
+        writeln!(out, "  at: {at}")?;
+    }
+    writeln!(out, "tags:")?;
+    writeln!(out, "  - campaign/{campaign_name}")?;
+    writeln!(out, "  - namespace/{namespace}")?;
+    if let Some(subject) = curation.and_then(|c| c.about) {
+        // A scoped document records what it is about and WHY, per the W3C Web
+        // Annotation motivation vocabulary.
+        writeln!(out, "about:")?;
+        writeln!(out, "  kind: {}", yaml_scalar(&subject.kind))?;
+        writeln!(out, "  name: {}", yaml_scalar(&subject.name))?;
+        if let Some(m) = subject.motivation {
+            writeln!(out, "  motivation: {m:?}")?;
+        }
+    }
+    let refs = curation.map(|c| c.references).unwrap_or(&[]);
+    if !refs.is_empty() {
+        writeln!(out, "sources:")?;
+        for r in refs {
+            writeln!(out, "  - id: {}", yaml_scalar(&r.key))?;
+            if let Some(u) = r.url.as_deref().filter(|u| !u.is_empty()) {
+                writeln!(out, "    resource: {}", yaml_scalar(u))?;
+            } else if let Some(d) = r.doi.as_deref().filter(|d| !d.is_empty()) {
+                writeln!(out, "    resource: {}", yaml_scalar(&format!("https://doi.org/{d}")))?;
+            }
+            writeln!(out, "    title: {}", yaml_scalar(&r.title))?;
+            if let Some(sup) = r.supports.as_deref().filter(|s| !s.is_empty()) {
+                writeln!(out, "    supports: {}", yaml_scalar(sup))?;
+            }
+        }
+    }
+    writeln!(out, "---")?;
+    writeln!(out)?;
+
+    // ── 1. Title ─────────────────────────────────────────────────────────────
     writeln!(out, "# {}", title)?;
     writeln!(out)?;
     // No wall-clock timestamp in the body: `render` must be a pure function of its
@@ -1503,6 +1568,68 @@ mod tests {
     }
 
     #[test]
+    fn rendered_dossier_is_valid_okf() {
+        let exps = vec![experiment("e", "h", 2.0, ExperimentDecision::Keep)];
+        let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
+        let mut doc = String::new();
+        render(&mut doc, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
+        let c = okf_check(&doc);
+        assert!(c.ok(), "dossier must satisfy OKF hard rules: {:?}", c.violations);
+        assert!(doc.starts_with("---\n"), "frontmatter must be the first line");
+        assert!(doc.contains("\ntype: Research Report\n"), "TYPE_REQ field missing");
+    }
+
+    #[test]
+    fn okf_check_catches_each_hard_rule() {
+        // FM_REQ — no opening delimiter at all (the pre-OKF dossier shape).
+        let v = okf_check("# Title\n\nbody").violations;
+        assert!(v.iter().any(|x| x.starts_with("FM_REQ")), "{v:?}");
+
+        // FM_REQ — opened but never closed.
+        let v = okf_check("---\ntype: X\nstill going").violations;
+        assert!(v.iter().any(|x| x.contains("never closed")), "{v:?}");
+
+        // TYPE_REQ — well-formed block, no type.
+        let v = okf_check("---\ntitle: \"x\"\n---\nbody").violations;
+        assert!(v.iter().any(|x| x.starts_with("TYPE_REQ")), "{v:?}");
+
+        // TYPE_REQ — present but empty.
+        let v = okf_check("---\ntype: \n---\nbody").violations;
+        assert!(v.iter().any(|x| x.contains("empty")), "{v:?}");
+
+        // LINK_TOL — a broken link is a WARNING in OKF, never a failure. If this
+        // ever starts failing we have made the gate stricter than the spec.
+        assert!(okf_check("---\ntype: X\n---\n[dead](./nope.md)").ok());
+    }
+
+    #[test]
+    fn frontmatter_survives_a_title_containing_yaml_metacharacters() {
+        // An unquoted colon would terminate the scalar and break FM_REQ, taking
+        // the whole document out of conformance because of a report title.
+        let mut c = campaign();
+        c.status.as_mut().unwrap().phase = Some("Completed".into());
+        let exps: Vec<Experiment> = vec![];
+        let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
+        let empty: Vec<String> = vec![];
+        let sections = BTreeMap::new();
+        let refs: Vec<Reference> = vec![];
+        let cur = Curation {
+            title: Some("Spot: a study of #gait, \"quoted\""),
+            included: &empty,
+            excluded: &empty,
+            sections: &sections,
+            seeded_hypotheses: &empty,
+            references: &refs,
+            about: None,
+        };
+        let mut doc = String::new();
+        render(&mut doc, "camp", "ns", &c, &template(), &exps, &runs, Some(&cur)).unwrap();
+        let chk = okf_check(&doc);
+        assert!(chk.ok(), "{:?}\n{doc}", chk.violations);
+        assert!(doc.contains("status: stable"), "completed campaign -> stable");
+    }
+
+    #[test]
     fn about_scopes_the_document_to_a_subtree() {
         use crate::experiment::DerivationRelation as R;
         use crate::research_report::{ReportMotivation, ReportSubject};
@@ -2006,4 +2133,109 @@ fn render_tree_node(
         render_tree_node(out, c, depth + 1)?;
     }
     Ok(())
+}
+
+/// Quote a YAML scalar so a colon, `#`, or leading indicator cannot break the
+/// frontmatter block — an unparseable block fails OKF's FM_REQ outright.
+pub fn yaml_scalar(v: &str) -> String {
+    format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Latest experiment completion time, used as the document's data cutoff.
+///
+/// Deliberately data-derived rather than `now()`: render() must stay pure so
+/// the reconciler's content-diff works. Returns None when nothing has completed.
+pub fn data_cutoff(exps: &[&Experiment]) -> Option<String> {
+    exps.iter()
+        .filter_map(|e| {
+            e.status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref())
+                .and_then(|cs| {
+                    cs.iter()
+                        .filter_map(|c| c.last_transition_time.clone())
+                        .max()
+                })
+        })
+        .max()
+}
+
+/// Outcome of checking a rendered document against OKF's v0.1 hard rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OkfCheck {
+    pub violations: Vec<String>,
+}
+
+impl OkfCheck {
+    pub fn ok(&self) -> bool {
+        self.violations.is_empty()
+    }
+}
+
+/// Validate a rendered dossier against the Open Knowledge Format hard rules.
+///
+/// OKF (Google Cloud, 2026) defines exactly three conditions the reference
+/// validator exits non-zero on, and this mirrors them so a malformed document
+/// is caught before it is published rather than by a downstream consumer:
+///
+///   UTF8_REQ  valid UTF-8            (a Rust `&str` is UTF-8 by construction,
+///                                     so this cannot fail here; checked anyway
+///                                     for control characters that break YAML)
+///   FM_REQ    parseable YAML frontmatter delimited by `---`
+///   TYPE_REQ  `type` present and non-empty
+///
+/// Broken links are LINK_TOL — warnings only, never a failure — so they are
+/// deliberately not checked here.
+///
+/// This is a native implementation rather than a shell-out: the operator runs
+/// as a distroless container with no PVC and no package manager, and the three
+/// rules are small enough that vendoring a Go/Ruby CLI to enforce them would
+/// add far more risk than it removes. The external `openknowledge validate`
+/// remains the conformance authority for CI.
+pub fn okf_check(doc: &str) -> OkfCheck {
+    let mut violations = Vec::new();
+
+    // FM_REQ: the block must open on the very first line and close later.
+    let mut lines = doc.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        violations.push(
+            "FM_REQ: document does not open with a `---` frontmatter delimiter".to_string(),
+        );
+        return OkfCheck { violations };
+    }
+    let mut fm = Vec::new();
+    let mut closed = false;
+    for line in lines {
+        if line.trim_end() == "---" {
+            closed = true;
+            break;
+        }
+        fm.push(line);
+    }
+    if !closed {
+        violations.push("FM_REQ: frontmatter block is never closed with `---`".to_string());
+        return OkfCheck { violations };
+    }
+
+    // UTF8_REQ: &str is UTF-8 by construction; what can still break a YAML
+    // parser is a raw control character, so that is what we look for.
+    if fm
+        .iter()
+        .any(|l| l.chars().any(|c| c.is_control() && c != '\t'))
+    {
+        violations.push("UTF8_REQ: frontmatter contains a control character".to_string());
+    }
+
+    // TYPE_REQ: a top-level `type:` key with a non-empty value.
+    let type_value = fm
+        .iter()
+        .find(|l| l.starts_with("type:"))
+        .map(|l| l.trim_start_matches("type:").trim().trim_matches('"'));
+    match type_value {
+        None => violations.push("TYPE_REQ: no top-level `type` field".to_string()),
+        Some("") => violations.push("TYPE_REQ: `type` is present but empty".to_string()),
+        Some(_) => {}
+    }
+
+    OkfCheck { violations }
 }

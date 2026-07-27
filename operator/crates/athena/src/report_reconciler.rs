@@ -101,6 +101,40 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
             }
         };
 
+    // OKF conformance gate. The dossier is consumed by agents, so it has to be
+    // a valid Open Knowledge Format document; publishing a malformed one would
+    // push the failure downstream to every consumer instead of stopping here.
+    //
+    // Fails CLOSED: on violation we publish NOTHING, stamp the specific rule
+    // that broke in the condition message, and requeue. Because assembly is
+    // level-triggered, that requeue IS the retry — a fixed spec or template is
+    // picked up on the next pass without operator intervention.
+    let okf = dossier::okf_check(&doc);
+    if !okf.ok() {
+        let detail = okf.violations.join("; ");
+        if prev_phase != Some("Error") || prev_gen != generation {
+            let status = json!({ "status": {
+                "phase": "Error",
+                "includedCount": included,
+                "observedGeneration": generation,
+                "controllerVersion": version,
+                "conditions": [
+                    condition("CampaignResolved", "True", "CampaignResolved", "campaign resolved"),
+                    condition(
+                        "Assembled", "False", "OkfInvalid",
+                        &format!("dossier violates Open Knowledge Format: {detail}"),
+                    ),
+                ],
+            }});
+            reports
+                .patch_status(&name, &PatchParams::apply(MANAGER), &Patch::Merge(&status))
+                .await?;
+        }
+        warn!(%name, %detail, "dossier failed OKF validation; not publishing");
+        telemetry::record_reconcile(&ns, &campaign_ref, "Error", "ok", started.elapsed());
+        return Ok(Action::requeue(Duration::from_secs(120)));
+    }
+
     // Never write an oversized ConfigMap; ask the scientist to prune instead.
     if doc.len() + doc_tex.len() > MAX_DATASET_BYTES {
         if prev_phase != Some("Error") || prev_gen != generation {
