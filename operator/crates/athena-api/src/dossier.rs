@@ -214,6 +214,47 @@ pub fn render(
     writeln!(out)?;
 
     // ── 5. Results ───────────────────────────────────────────────────────────
+    // ── Search Tree ────────────────────────────────────────────────────
+    // The experiment list above is flat and creation-ordered, which hides the
+    // shape of the search entirely. This renders the actual derivation tree
+    // from spec.lineage: who came from whom, at what generation, by what
+    // operation, and exactly what moved.
+    writeln!(out, "## Search Tree")?;
+    writeln!(out)?;
+    let forest = build_forest(&exps);
+    if forest.is_empty() {
+        writeln!(
+            out,
+            "_No lineage recorded — these experiments predate `spec.lineage`._"
+        )?;
+        writeln!(out)?;
+    } else {
+        writeln!(out, "```")?;
+        for root in &forest {
+            render_tree_node(out, root, 0)?;
+        }
+        writeln!(out, "```")?;
+        writeln!(out)?;
+        // Roles are what make the tree readable: a campaign that spent its
+        // budget on controls searched nothing, and that is invisible in a flat
+        // list. This is exactly the failure that went unnoticed on v72.
+        let mut roles: BTreeMap<String, usize> = BTreeMap::new();
+        for e in exps.iter().copied() {
+            if let Some(l) = &e.spec.lineage {
+                *roles.entry(format!("{:?}", l.relation)).or_default() += 1;
+            }
+        }
+        if !roles.is_empty() {
+            let summary = roles
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            writeln!(out, "**Node roles:** {summary}")?;
+            writeln!(out)?;
+        }
+    }
+
     writeln!(out, "## Results")?;
     writeln!(out)?;
     let c_status = campaign.status.as_ref();
@@ -227,13 +268,48 @@ pub fn render(
     writeln!(out)?;
     writeln!(
         out,
-        "**Best Objective:** {}",
+        "**Best Objective (biased):** {} — max over N noisy draws; monotone by \
+         construction and therefore NOT evidence of progress.",
         c_status
             .and_then(|s| s.best_objective)
             .map(|v| format!("{:.4}", v))
             .unwrap_or_else(|| "_not recorded_".to_string())
     )?;
     writeln!(out)?;
+    // The honest counterpart. Publishing best_objective alone reports exactly
+    // the number the CRD's own doc comment calls "not evidence of progress",
+    // while the unbiased re-measurement sat unrendered.
+    writeln!(
+        out,
+        "**Incumbent Re-measured (unbiased):** {}",
+        c_status
+            .and_then(|s| s.incumbent_remeasured)
+            .map(|v| format!("{:.4}", v))
+            .unwrap_or_else(|| "_no control runs yet_".to_string())
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "**Seed noise (sigma):** {} over {} control run(s)",
+        c_status
+            .and_then(|s| s.seed_noise_sigma)
+            .map(|v| format!("{:.4}", v))
+            .unwrap_or_else(|| "_not yet estimated_".to_string()),
+        c_status.map(|s| s.control_runs).unwrap_or(0)
+    )?;
+    writeln!(out)?;
+    if let (Some(b), Some(i)) = (
+        c_status.and_then(|s| s.best_objective),
+        c_status.and_then(|s| s.incumbent_remeasured),
+    ) {
+        writeln!(
+            out,
+            "_Divergence between the two above is the maximization bias, made \
+             directly visible: {:.4}._",
+            b - i
+        )?;
+        writeln!(out)?;
+    }
 
     for exp in exps.iter().copied() {
         let exp_name = exp.name_any();
@@ -1282,6 +1358,7 @@ mod tests {
                 parameters: BTreeMap::from([("lr".to_string(), json!(0.001))]),
                 patch: None,
                 checkpoint_policy: None,
+                lineage: None,
                 env: vec![],
             },
             status: Some(ExperimentStatus {
@@ -1361,6 +1438,100 @@ mod tests {
     // content-diffs the assembled dossier to decide whether to rewrite the
     // ConfigMap + status. Any wall-clock/nondeterminism in the body defeats that
     // diff and hot-loops the controller (it watches ResearchReport).
+    fn with_lineage(
+        mut e: Experiment,
+        relation: crate::experiment::DerivationRelation,
+        parent: Option<&str>,
+        generation: u32,
+    ) -> Experiment {
+        e.spec.lineage = Some(crate::experiment::ExperimentLineage {
+            relation,
+            parent: parent.map(|p| p.to_string()),
+            parent_uid: None,
+            generation: Some(generation),
+            strategy: Some("pbt".into()),
+            perturbations: Vec::new(),
+            salt: None,
+        });
+        e
+    }
+
+    #[test]
+    fn search_tree_nests_by_lineage_and_surfaces_role_counts() {
+        use crate::experiment::DerivationRelation as R;
+        let exps = vec![
+            with_lineage(
+                experiment("c-000", "baseline", 1.0, ExperimentDecision::Keep),
+                R::Baseline,
+                None,
+                0,
+            ),
+            with_lineage(
+                experiment("c-001", "child", 2.0, ExperimentDecision::Discard),
+                R::Perturb,
+                Some("c-000"),
+                1,
+            ),
+            with_lineage(
+                experiment("c-002", "control", 3.0, ExperimentDecision::Discard),
+                R::Remeasure,
+                Some("c-000"),
+                1,
+            ),
+        ];
+        let refs: Vec<&Experiment> = exps.iter().collect();
+        let forest = build_forest(&refs);
+        assert_eq!(forest.len(), 1, "one root");
+        assert_eq!(forest[0].children.len(), 2, "two children of the baseline");
+
+        let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
+        let mut doc = String::new();
+        render(&mut doc, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
+        assert!(doc.contains("## Search Tree"), "tree section missing");
+        assert!(doc.contains("c-000 [Baseline"), "{doc}");
+        assert!(doc.contains("  c-001 [Perturb"), "child must be indented: {doc}");
+        // The role census is what makes a degenerate campaign visible: v72 spent
+        // 9 of 12 slots on controls and searched nothing, which a flat list hid.
+        assert!(doc.contains("Remeasure: 1") && doc.contains("Perturb: 1"), "{doc}");
+    }
+
+    #[test]
+    fn a_dangling_parent_becomes_a_root_rather_than_vanishing() {
+        use crate::experiment::DerivationRelation as R;
+        // Parent not present in the campaign (deleted, or a stale name reused).
+        // The node must still appear — silently pruning a subtree would hide
+        // real work from the report.
+        let exps = vec![with_lineage(
+            experiment("c-005", "orphan", 1.0, ExperimentDecision::Keep),
+            R::Perturb,
+            Some("c-999-missing"),
+            2,
+        )];
+        let refs: Vec<&Experiment> = exps.iter().collect();
+        let forest = build_forest(&refs);
+        assert_eq!(forest.len(), 1, "orphan must surface as a root");
+        assert_eq!(forest[0].exp.name_any(), "c-005");
+    }
+
+    #[test]
+    fn results_report_the_unbiased_metric_not_only_the_biased_one() {
+        let exps: Vec<Experiment> = Vec::new();
+        let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
+        let mut c = campaign();
+        let st = c.status.as_mut().unwrap();
+        st.best_objective = Some(6352.0);
+        st.incumbent_remeasured = Some(4522.0);
+        st.seed_noise_sigma = Some(1447.0);
+        st.control_runs = 9;
+        let mut doc = String::new();
+        render(&mut doc, "camp", "ns", &c, &template(), &exps, &runs, None).unwrap();
+        assert!(doc.contains("Incumbent Re-measured"), "{doc}");
+        assert!(doc.contains("Seed noise (sigma)"), "{doc}");
+        // The bias must be stated, not left for the reader to compute.
+        assert!(doc.contains("1830.0000"), "divergence must be rendered: {doc}");
+        assert!(doc.contains("NOT evidence of progress"), "{doc}");
+    }
+
     #[test]
     fn render_is_deterministic() {
         let exps = vec![experiment("e", "h", 2.0, ExperimentDecision::Keep)];
@@ -1420,6 +1591,7 @@ mod tests {
                 parameters: BTreeMap::from([("lr".to_string(), serde_json::json!(lr))]),
                 patch: None,
                 checkpoint_policy: None,
+                lineage: None,
                 env: vec![],
             },
             status: Some(ExperimentStatus {
@@ -1637,4 +1809,101 @@ mod tests {
         assert!(tex.contains("thebibliography"), "missing thebibliography env: {tex}");
         assert!(!tex.contains("[@good]"), "literal [@good] must be replaced by \\cite in latex: {tex}");
     }
+}
+
+/// One node of the derivation forest.
+pub struct TreeNode<'a> {
+    pub exp: &'a Experiment,
+    pub children: Vec<TreeNode<'a>>,
+}
+
+/// Build the derivation forest from `spec.lineage.parent`.
+///
+/// Roots are nodes with no parent, or whose parent is not in this campaign
+/// (a dangling edge — kept as a root rather than dropped, so a broken pointer
+/// is visible in the document instead of silently pruning a subtree).
+/// Experiments with no lineage at all are skipped; the caller reports that.
+pub fn build_forest<'a>(exps: &[&'a Experiment]) -> Vec<TreeNode<'a>> {
+    let present: std::collections::HashSet<String> =
+        exps.iter().map(|e| e.name_any()).collect();
+    let mut children_of: BTreeMap<String, Vec<&'a Experiment>> = BTreeMap::new();
+    let mut roots: Vec<&'a Experiment> = Vec::new();
+    for e in exps.iter().copied() {
+        let Some(l) = &e.spec.lineage else { continue };
+        match l.parent.as_ref().filter(|p| present.contains(*p)) {
+            Some(parent) => children_of.entry(parent.clone()).or_default().push(e),
+            None => roots.push(e),
+        }
+    }
+    roots
+        .into_iter()
+        .map(|r| attach(r, &children_of))
+        .collect()
+}
+
+fn attach<'a>(
+    exp: &'a Experiment,
+    children_of: &BTreeMap<String, Vec<&'a Experiment>>,
+) -> TreeNode<'a> {
+    // Depth is bounded by generation count in practice; a cycle would need a
+    // parent pointer to an ancestor, which the generator cannot produce
+    // (parents are always already-completed experiments).
+    let children = children_of
+        .get(&exp.name_any())
+        .map(|kids| kids.iter().map(|k| attach(k, children_of)).collect())
+        .unwrap_or_default();
+    TreeNode { exp, children }
+}
+
+fn render_tree_node(
+    out: &mut String,
+    node: &TreeNode<'_>,
+    depth: usize,
+) -> std::fmt::Result {
+    let pad = "  ".repeat(depth);
+    let name = node.exp.name_any();
+    let l = node.exp.spec.lineage.as_ref();
+    let role = l
+        .map(|l| format!("{:?}", l.relation))
+        .unwrap_or_else(|| "?".into());
+    let generation = l
+        .and_then(|l| l.generation)
+        .map(|g| format!("g{g}"))
+        .unwrap_or_default();
+    let deltas = l
+        .map(|l| {
+            l.perturbations
+                .iter()
+                .map(|d| match d.factor {
+                    Some(f) => format!("{} x{:.2}", d.param, f),
+                    None => format!("{}={:.4}", d.param, d.to),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let obj = node
+        .exp
+        .status
+        .as_ref()
+        .and_then(|s| s.metrics_detail.as_ref())
+        .and_then(|m| m.best.as_ref())
+        .and_then(|v| v.as_f64())
+        .map(|v| format!("{v:.4}"))
+        .unwrap_or_else(|| "-".into());
+    writeln!(
+        out,
+        "{pad}{name} [{role}{}{}] obj={obj}{}",
+        if generation.is_empty() { "" } else { " " },
+        generation,
+        if deltas.is_empty() {
+            String::new()
+        } else {
+            format!("  ({deltas})")
+        }
+    )?;
+    for c in &node.children {
+        render_tree_node(out, c, depth + 1)?;
+    }
+    Ok(())
 }
