@@ -22,9 +22,9 @@ use models::{
     ClusterSnapshot, ReportSpecDto, ReportSummary, ResourceSummary, SchedulingSnapshot,
     TemplateSummary,
 };
-use std::collections::{BTreeMap, HashSet};
 use panel_kit::{GrafanaDashboard, IdePanel, LayoutBuilder, PanelKind, PanelWin, use_workspace};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 
 /// Grafana base URL for the embedded learning-metric dashboards.
 const GRAFANA_BASE: &str = "https://grafana.casazza.io";
@@ -78,21 +78,56 @@ impl PanelKind for Panel {
     }
 }
 
+/// Gap between panels, and from the workspace edge.
+const GUTTER: f64 = 16.0;
+
+/// Stack `panels` (kind + height) down a column of width `w` starting at `x`,
+/// deriving every `y`. Height is then the only number a panel owns — growing
+/// one pushes the rest down instead of silently overlapping them, which is
+/// what a hand-summed coordinate table gets wrong the moment you edit it.
+fn column<K: Copy>(b: &mut LayoutBuilder, x: f64, w: f64, panels: &[(K, f64)]) -> Vec<PanelWin<K>> {
+    let mut y = GUTTER;
+    panels
+        .iter()
+        .map(|&(kind, h)| {
+            let win = b.at(kind, x, y, w, h);
+            y += h + GUTTER;
+            win
+        })
+        .collect()
+}
+
+/// Two columns: browse/curate on the left, the selected experiment on the right.
 fn default_layout() -> Vec<PanelWin<Panel>> {
+    const BROWSE_W: f64 = 640.0;
+    const DETAIL_W: f64 = 620.0;
     let mut b = LayoutBuilder::new();
-    vec![
-        b.at(Panel::Experiments, 16.0, 16.0, 640.0, 460.0),
-        b.at(Panel::ExperimentDetail, 672.0, 16.0, 620.0, 200.0),
-        // Tall by default: this hosts a whole Grafana dashboard, not one chart.
-        b.at(Panel::ExperimentMetrics, 672.0, 232.0, 620.0, 560.0),
-        b.at(Panel::ExperimentManifest, 672.0, 808.0, 620.0, 360.0),
-        b.at(Panel::Templates, 16.0, 492.0, 640.0, 320.0),
-        b.at(Panel::Campaigns, 16.0, 828.0, 640.0, 260.0),
-        b.at(Panel::Benchmarks, 672.0, 1184.0, 620.0, 320.0),
-        b.at(Panel::RuntimeProfiles, 16.0, 1104.0, 640.0, 260.0),
-        b.at(Panel::ReportCurator, 16.0, 1380.0, 640.0, 520.0),
-        b.at(Panel::Reports, 16.0, 1916.0, 640.0, 260.0),
-    ]
+    let mut wins = column(
+        &mut b,
+        GUTTER,
+        BROWSE_W,
+        &[
+            (Panel::Experiments, 460.0),
+            (Panel::Templates, 320.0),
+            (Panel::Campaigns, 260.0),
+            (Panel::RuntimeProfiles, 260.0),
+            (Panel::ReportCurator, 520.0),
+            (Panel::Reports, 260.0),
+        ],
+    );
+    wins.extend(column(
+        &mut b,
+        GUTTER + BROWSE_W + GUTTER,
+        DETAIL_W,
+        &[
+            (Panel::ExperimentDetail, 200.0),
+            // Tall by default: this hosts a whole Grafana dashboard, not one chart.
+            (Panel::ExperimentMetrics, 560.0),
+            (Panel::ExperimentManifest, 360.0),
+            (Panel::Benchmarks, 320.0),
+        ],
+    ));
+    wins
 }
 
 /// Admin-only page: the GPU-scheduling / inference stack. Rendered on a SEPARATE
@@ -116,12 +151,20 @@ impl PanelKind for AdminPanel {
 }
 
 fn admin_layout() -> Vec<PanelWin<AdminPanel>> {
+    const POOLS_W: f64 = 900.0;
+    const SIDE_W: f64 = 440.0;
     let mut b = LayoutBuilder::new();
-    vec![
-        b.at(AdminPanel::GpuPools, 16.0, 16.0, 900.0, 560.0),
-        b.at(AdminPanel::NodePower, 932.0, 16.0, 440.0, 260.0),
-        b.at(AdminPanel::Inference, 932.0, 292.0, 440.0, 284.0),
-    ]
+    let mut wins = column(&mut b, GUTTER, POOLS_W, &[(AdminPanel::GpuPools, 560.0)]);
+    wins.extend(column(
+        &mut b,
+        GUTTER + POOLS_W + GUTTER,
+        SIDE_W,
+        &[
+            (AdminPanel::NodePower, 260.0),
+            (AdminPanel::Inference, 284.0),
+        ],
+    ));
+    wins
 }
 
 /// App-specific theming layered after [`panel_kit::CSS`]: a high-contrast
@@ -160,8 +203,9 @@ const APP_CSS: &str = "
 /* The Grafana embed tracks the panel's height instead of a fixed 340px, so
    resizing/maximizing the panel actually gives the dashboard more room (it is
    ~1400px tall and scrolls internally otherwise). 100% resolves against
-   .panel-body's CONTENT box, so its padding is already excluded. */
-.embed-block { height:100%; min-height:260px; margin:0; }
+   .panel-body's CONTENT box, so its padding is already excluded; the collapse
+   floor is panel-kit's own .grafana-panel min-height. */
+.embed-block { height:100%; margin:0; }
 .ide-block { height:260px; margin:.4rem 0; }
 .todo { color:var(--yellow); font-size:.74rem; }
 .err { color:var(--red); font-size:.76rem; }
@@ -749,7 +793,11 @@ fn build_report_spec(
         .collect();
     let title_opt = {
         let t = title.trim();
-        if t.is_empty() { None } else { Some(t.to_string()) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
     };
     ReportSpecDto {
         namespace: campaign.namespace.clone(),
@@ -791,9 +839,7 @@ fn report_curator_view(
 
     let exp_rows: Vec<ResourceSummary> = experiments
         .into_iter()
-        .filter(|e| {
-            !sel_name.is_empty() && e.campaign.as_deref() == Some(sel_name.as_str())
-        })
+        .filter(|e| !sel_name.is_empty() && e.campaign.as_deref() == Some(sel_name.as_str()))
         .collect();
 
     let excluded_set = excluded.read().clone();
@@ -1185,7 +1231,9 @@ async fn save_report(dto: ReportSpecDto) -> Result<ReportSummary, String> {
     if !resp.status().is_success() {
         return Err(resp.text().await.unwrap_or_else(|e| e.to_string()));
     }
-    resp.json::<ReportSummary>().await.map_err(|e| e.to_string())
+    resp.json::<ReportSummary>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// `POST /api/reports/preview` — compose the dossier Markdown; nothing persisted.
