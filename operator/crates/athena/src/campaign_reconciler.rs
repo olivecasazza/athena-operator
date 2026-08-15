@@ -1419,6 +1419,13 @@ async fn ensure_mesh(
 /// Build the mesh-llm serving Deployment: `mesh-llm serve --model <m> --listen-all
 /// --headless --port <p>` with the campaign-specified node placement, tolerations,
 /// GPU resources, and runtimeClassName.
+///
+/// GPU meshes are Kueue-managed: the POD TEMPLATE (not just the Deployment)
+/// carries `kueue.x-k8s.io/queue-name` + `kueue.x-k8s.io/priority-class` because
+/// Kueue's pod integration reads pod labels and gates the pod with a scheduling
+/// gate at admission — Deployments have no suspend field, so labels are the whole
+/// mechanism. CPU-only meshes (empty gpuResources) stay unlabeled and schedule
+/// directly.
 fn build_mesh_deployment(
     name: &str,
     ns: &str,
@@ -1469,6 +1476,20 @@ fn build_mesh_deployment(
         Some(mesh.node_selector.clone())
     };
 
+    // Kueue labels go on the pod template only; the selector/Service keep the
+    // base labels (selectors are immutable and Kueue doesn't read them).
+    let mut pod_labels = labels.clone();
+    if !mesh.gpu_resources.is_empty() && !mesh.queue_name.is_empty() {
+        pod_labels.insert(
+            "kueue.x-k8s.io/queue-name".to_string(),
+            mesh.queue_name.clone(),
+        );
+        pod_labels.insert(
+            "kueue.x-k8s.io/priority-class".to_string(),
+            mesh.priority_class.clone(),
+        );
+    }
+
     let container = Container {
         name: "mesh-llm".to_string(),
         image: Some(mesh.image.clone()),
@@ -1514,7 +1535,7 @@ fn build_mesh_deployment(
             },
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(labels.clone()),
+                    labels: Some(pod_labels),
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
@@ -2661,5 +2682,66 @@ mod tests {
             Some(&Value::Null)
         );
         assert!(exp.spec.hypothesis.contains("canary gate"));
+    }
+
+    // Kueue's pod integration reads POD labels: a GPU mesh must carry the
+    // queue-name/priority-class pair on the pod template (default athena-gpu /
+    // mesh-high), while a CPU-only mesh must stay out of Kueue entirely.
+    #[test]
+    fn mesh_pod_template_kueue_labels_gpu_only() {
+        let mesh = |gpu: serde_json::Value| -> InferenceMeshSpec {
+            serde_json::from_value(json!({
+                "image": "ghcr.io/x/mesh-llm:1",
+                "model": "m",
+                "gpuResources": gpu,
+            }))
+            .unwrap()
+        };
+        let labels = BTreeMap::from([("app".to_string(), "mesh-llm".to_string())]);
+        let owner = OwnerReference::default;
+
+        let gpu_dep = build_mesh_deployment(
+            "mesh-llm-c",
+            "default",
+            &mesh(json!({"nvidia.com/gpu": "1"})),
+            &labels,
+            owner(),
+        );
+        let pod_labels = |d: &Deployment| {
+            d.spec
+                .as_ref()
+                .unwrap()
+                .template
+                .metadata
+                .as_ref()
+                .unwrap()
+                .labels
+                .clone()
+                .unwrap()
+        };
+        let gpu_labels = pod_labels(&gpu_dep);
+        assert_eq!(
+            gpu_labels
+                .get("kueue.x-k8s.io/queue-name")
+                .map(String::as_str),
+            Some("athena-gpu")
+        );
+        assert_eq!(
+            gpu_labels
+                .get("kueue.x-k8s.io/priority-class")
+                .map(String::as_str),
+            Some("mesh-high")
+        );
+        // Selector must NOT pick up the kueue labels (selectors are immutable).
+        assert_eq!(
+            gpu_dep.spec.as_ref().unwrap().selector.match_labels,
+            Some(labels.clone())
+        );
+
+        let cpu_dep =
+            build_mesh_deployment("mesh-llm-c", "default", &mesh(json!({})), &labels, owner());
+        let cpu_labels = pod_labels(&cpu_dep);
+        assert!(!cpu_labels.contains_key("kueue.x-k8s.io/queue-name"));
+        assert!(!cpu_labels.contains_key("kueue.x-k8s.io/priority-class"));
     }
 }

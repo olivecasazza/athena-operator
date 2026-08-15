@@ -182,8 +182,9 @@ fn default_nvidia_runtime_class() -> String {
 
 /// Ephemeral OpenAI-compatible inference endpoint (mesh-llm) the operator brings
 /// up for the duration of a campaign. Runs as a companion Deployment+Service the
-/// campaign owns; keep it OUT of the Kueue-managed GPU pool (e.g. pin to traitor)
-/// so it can't over-subscribe quota Kueue arbitrates for experiment Jobs.
+/// campaign owns. When it requests GPUs its pod carries the Kueue queue-name /
+/// priority-class labels so the pod integration gates it against the GPU
+/// ClusterQueue quota; CPU-only meshes stay unlabeled and schedule directly.
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct InferenceMeshSpec {
@@ -211,6 +212,13 @@ pub struct InferenceMeshSpec {
     /// runtimeClassName (e.g. "nvidia"). Required for NVIDIA GPU pods on k3s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class_name: Option<String>,
+    /// Kueue LocalQueue name (maps to the GPU ClusterQueue). Only stamped on
+    /// the pod when `gpuResources` is non-empty — CPU-only meshes bypass Kueue.
+    #[serde(default = "default_cluster_queue_name")]
+    pub queue_name: String,
+    /// Kueue WorkloadPriorityClass — `mesh-high` preempts default-priority spot.
+    #[serde(default = "default_priority_class")]
+    pub priority_class: String,
     /// Extra args appended to `mesh-llm serve`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,

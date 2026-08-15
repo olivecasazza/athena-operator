@@ -855,6 +855,16 @@
                         "minimum": 0.0,
                         "type": "integer"
                       },
+                      "priorityClass": {
+                        "default": "mesh-high",
+                        "description": "Kueue WorkloadPriorityClass — `mesh-high` preempts default-priority spot.",
+                        "type": "string"
+                      },
+                      "queueName": {
+                        "default": "athena-gpu",
+                        "description": "Kueue LocalQueue name (maps to the GPU ClusterQueue). Only stamped on the pod when `gpuResources` is non-empty — CPU-only meshes bypass Kueue.",
+                        "type": "string"
+                      },
                       "runtimeClassName": {
                         "description": "runtimeClassName (e.g. \"nvidia\"). Required for NVIDIA GPU pods on k3s.",
                         "nullable": true,
