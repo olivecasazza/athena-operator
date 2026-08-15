@@ -24,7 +24,10 @@ use athena_console_web::models::{
     ClusterSnapshot, ReportSpecDto, ReportSummary, ResourceSummary, TemplateSummary,
 };
 use axum::{
-    Json, Router, extract::Path, http::StatusCode, response::IntoResponse,
+    Json, Router,
+    extract::Path,
+    http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
 };
 use k8s_openapi::api::batch::v1::Job;
@@ -125,17 +128,25 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
     let profiles_api = Api::<RuntimeProfile>::all(client.clone());
     let reports_api = Api::<ResearchReport>::all(client);
 
-    let (exp_list, campaign_list, tpl_list, suite_list, run_list, profile_list, job_list, report_list) =
-        tokio::try_join!(
-            experiments_api.list(&lp),
-            campaigns_api.list(&lp),
-            templates_api.list(&lp),
-            suites_api.list(&lp),
-            runs_api.list(&lp),
-            profiles_api.list(&lp),
-            jobs_api.list(&lp),
-            reports_api.list(&lp),
-        )?;
+    let (
+        exp_list,
+        campaign_list,
+        tpl_list,
+        suite_list,
+        run_list,
+        profile_list,
+        job_list,
+        report_list,
+    ) = tokio::try_join!(
+        experiments_api.list(&lp),
+        campaigns_api.list(&lp),
+        templates_api.list(&lp),
+        suites_api.list(&lp),
+        runs_api.list(&lp),
+        profiles_api.list(&lp),
+        jobs_api.list(&lp),
+        reports_api.list(&lp),
+    )?;
 
     // Run windows from the experiment Jobs (exp-<name>) so the embed can scope its
     // Grafana time range to when the experiment actually ran.
@@ -421,7 +432,10 @@ async fn create_report(
 /// unsaved draft spec. Read-only; nothing is persisted.
 async fn preview_report(Json(dto): Json<ReportSpecDto>) -> Result<String, (StatusCode, String)> {
     if dto.campaign_ref.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "campaignRef is required".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "campaignRef is required".to_string(),
+        ));
     }
     let client = Client::try_default().await.map_err(ise)?;
     let spec = spec_from_dto(&dto);

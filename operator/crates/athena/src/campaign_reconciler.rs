@@ -472,9 +472,8 @@ pub async fn reconcile(
 
             for i in 0..want.min(budget_left) {
                 let idx = total + i;
-                let is_control_slot = is_pbt
-                    && best_ctx.is_some()
-                    && control_pop.is_some_and(|pop| idx % pop == 0);
+                let is_control_slot =
+                    is_pbt && best_ctx.is_some() && control_pop.is_some_and(|pop| idx % pop == 0);
                 if is_control_slot {
                     // Replicate of the incumbent: same params, no perturbation,
                     // and deliberately exempt from the science_key dedup below —
@@ -563,10 +562,7 @@ pub async fn reconcile(
                     parent_uid: best_exp.and_then(|e| e.uid()),
                     generation: control_pop.map(|pop| idx / pop),
                     strategy: Some(campaign.spec.strategy.strategy_type.clone()),
-                    perturbations: parameter_deltas(
-                        best_ctx.map(|(_, bp)| bp),
-                        &params,
-                    ),
+                    perturbations: parameter_deltas(best_ctx.map(|(_, bp)| bp), &params),
                     salt: Some(chosen_salt),
                 };
                 let exp = build_experiment(
@@ -955,7 +951,10 @@ fn pbt_experiment(
             if spread.is_empty() {
                 "pbt cold start: no numeric params to spread".to_string()
             } else {
-                format!("pbt cold start: seed spread from defaults: {}", spread.join(", "))
+                format!(
+                    "pbt cold start: seed spread from defaults: {}",
+                    spread.join(", ")
+                )
             }
         }
         Some((best_name, best_params)) => {
@@ -1232,10 +1231,8 @@ fn build_experiment(
                 // is what makes the tree queryable with
                 //   kubectl get exp -l research.nixlab.io/parent=<name>
                 //   kubectl get exp -l research.nixlab.io/role=Remeasure
-                let mut l = BTreeMap::from([(
-                    CAMPAIGN_LABEL.to_string(),
-                    campaign_name.to_string(),
-                )]);
+                let mut l =
+                    BTreeMap::from([(CAMPAIGN_LABEL.to_string(), campaign_name.to_string())]);
                 if let Some(lin) = &lineage {
                     l.insert(ROLE_LABEL.to_string(), format!("{:?}", lin.relation));
                     if let Some(g) = lin.generation {
@@ -2132,7 +2129,10 @@ mod tests {
         let scores = [4838.16, 3849.36, 3390.02];
         let point = seed_noise_sigma(&scores).unwrap();
         let gate = sigma_upper_bound(&scores).unwrap();
-        assert!(gate > point, "gate {gate} must exceed point estimate {point}");
+        assert!(
+            gate > point,
+            "gate {gate} must exceed point estimate {point}"
+        );
         assert!(
             (gate / point - 2.1169).abs() < 1e-3,
             "n=3 factor should be the chi-square 80% one-sided limit"
@@ -2148,12 +2148,32 @@ mod tests {
     fn a_challenger_inside_the_noise_floor_does_not_displace_the_incumbent() {
         let sigma = Some(740.0);
         // +400 on ~4000 is a 10% lead and still pure noise at this sigma.
-        assert!(!beats_incumbent(4400.0, 4000.0, sigma, &ObjectiveGoal::Maximize));
+        assert!(!beats_incumbent(
+            4400.0,
+            4000.0,
+            sigma,
+            &ObjectiveGoal::Maximize
+        ));
         // Clearing one sigma does displace.
-        assert!(beats_incumbent(4800.0, 4000.0, sigma, &ObjectiveGoal::Maximize));
+        assert!(beats_incumbent(
+            4800.0,
+            4000.0,
+            sigma,
+            &ObjectiveGoal::Maximize
+        ));
         // Minimize direction is mirrored.
-        assert!(beats_incumbent(3200.0, 4000.0, sigma, &ObjectiveGoal::Minimize));
-        assert!(!beats_incumbent(3600.0, 4000.0, sigma, &ObjectiveGoal::Minimize));
+        assert!(beats_incumbent(
+            3200.0,
+            4000.0,
+            sigma,
+            &ObjectiveGoal::Minimize
+        ));
+        assert!(!beats_incumbent(
+            3600.0,
+            4000.0,
+            sigma,
+            &ObjectiveGoal::Minimize
+        ));
     }
 
     #[test]
@@ -2161,8 +2181,18 @@ mod tests {
         // No control runs yet -> no sigma -> hold. Acting on an uncalibrated
         // comparison is exactly the behaviour this rule removes, so an absent
         // sigma must fail CLOSED, not fall back to argmax.
-        assert!(!beats_incumbent(9999.0, 1.0, None, &ObjectiveGoal::Maximize));
-        assert!(!beats_incumbent(0.0, 9999.0, None, &ObjectiveGoal::Minimize));
+        assert!(!beats_incumbent(
+            9999.0,
+            1.0,
+            None,
+            &ObjectiveGoal::Maximize
+        ));
+        assert!(!beats_incumbent(
+            0.0,
+            9999.0,
+            None,
+            &ObjectiveGoal::Minimize
+        ));
     }
 
     #[test]
@@ -2205,7 +2235,11 @@ mod tests {
         };
         // Byte-identical to the legacy string, so the prose fallback in
         // is_control_experiment still matches objects written by this version.
-        assert!(l.describe().starts_with(CONTROL_HYPOTHESIS_PREFIX), "{}", l.describe());
+        assert!(
+            l.describe().starts_with(CONTROL_HYPOTHESIS_PREFIX),
+            "{}",
+            l.describe()
+        );
 
         let p = ExperimentLineage {
             relation: DerivationRelation::Perturb,
@@ -2249,7 +2283,10 @@ mod tests {
         // the control set and freeze the incumbent.
         e.spec.lineage = None;
         e.spec.hypothesis = "control: re-measure incumbent foo-000 on a fresh seed".into();
-        assert!(is_control_experiment(&e), "legacy prose fallback must survive");
+        assert!(
+            is_control_experiment(&e),
+            "legacy prose fallback must survive"
+        );
         e.spec.hypothesis = "pbt exploit+explore from foo-000: gait x2.0".into();
         assert!(!is_control_experiment(&e));
     }
@@ -2329,10 +2366,8 @@ mod tests {
             .map(|i| pbt_experiment(&t, None, 1.2, i, 0).0)
             .collect();
         assert_eq!(seeds[0].get("lr"), Some(&json!(0.1)), "child 0 is baseline");
-        let distinct: std::collections::BTreeSet<String> = seeds
-            .iter()
-            .map(|p| format!("{:?}", p.get("lr")))
-            .collect();
+        let distinct: std::collections::BTreeSet<String> =
+            seeds.iter().map(|p| format!("{:?}", p.get("lr"))).collect();
         assert!(
             distinct.len() > 1,
             "cold-start population must not be N clones, got {distinct:?}"

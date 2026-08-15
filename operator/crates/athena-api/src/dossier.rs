@@ -57,7 +57,10 @@ impl<'a> Curation<'a> {
 /// Apply a curation to the experiment list: keep `included` (or all when empty),
 /// drop `excluded`, preserving input order. Returns borrowed refs so callers can
 /// also compute counts. `None` = every experiment, unfiltered.
-pub fn curate<'a>(experiments: &'a [Experiment], curation: Option<&Curation>) -> Vec<&'a Experiment> {
+pub fn curate<'a>(
+    experiments: &'a [Experiment],
+    curation: Option<&Curation>,
+) -> Vec<&'a Experiment> {
     // `about` narrows the document to a branch of the search tree BEFORE the
     // explicit include/exclude lists are applied, so a scientist can still
     // prune within the subtree they scoped to.
@@ -87,10 +90,7 @@ pub fn curate<'a>(experiments: &'a [Experiment], curation: Option<&Curation>) ->
 /// Breadth-first over the parent pointers rather than recursion, and it tracks
 /// visited names so a malformed cycle terminates instead of hanging the
 /// controller. Returns just the root when nothing derives from it.
-pub fn descendants_of(
-    experiments: &[Experiment],
-    root: &str,
-) -> std::collections::HashSet<String> {
+pub fn descendants_of(experiments: &[Experiment], root: &str) -> std::collections::HashSet<String> {
     let mut children_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for e in experiments {
         if let Some(parent) = e.spec.lineage.as_ref().and_then(|l| l.parent.as_ref()) {
@@ -185,7 +185,11 @@ pub fn render(
             if let Some(u) = r.url.as_deref().filter(|u| !u.is_empty()) {
                 writeln!(out, "    resource: {}", yaml_scalar(u))?;
             } else if let Some(d) = r.doi.as_deref().filter(|d| !d.is_empty()) {
-                writeln!(out, "    resource: {}", yaml_scalar(&format!("https://doi.org/{d}")))?;
+                writeln!(
+                    out,
+                    "    resource: {}",
+                    yaml_scalar(&format!("https://doi.org/{d}"))
+                )?;
             }
             writeln!(out, "    title: {}", yaml_scalar(&r.title))?;
             if let Some(sup) = r.supports.as_deref().filter(|s| !s.is_empty()) {
@@ -202,9 +206,18 @@ pub fn render(
     // No wall-clock timestamp in the body: `render` must be a pure function of its
     // inputs so the report reconciler can content-diff the dossier without churning
     // (assembly time is recorded in ResearchReport `status.lastAssembledTime`).
-    writeln!(out, "_Campaign: {} · Namespace: {}_", campaign_name, namespace)?;
+    writeln!(
+        out,
+        "_Campaign: {} · Namespace: {}_",
+        campaign_name, namespace
+    )?;
     if curation.is_some() {
-        writeln!(out, "_Curated: {} of {} experiments_", exps.len(), experiments.len())?;
+        writeln!(
+            out,
+            "_Curated: {} of {} experiments_",
+            exps.len(),
+            experiments.len()
+        )?;
     }
     writeln!(out)?;
 
@@ -253,9 +266,21 @@ pub fn render(
 
     writeln!(out, "**Strategy & Budget**")?;
     writeln!(out)?;
-    writeln!(out, "- Strategy: `{}`", campaign.spec.strategy.strategy_type)?;
-    writeln!(out, "- Max experiments: {}", campaign.spec.budget.max_experiments)?;
-    writeln!(out, "- Max duration: `{}`", campaign.spec.budget.max_duration)?;
+    writeln!(
+        out,
+        "- Strategy: `{}`",
+        campaign.spec.strategy.strategy_type
+    )?;
+    writeln!(
+        out,
+        "- Max experiments: {}",
+        campaign.spec.budget.max_experiments
+    )?;
+    writeln!(
+        out,
+        "- Max duration: `{}`",
+        campaign.spec.budget.max_duration
+    )?;
     writeln!(out)?;
 
     if !template.spec.parameter_schema.is_empty() {
@@ -265,7 +290,13 @@ pub fn render(
         writeln!(out, "|------|------|-------------|")?;
         for (name, param) in &template.spec.parameter_schema {
             let desc = param.description.as_deref().unwrap_or("—");
-            writeln!(out, "| `{}` | {} | {} |", name, param.parameter_type, md_cell(desc))?;
+            writeln!(
+                out,
+                "| `{}` | {} | {} |",
+                name,
+                param.parameter_type,
+                md_cell(desc)
+            )?;
         }
         writeln!(out)?;
     }
@@ -301,8 +332,14 @@ pub fn render(
     let obj_metric = &template.spec.objective.metric;
     writeln!(out, "## Experiments")?;
     writeln!(out)?;
-    writeln!(out, "| # | Name | Hypothesis | Parameters | Objective Value | Phase | Decision |")?;
-    writeln!(out, "|---|------|------------|------------|-----------------|-------|----------|")?;
+    writeln!(
+        out,
+        "| # | Name | Hypothesis | Parameters | Objective Value | Phase | Decision |"
+    )?;
+    writeln!(
+        out,
+        "|---|------|------------|------------|-----------------|-------|----------|"
+    )?;
     for (i, exp) in exps.iter().copied().enumerate() {
         let name = exp.name_any();
         let hypothesis = md_cell(&exp.spec.hypothesis);
@@ -438,12 +475,22 @@ pub fn render(
                     .as_ref()
                     .map(|s| format!("{:?}", s.phase))
                     .unwrap_or_else(|| "—".to_string());
-                writeln!(out, "**BenchmarkRun:** `{}`  Phase: `{}`", run_name, phase_str)?;
+                writeln!(
+                    out,
+                    "**BenchmarkRun:** `{}`  Phase: `{}`",
+                    run_name, phase_str
+                )?;
                 writeln!(out)?;
                 if let Some(status) = &run.status {
                     if !status.aggregate_metrics.is_empty() {
-                        writeln!(out, "| Metric | Mean | Std | Min | Max | Count | CI Low | CI High |")?;
-                        writeln!(out, "|--------|------|-----|-----|-----|-------|--------|---------|")?;
+                        writeln!(
+                            out,
+                            "| Metric | Mean | Std | Min | Max | Count | CI Low | CI High |"
+                        )?;
+                        writeln!(
+                            out,
+                            "|--------|------|-----|-----|-----|-------|--------|---------|"
+                        )?;
                         for (metric_name, agg) in &status.aggregate_metrics {
                             let count_str = agg
                                 .count
@@ -513,7 +560,11 @@ pub fn render(
                         parts.push(format!("pods=[{}]", pods.join(",")));
                     }
                 }
-                if parts.is_empty() { "_not recorded_".to_string() } else { parts.join(", ") }
+                if parts.is_empty() {
+                    "_not recorded_".to_string()
+                } else {
+                    parts.join(", ")
+                }
             })
             .unwrap_or_else(|| "_not recorded_".to_string());
         let cost_str = exp
@@ -528,7 +579,11 @@ pub fn render(
                 if let Some(rt) = c.runtime_seconds {
                     parts.push(format!("runtime_seconds={}", rt));
                 }
-                if parts.is_empty() { "_not recorded_".to_string() } else { parts.join(", ") }
+                if parts.is_empty() {
+                    "_not recorded_".to_string()
+                } else {
+                    parts.join(", ")
+                }
             })
             .unwrap_or_else(|| "_not recorded_".to_string());
         let provenance = exp
@@ -608,10 +663,18 @@ pub fn render(
                 writeln!(out, "## Citation Reconciliation")?;
                 writeln!(out)?;
                 if !check.cited_undefined.is_empty() {
-                    writeln!(out, "cited but undefined: {}", check.cited_undefined.join(", "))?;
+                    writeln!(
+                        out,
+                        "cited but undefined: {}",
+                        check.cited_undefined.join(", ")
+                    )?;
                 }
                 if !check.defined_uncited.is_empty() {
-                    writeln!(out, "defined but never cited: {}", check.defined_uncited.join(", "))?;
+                    writeln!(
+                        out,
+                        "defined but never cited: {}",
+                        check.defined_uncited.join(", ")
+                    )?;
                 }
                 writeln!(out)?;
             }
@@ -632,10 +695,18 @@ pub fn render(
     for exp in exps.iter().copied() {
         let exp_name = exp.name_any();
         let artifacts = exp.status.as_ref().and_then(|s| s.artifacts.as_ref());
-        let workspace = artifacts.and_then(|a| a.workspace_uri.as_deref()).unwrap_or("—");
-        let journal = artifacts.and_then(|a| a.journal_uri.as_deref()).unwrap_or("—");
-        let provenance = artifacts.and_then(|a| a.provenance_uri.as_deref()).unwrap_or("—");
-        let checkpoints = artifacts.and_then(|a| a.checkpoints_uri.as_deref()).unwrap_or("—");
+        let workspace = artifacts
+            .and_then(|a| a.workspace_uri.as_deref())
+            .unwrap_or("—");
+        let journal = artifacts
+            .and_then(|a| a.journal_uri.as_deref())
+            .unwrap_or("—");
+        let provenance = artifacts
+            .and_then(|a| a.provenance_uri.as_deref())
+            .unwrap_or("—");
+        let checkpoints = artifacts
+            .and_then(|a| a.checkpoints_uri.as_deref())
+            .unwrap_or("—");
         let report_uri = runs_by_experiment
             .get(&exp_name)
             .and_then(|runs| runs.last())
@@ -733,7 +804,11 @@ pub async fn assemble(
         curation,
     )
     .expect("writing to String is infallible");
-    Ok(Dossier { markdown, latex, included })
+    Ok(Dossier {
+        markdown,
+        latex,
+        included,
+    })
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -883,7 +958,10 @@ pub struct CitationCheck {
 /// Pure check: scan all section bodies for `[@key]` citations and cross-reference
 /// against the provided reference list. Seeded hypotheses and other fields are
 /// NOT scanned — sections only.
-pub fn citation_check(sections: &BTreeMap<String, String>, references: &[Reference]) -> CitationCheck {
+pub fn citation_check(
+    sections: &BTreeMap<String, String>,
+    references: &[Reference],
+) -> CitationCheck {
     // Collect every cited key into a set.
     let mut cited_set: HashSet<String> = HashSet::new();
     for body in sections.values() {
@@ -906,10 +984,19 @@ pub fn citation_check(sections: &BTreeMap<String, String>, references: &[Referen
     let defined_uncited: Vec<String> = references
         .iter()
         .filter(|r| !cited_set.contains(&r.key))
-        .filter_map(|r| if seen.insert(r.key.as_str()) { Some(r.key.clone()) } else { None })
+        .filter_map(|r| {
+            if seen.insert(r.key.as_str()) {
+                Some(r.key.clone())
+            } else {
+                None
+            }
+        })
         .collect();
 
-    CitationCheck { cited_undefined, defined_uncited }
+    CitationCheck {
+        cited_undefined,
+        defined_uncited,
+    }
 }
 
 /// Assemble the dossier as a standalone LaTeX document into `out`, mirroring
@@ -1004,7 +1091,11 @@ pub fn render_latex(
     let obj_spec = &template.spec.objective;
     writeln!(out, r"\subsection*{{Objective}}")?;
     writeln!(out, r"\begin{{itemize}}")?;
-    writeln!(out, r"  \item Metric: \texttt{{{}}}", tex_escape(&obj_spec.metric))?;
+    writeln!(
+        out,
+        r"  \item Metric: \texttt{{{}}}",
+        tex_escape(&obj_spec.metric)
+    )?;
     writeln!(out, r"  \item Goal: \texttt{{{:?}}}", obj_spec.goal)?;
     writeln!(out, r"\end{{itemize}}")?;
     writeln!(out)?;
@@ -1016,7 +1107,11 @@ pub fn render_latex(
         r"  \item Strategy: \texttt{{{}}}",
         tex_escape(&campaign.spec.strategy.strategy_type)
     )?;
-    writeln!(out, r"  \item Max experiments: {}", campaign.spec.budget.max_experiments)?;
+    writeln!(
+        out,
+        r"  \item Max experiments: {}",
+        campaign.spec.budget.max_experiments
+    )?;
     writeln!(
         out,
         r"  \item Max duration: \texttt{{{}}}",
@@ -1217,7 +1312,10 @@ pub fn render_latex(
                     continue;
                 }
                 if let Some(fv) = v.as_f64() {
-                    distinct.entry(k.clone()).or_default().insert(format!("{}", fv));
+                    distinct
+                        .entry(k.clone())
+                        .or_default()
+                        .insert(format!("{}", fv));
                 }
             }
         }
@@ -1275,7 +1373,13 @@ pub fn render_latex(
     // ── 6. Reproducibility ───────────────────────────────────────────────────
     writeln!(out, r"\section{{Reproducibility}}")?;
     writeln!(out)?;
-    let git_commit = template.spec.source.git.commit.as_deref().unwrap_or("not recorded");
+    let git_commit = template
+        .spec
+        .source
+        .git
+        .commit
+        .as_deref()
+        .unwrap_or("not recorded");
     writeln!(out, r"Git commit: \texttt{{{}}}", tex_escape(git_commit))?;
     writeln!(out)?;
     writeln!(out, r"\begin{{itemize}}")?;
@@ -1297,7 +1401,11 @@ pub fn render_latex(
                         parts.push(format!("pods=[{}]", pods.join(",")));
                     }
                 }
-                if parts.is_empty() { "not recorded".to_string() } else { parts.join(", ") }
+                if parts.is_empty() {
+                    "not recorded".to_string()
+                } else {
+                    parts.join(", ")
+                }
             })
             .unwrap_or_else(|| "not recorded".to_string());
         let cost_str = exp
@@ -1312,7 +1420,11 @@ pub fn render_latex(
                 if let Some(rt) = c.runtime_seconds {
                     parts.push(format!("runtime_seconds={}", rt));
                 }
-                if parts.is_empty() { "not recorded".to_string() } else { parts.join(", ") }
+                if parts.is_empty() {
+                    "not recorded".to_string()
+                } else {
+                    parts.join(", ")
+                }
             })
             .unwrap_or_else(|| "not recorded".to_string());
         let provenance = exp
@@ -1379,10 +1491,18 @@ pub fn render_latex(
     for exp in exps.iter().copied() {
         let exp_name = exp.name_any();
         let artifacts = exp.status.as_ref().and_then(|s| s.artifacts.as_ref());
-        let workspace = artifacts.and_then(|a| a.workspace_uri.as_deref()).unwrap_or("\u{2014}");
-        let journal = artifacts.and_then(|a| a.journal_uri.as_deref()).unwrap_or("\u{2014}");
-        let provenance = artifacts.and_then(|a| a.provenance_uri.as_deref()).unwrap_or("\u{2014}");
-        let checkpoints = artifacts.and_then(|a| a.checkpoints_uri.as_deref()).unwrap_or("\u{2014}");
+        let workspace = artifacts
+            .and_then(|a| a.workspace_uri.as_deref())
+            .unwrap_or("\u{2014}");
+        let journal = artifacts
+            .and_then(|a| a.journal_uri.as_deref())
+            .unwrap_or("\u{2014}");
+        let provenance = artifacts
+            .and_then(|a| a.provenance_uri.as_deref())
+            .unwrap_or("\u{2014}");
+        let checkpoints = artifacts
+            .and_then(|a| a.checkpoints_uri.as_deref())
+            .unwrap_or("\u{2014}");
         let report_uri = runs_by_experiment
             .get(&exp_name)
             .and_then(|runs| runs.last())
@@ -1470,9 +1590,17 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use serde_json::json;
 
-    fn experiment(name: &str, hypothesis: &str, val_bpb: f64, decision: ExperimentDecision) -> Experiment {
+    fn experiment(
+        name: &str,
+        hypothesis: &str,
+        val_bpb: f64,
+        decision: ExperimentDecision,
+    ) -> Experiment {
         Experiment {
-            metadata: ObjectMeta { name: Some(name.to_string()), ..Default::default() },
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
             spec: ExperimentSpec {
                 campaign_ref: "camp".into(),
                 hypothesis: hypothesis.into(),
@@ -1493,12 +1621,20 @@ mod tests {
 
     fn campaign() -> ResearchCampaign {
         ResearchCampaign {
-            metadata: ObjectMeta { name: Some("camp".into()), ..Default::default() },
+            metadata: ObjectMeta {
+                name: Some("camp".into()),
+                ..Default::default()
+            },
             spec: ResearchCampaignSpec {
                 template_ref: "tmpl".into(),
                 concurrency: 1,
-                budget: CampaignBudget { max_experiments: 10, max_duration: "1h".into() },
-                strategy: StrategySpec { strategy_type: "heuristic".into() },
+                budget: CampaignBudget {
+                    max_experiments: 10,
+                    max_duration: "1h".into(),
+                },
+                strategy: StrategySpec {
+                    strategy_type: "heuristic".into(),
+                },
                 benchmark_suite_ref: None,
                 benchmark_runtime_profile_ref: None,
                 population_size: None,
@@ -1517,13 +1653,23 @@ mod tests {
 
     fn template() -> ExperimentTemplate {
         ExperimentTemplate {
-            metadata: ObjectMeta { name: Some("tmpl".into()), ..Default::default() },
+            metadata: ObjectMeta {
+                name: Some("tmpl".into()),
+                ..Default::default()
+            },
             spec: ExperimentTemplateSpec {
                 runtime_profile_ref: "rp".into(),
                 source: SourceSpec {
-                    git: GitSource { url: "u".into(), r#ref: "main".into(), commit: Some("abc123".into()) },
+                    git: GitSource {
+                        url: "u".into(),
+                        r#ref: "main".into(),
+                        commit: Some("abc123".into()),
+                    },
                 },
-                objective: ObjectiveSpec { metric: "val_bpb".into(), goal: ObjectiveGoal::Minimize },
+                objective: ObjectiveSpec {
+                    metric: "val_bpb".into(),
+                    goal: ObjectiveGoal::Minimize,
+                },
                 metrics: MetricsSpec::default(),
                 parameter_schema: BTreeMap::new(),
                 defaults: BTreeMap::new(),
@@ -1539,20 +1685,42 @@ mod tests {
     #[test]
     fn render_uncurated_produces_sections_and_escapes_pipes() {
         let exps = vec![
-            experiment("exp-a", "baseline from defaults", 2.34, ExperimentDecision::Discard),
-            experiment("exp-b", "perturb lr | higher is worse", 2.10, ExperimentDecision::Keep),
+            experiment(
+                "exp-a",
+                "baseline from defaults",
+                2.34,
+                ExperimentDecision::Discard,
+            ),
+            experiment(
+                "exp-b",
+                "perturb lr | higher is worse",
+                2.10,
+                ExperimentDecision::Keep,
+            ),
         ];
         let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
         let mut doc = String::new();
-        render(&mut doc, "camp", "research", &campaign(), &template(), &exps, &runs, None)
-            .expect("infallible");
+        render(
+            &mut doc,
+            "camp",
+            "research",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            None,
+        )
+        .expect("infallible");
 
         assert!(doc.contains("# Research Dossier: camp"), "{doc}");
         assert!(doc.contains("## Campaign Journal") && doc.contains("## Artifact Index"));
         assert!(doc.contains("exp-a") && doc.contains("exp-b"));
         assert!(doc.contains("**Best Experiment:** exp-b"));
         assert!(doc.contains("2.3400") && doc.contains("2.1000"));
-        assert!(doc.contains("perturb lr \\| higher is worse"), "pipe not escaped: {doc}");
+        assert!(
+            doc.contains("perturb lr \\| higher is worse"),
+            "pipe not escaped: {doc}"
+        );
     }
 
     // render() MUST be a pure function of its inputs: the report reconciler
@@ -1598,14 +1766,24 @@ mod tests {
 
         // A citation WITH a definition is silent.
         let ok = "---\ntype: X\n---\ncites [^src]\n\n[^src]: A title — <https://example.com/p>\n";
-        assert!(okf_check(ok).warnings.is_empty(), "{:?}", okf_check(ok).warnings);
+        assert!(
+            okf_check(ok).warnings.is_empty(),
+            "{:?}",
+            okf_check(ok).warnings
+        );
     }
 
     #[test]
     fn authored_citations_are_rewritten_to_okf_footnotes() {
-        assert_eq!(cites_to_footnotes("see [@smith24] here"), "see [^smith24] here");
+        assert_eq!(
+            cites_to_footnotes("see [@smith24] here"),
+            "see [^smith24] here"
+        );
         // Malformed patterns are left exactly as authored rather than mangled.
-        assert_eq!(cites_to_footnotes("[@] and [@unclosed"), "[@] and [@unclosed");
+        assert_eq!(
+            cites_to_footnotes("[@] and [@unclosed"),
+            "[@] and [@unclosed"
+        );
         assert_eq!(cites_to_footnotes("no citations"), "no citations");
         // Multibyte content survives the byte-wise scan.
         assert_eq!(cites_to_footnotes("σ rose [@a] — ok"), "σ rose [^a] — ok");
@@ -1621,7 +1799,17 @@ mod tests {
         let exps = vec![experiment("e", "h", 2.0, ExperimentDecision::Keep)];
         let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
         let mut doc = String::new();
-        render(&mut doc, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
+        render(
+            &mut doc,
+            "camp",
+            "ns",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            None,
+        )
+        .unwrap();
         let path = std::env::var("OKF_DUMP").expect("set OKF_DUMP");
         std::fs::write(path, doc).unwrap();
     }
@@ -1631,18 +1819,41 @@ mod tests {
         let exps = vec![experiment("e", "h", 2.0, ExperimentDecision::Keep)];
         let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
         let mut doc = String::new();
-        render(&mut doc, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
+        render(
+            &mut doc,
+            "camp",
+            "ns",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            None,
+        )
+        .unwrap();
         let c = okf_check(&doc);
-        assert!(c.ok(), "dossier must satisfy OKF hard rules: {:?}", c.violations);
-        assert!(doc.starts_with("---\n"), "frontmatter must be the first line");
-        assert!(doc.contains("\ntype: Research Report\n"), "TYPE_REQ field missing");
+        assert!(
+            c.ok(),
+            "dossier must satisfy OKF hard rules: {:?}",
+            c.violations
+        );
+        assert!(
+            doc.starts_with("---\n"),
+            "frontmatter must be the first line"
+        );
+        assert!(
+            doc.contains("\ntype: Research Report\n"),
+            "TYPE_REQ field missing"
+        );
     }
 
     #[test]
     fn okf_check_catches_each_hard_rule() {
         // FM_REQ — no opening delimiter at all (the pre-OKF dossier shape).
         let v = okf_check("# Title\n\nbody").violations;
-        assert!(v.iter().any(|x| x.starts_with("concept-frontmatter")), "{v:?}");
+        assert!(
+            v.iter().any(|x| x.starts_with("concept-frontmatter")),
+            "{v:?}"
+        );
 
         // FM_REQ — opened but never closed.
         let v = okf_check("---\ntype: X\nstill going").violations;
@@ -1682,10 +1893,23 @@ mod tests {
             about: None,
         };
         let mut doc = String::new();
-        render(&mut doc, "camp", "ns", &c, &template(), &exps, &runs, Some(&cur)).unwrap();
+        render(
+            &mut doc,
+            "camp",
+            "ns",
+            &c,
+            &template(),
+            &exps,
+            &runs,
+            Some(&cur),
+        )
+        .unwrap();
         let chk = okf_check(&doc);
         assert!(chk.ok(), "{:?}\n{doc}", chk.violations);
-        assert!(doc.contains("status: stable"), "completed campaign -> stable");
+        assert!(
+            doc.contains("status: stable"),
+            "completed campaign -> stable"
+        );
     }
 
     #[test]
@@ -1694,14 +1918,37 @@ mod tests {
         use crate::research_report::{ReportMotivation, ReportSubject};
         // c-000 -> c-001 -> c-003 ; c-002 is a separate branch off the root.
         let exps = vec![
-            with_lineage(experiment("c-000", "root", 1.0, ExperimentDecision::Keep), R::Baseline, None, 0),
-            with_lineage(experiment("c-001", "a", 2.0, ExperimentDecision::Keep), R::Perturb, Some("c-000"), 1),
-            with_lineage(experiment("c-002", "b", 3.0, ExperimentDecision::Keep), R::Perturb, Some("c-000"), 1),
-            with_lineage(experiment("c-003", "a2", 4.0, ExperimentDecision::Keep), R::Perturb, Some("c-001"), 2),
+            with_lineage(
+                experiment("c-000", "root", 1.0, ExperimentDecision::Keep),
+                R::Baseline,
+                None,
+                0,
+            ),
+            with_lineage(
+                experiment("c-001", "a", 2.0, ExperimentDecision::Keep),
+                R::Perturb,
+                Some("c-000"),
+                1,
+            ),
+            with_lineage(
+                experiment("c-002", "b", 3.0, ExperimentDecision::Keep),
+                R::Perturb,
+                Some("c-000"),
+                1,
+            ),
+            with_lineage(
+                experiment("c-003", "a2", 4.0, ExperimentDecision::Keep),
+                R::Perturb,
+                Some("c-001"),
+                2,
+            ),
         ];
         let sub = descendants_of(&exps, "c-001");
         assert!(sub.contains("c-001") && sub.contains("c-003"), "{sub:?}");
-        assert!(!sub.contains("c-002"), "sibling branch must be excluded: {sub:?}");
+        assert!(
+            !sub.contains("c-002"),
+            "sibling branch must be excluded: {sub:?}"
+        );
         assert!(!sub.contains("c-000"), "ancestor must be excluded: {sub:?}");
 
         let empty: Vec<String> = vec![];
@@ -1721,8 +1968,15 @@ mod tests {
             references: &refs,
             about: Some(&subject),
         };
-        let kept: Vec<String> = curate(&exps, Some(&cur)).iter().map(|e| e.name_any()).collect();
-        assert_eq!(kept, vec!["c-001".to_string(), "c-003".to_string()], "{kept:?}");
+        let kept: Vec<String> = curate(&exps, Some(&cur))
+            .iter()
+            .map(|e| e.name_any())
+            .collect();
+        assert_eq!(
+            kept,
+            vec!["c-001".to_string(), "c-003".to_string()],
+            "{kept:?}"
+        );
     }
 
     #[test]
@@ -1732,8 +1986,18 @@ mod tests {
         // already-complete experiments), but a hand-edited object could create
         // one, and the controller must not hang on it.
         let exps = vec![
-            with_lineage(experiment("x", "", 1.0, ExperimentDecision::Keep), R::Perturb, Some("y"), 1),
-            with_lineage(experiment("y", "", 1.0, ExperimentDecision::Keep), R::Perturb, Some("x"), 1),
+            with_lineage(
+                experiment("x", "", 1.0, ExperimentDecision::Keep),
+                R::Perturb,
+                Some("y"),
+                1,
+            ),
+            with_lineage(
+                experiment("y", "", 1.0, ExperimentDecision::Keep),
+                R::Perturb,
+                Some("x"),
+                1,
+            ),
         ];
         let sub = descendants_of(&exps, "x");
         assert_eq!(sub.len(), 2, "must terminate and cover both: {sub:?}");
@@ -1769,13 +2033,29 @@ mod tests {
 
         let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
         let mut doc = String::new();
-        render(&mut doc, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
+        render(
+            &mut doc,
+            "camp",
+            "ns",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            None,
+        )
+        .unwrap();
         assert!(doc.contains("## Search Tree"), "tree section missing");
         assert!(doc.contains("c-000 [Baseline"), "{doc}");
-        assert!(doc.contains("  c-001 [Perturb"), "child must be indented: {doc}");
+        assert!(
+            doc.contains("  c-001 [Perturb"),
+            "child must be indented: {doc}"
+        );
         // The role census is what makes a degenerate campaign visible: v72 spent
         // 9 of 12 slots on controls and searched nothing, which a flat list hid.
-        assert!(doc.contains("Remeasure: 1") && doc.contains("Perturb: 1"), "{doc}");
+        assert!(
+            doc.contains("Remeasure: 1") && doc.contains("Perturb: 1"),
+            "{doc}"
+        );
     }
 
     #[test]
@@ -1811,7 +2091,10 @@ mod tests {
         assert!(doc.contains("Incumbent Re-measured"), "{doc}");
         assert!(doc.contains("Seed noise (sigma)"), "{doc}");
         // The bias must be stated, not left for the reader to compute.
-        assert!(doc.contains("1830.0000"), "divergence must be rendered: {doc}");
+        assert!(
+            doc.contains("1830.0000"),
+            "divergence must be rendered: {doc}"
+        );
         assert!(doc.contains("NOT evidence of progress"), "{doc}");
     }
 
@@ -1820,10 +2103,33 @@ mod tests {
         let exps = vec![experiment("e", "h", 2.0, ExperimentDecision::Keep)];
         let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
         let mut a = String::new();
-        render(&mut a, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
+        render(
+            &mut a,
+            "camp",
+            "ns",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            None,
+        )
+        .unwrap();
         let mut b = String::new();
-        render(&mut b, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
-        assert_eq!(a, b, "render must be a pure function of inputs (no wall clock)");
+        render(
+            &mut b,
+            "camp",
+            "ns",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            a, b,
+            "render must be a pure function of inputs (no wall clock)"
+        );
     }
 
     // Curation: exclude prunes an experiment, title overrides, sections + seeds
@@ -1835,7 +2141,8 @@ mod tests {
             experiment("exp-b", "winner", 2.10, ExperimentDecision::Keep),
         ];
         let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
-        let sections = BTreeMap::from([("Related Work".to_string(), "Prior art on Muon.".to_string())]);
+        let sections =
+            BTreeMap::from([("Related Work".to_string(), "Prior art on Muon.".to_string())]);
         let seeds = vec!["wider models close the gap".to_string()];
         let cur = Curation {
             title: Some("Muon vs AdamW"),
@@ -1847,12 +2154,24 @@ mod tests {
             about: None,
         };
         let mut doc = String::new();
-        render(&mut doc, "camp", "research", &campaign(), &template(), &exps, &runs, Some(&cur))
-            .expect("infallible");
+        render(
+            &mut doc,
+            "camp",
+            "research",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            Some(&cur),
+        )
+        .expect("infallible");
 
         assert!(doc.contains("# Muon vs AdamW"), "{doc}");
         assert!(doc.contains("_Curated: 1 of 2 experiments_"));
-        assert!(!doc.contains("exp-a"), "pruned experiment must not appear: {doc}");
+        assert!(
+            !doc.contains("exp-a"),
+            "pruned experiment must not appear: {doc}"
+        );
         assert!(doc.contains("exp-b"));
         assert!(doc.contains("## Related Work") && doc.contains("Prior art on Muon."));
         assert!(doc.contains("## Seeded Hypotheses / Future Work"));
@@ -1861,14 +2180,12 @@ mod tests {
 
     // Helper: build an experiment with a specified lr value instead of the
     // fixed 0.001 that `experiment()` uses.
-    fn experiment_lr(
-        name: &str,
-        hypothesis: &str,
-        val_bpb: f64,
-        lr: f64,
-    ) -> Experiment {
+    fn experiment_lr(name: &str, hypothesis: &str, val_bpb: f64, lr: f64) -> Experiment {
         Experiment {
-            metadata: ObjectMeta { name: Some(name.to_string()), ..Default::default() },
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
             spec: ExperimentSpec {
                 campaign_ref: "camp".into(),
                 hypothesis: hypothesis.into(),
@@ -1925,15 +2242,27 @@ mod tests {
         assert!(doc.contains(r"\documentclass"), "missing preamble: {doc}");
         assert!(doc.contains(r"\end{document}"), "missing end: {doc}");
         assert!(doc.contains("Muon vs AdamW"), "title missing: {doc}");
-        assert!(doc.contains(r"\section{Related Work}"), "narrative section missing: {doc}");
-        assert!(doc.contains("wider models close the gap"), "seeded hypothesis missing: {doc}");
-        assert!(!doc.contains("exp-a"), "pruned experiment must not appear: {doc}");
+        assert!(
+            doc.contains(r"\section{Related Work}"),
+            "narrative section missing: {doc}"
+        );
+        assert!(
+            doc.contains("wider models close the gap"),
+            "seeded hypothesis missing: {doc}"
+        );
+        assert!(
+            !doc.contains("exp-a"),
+            "pruned experiment must not appear: {doc}"
+        );
         assert!(doc.contains("exp-b"), "included experiment missing: {doc}");
 
         // Every \begin{ must have a matching \end{.
         let begins = doc.matches(r"\begin{").count();
         let ends = doc.matches(r"\end{").count();
-        assert_eq!(begins, ends, "unbalanced \\begin{{}} / \\end{{}} (begins={begins}, ends={ends}):\n{doc}");
+        assert_eq!(
+            begins, ends,
+            "unbalanced \\begin{{}} / \\end{{}} (begins={begins}, ends={ends}):\n{doc}"
+        );
     }
 
     // Hypotheses with special LaTeX characters must appear only in escaped form;
@@ -1988,10 +2317,33 @@ mod tests {
         let exps = vec![experiment("e", "h", 2.0, ExperimentDecision::Keep)];
         let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
         let mut a = String::new();
-        render_latex(&mut a, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
+        render_latex(
+            &mut a,
+            "camp",
+            "ns",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            None,
+        )
+        .unwrap();
         let mut b = String::new();
-        render_latex(&mut b, "camp", "ns", &campaign(), &template(), &exps, &runs, None).unwrap();
-        assert_eq!(a, b, "render_latex must be a pure function of inputs (no wall clock)");
+        render_latex(
+            &mut b,
+            "camp",
+            "ns",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            a, b,
+            "render_latex must be a pure function of inputs (no wall clock)"
+        );
     }
 
     // citation_check must identify cited-but-undefined and defined-but-uncited keys.
@@ -2027,7 +2379,12 @@ mod tests {
     // and emits a bibliography.
     #[test]
     fn render_includes_references_and_cites() {
-        let exps = vec![experiment("exp-a", "baseline", 2.34, ExperimentDecision::Keep)];
+        let exps = vec![experiment(
+            "exp-a",
+            "baseline",
+            2.34,
+            ExperimentDecision::Keep,
+        )];
         let runs: BTreeMap<String, Vec<&BenchmarkRun>> = BTreeMap::new();
         // Sections cite [@good] (defined) and [@ghost] (undefined).
         let sections = BTreeMap::from([(
@@ -2064,8 +2421,17 @@ mod tests {
 
         // ── Markdown checks ───────────────────────────────────────────────────
         let mut md = String::new();
-        render(&mut md, "camp", "research", &campaign(), &template(), &exps, &runs, Some(&cur))
-            .expect("infallible");
+        render(
+            &mut md,
+            "camp",
+            "research",
+            &campaign(),
+            &template(),
+            &exps,
+            &runs,
+            Some(&cur),
+        )
+        .expect("infallible");
 
         assert!(md.contains("## References"), "missing ## References: {md}");
         assert!(md.contains("Good Paper"), "missing reference title: {md}");
@@ -2073,8 +2439,14 @@ mod tests {
             md.contains("## Citation Reconciliation"),
             "missing ## Citation Reconciliation: {md}"
         );
-        assert!(md.contains("ghost"), "ghost (cited but undefined) not in reconciliation: {md}");
-        assert!(md.contains("orphan"), "orphan (defined but uncited) not in reconciliation: {md}");
+        assert!(
+            md.contains("ghost"),
+            "ghost (cited but undefined) not in reconciliation: {md}"
+        );
+        assert!(
+            md.contains("orphan"),
+            "orphan (defined but uncited) not in reconciliation: {md}"
+        );
 
         // ── LaTeX checks ──────────────────────────────────────────────────────
         let mut tex = String::new();
@@ -2090,10 +2462,22 @@ mod tests {
         )
         .expect("infallible");
 
-        assert!(tex.contains(r"\cite{good}"), r"missing \cite{{good}}: {tex}");
-        assert!(tex.contains(r"\bibitem{good}"), r"missing \bibitem{{good}}: {tex}");
-        assert!(tex.contains("thebibliography"), "missing thebibliography env: {tex}");
-        assert!(!tex.contains("[@good]"), "literal [@good] must be replaced by \\cite in latex: {tex}");
+        assert!(
+            tex.contains(r"\cite{good}"),
+            r"missing \cite{{good}}: {tex}"
+        );
+        assert!(
+            tex.contains(r"\bibitem{good}"),
+            r"missing \bibitem{{good}}: {tex}"
+        );
+        assert!(
+            tex.contains("thebibliography"),
+            "missing thebibliography env: {tex}"
+        );
+        assert!(
+            !tex.contains("[@good]"),
+            "literal [@good] must be replaced by \\cite in latex: {tex}"
+        );
     }
 }
 
@@ -2110,8 +2494,7 @@ pub struct TreeNode<'a> {
 /// is visible in the document instead of silently pruning a subtree).
 /// Experiments with no lineage at all are skipped; the caller reports that.
 pub fn build_forest<'a>(exps: &[&'a Experiment]) -> Vec<TreeNode<'a>> {
-    let present: std::collections::HashSet<String> =
-        exps.iter().map(|e| e.name_any()).collect();
+    let present: std::collections::HashSet<String> = exps.iter().map(|e| e.name_any()).collect();
     let mut children_of: BTreeMap<String, Vec<&'a Experiment>> = BTreeMap::new();
     let mut roots: Vec<&'a Experiment> = Vec::new();
     for e in exps.iter().copied() {
@@ -2121,10 +2504,7 @@ pub fn build_forest<'a>(exps: &[&'a Experiment]) -> Vec<TreeNode<'a>> {
             None => roots.push(e),
         }
     }
-    roots
-        .into_iter()
-        .map(|r| attach(r, &children_of))
-        .collect()
+    roots.into_iter().map(|r| attach(r, &children_of)).collect()
 }
 
 fn attach<'a>(
@@ -2141,11 +2521,7 @@ fn attach<'a>(
     TreeNode { exp, children }
 }
 
-fn render_tree_node(
-    out: &mut String,
-    node: &TreeNode<'_>,
-    depth: usize,
-) -> std::fmt::Result {
+fn render_tree_node(out: &mut String, node: &TreeNode<'_>, depth: usize) -> std::fmt::Result {
     let pad = "  ".repeat(depth);
     let name = node.exp.name_any();
     let l = node.exp.spec.lineage.as_ref();
@@ -2264,10 +2640,12 @@ pub fn okf_check(doc: &str) -> OkfCheck {
     // concept-frontmatter: the block must open on line 1 and close later.
     let mut lines = doc.lines();
     if lines.next().map(str::trim_end) != Some("---") {
-        violations.push(
-            "concept-frontmatter: concept document is missing YAML frontmatter".to_string(),
-        );
-        return OkfCheck { violations, warnings };
+        violations
+            .push("concept-frontmatter: concept document is missing YAML frontmatter".to_string());
+        return OkfCheck {
+            violations,
+            warnings,
+        };
     }
     let mut fm = Vec::new();
     let mut closed = false;
@@ -2279,10 +2657,12 @@ pub fn okf_check(doc: &str) -> OkfCheck {
         fm.push(line);
     }
     if !closed {
-        violations.push(
-            "concept-frontmatter: frontmatter block is never closed with `---`".to_string(),
-        );
-        return OkfCheck { violations, warnings };
+        violations
+            .push("concept-frontmatter: frontmatter block is never closed with `---`".to_string());
+        return OkfCheck {
+            violations,
+            warnings,
+        };
     }
 
     // UTF8_REQ: &str is UTF-8 by construction; what can still break a YAML
@@ -2300,9 +2680,8 @@ pub fn okf_check(doc: &str) -> OkfCheck {
         .find(|l| l.starts_with("type:"))
         .map(|l| l.trim_start_matches("type:").trim().trim_matches('"'));
     match type_value {
-        None => violations.push(
-            "concept-type: concept frontmatter must include non-empty type".to_string(),
-        ),
+        None => violations
+            .push("concept-type: concept frontmatter must include non-empty type".to_string()),
         Some("") => violations.push(
             "concept-type: concept frontmatter must include non-empty type (empty)".to_string(),
         ),
@@ -2354,10 +2733,7 @@ pub fn link_warnings(doc: &str) -> Vec<String> {
             rest = &rest[end + 1..];
         }
     }
-    let mut dangling: Vec<String> = refs
-        .into_iter()
-        .filter(|r| !defs.contains(r))
-        .collect();
+    let mut dangling: Vec<String> = refs.into_iter().filter(|r| !defs.contains(r)).collect();
     dangling.sort();
     dangling.dedup();
     for d in dangling {

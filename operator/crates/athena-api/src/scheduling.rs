@@ -7,9 +7,9 @@
 //! `DynamicObject` and projected into the serde DTOs below. The desktop renders
 //! these directly; the web backend serializes them to JSON for the frontend.
 
+use kube::Client;
 use kube::api::{Api, ApiResource, DynamicObject, ListParams};
 use kube::core::GroupVersionKind;
-use kube::Client;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

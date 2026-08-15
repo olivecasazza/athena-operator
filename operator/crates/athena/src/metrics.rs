@@ -36,8 +36,7 @@ pub static EXPERIMENT_METRIC: Lazy<GaugeVec> = Lazy::new(|| {
         "Per-experiment reported metric values (re-exported from status.metrics)",
     )
     .namespace("athena");
-    let gauge =
-        GaugeVec::new(opts, &["namespace", "experiment", "campaign", "metric"]).unwrap();
+    let gauge = GaugeVec::new(opts, &["namespace", "experiment", "campaign", "metric"]).unwrap();
     REGISTRY.register(Box::new(gauge.clone())).unwrap();
     gauge
 });

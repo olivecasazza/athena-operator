@@ -78,28 +78,31 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
     // user config error, not a controller failure — record it in status and back
     // off, rather than thrashing the error path.
     let curation = Curation::from_spec(&report.spec);
-    let dossier::Dossier { markdown: doc, latex: doc_tex, included } =
-        match dossier::assemble(&ctx.client, &campaign_ref, &ns, Some(&curation)).await {
-            Ok(d) => d,
-            Err(e) => {
-                if prev_phase != Some("Error") || prev_gen != generation {
-                    let status = json!({ "status": {
-                        "phase": "Error",
-                        "observedGeneration": generation,
-                        "controllerVersion": version,
-                        "conditions": [condition(
-                            "CampaignResolved", "False", "CampaignUnavailable",
-                            &format!("cannot assemble dossier for campaign '{campaign_ref}': {e}"),
-                        )],
-                    }});
-                    reports
-                        .patch_status(&name, &PatchParams::apply(MANAGER), &Patch::Merge(&status))
-                        .await?;
-                }
-                telemetry::record_reconcile(&ns, &campaign_ref, "Error", "ok", started.elapsed());
-                return Ok(Action::requeue(Duration::from_secs(60)));
+    let dossier::Dossier {
+        markdown: doc,
+        latex: doc_tex,
+        included,
+    } = match dossier::assemble(&ctx.client, &campaign_ref, &ns, Some(&curation)).await {
+        Ok(d) => d,
+        Err(e) => {
+            if prev_phase != Some("Error") || prev_gen != generation {
+                let status = json!({ "status": {
+                    "phase": "Error",
+                    "observedGeneration": generation,
+                    "controllerVersion": version,
+                    "conditions": [condition(
+                        "CampaignResolved", "False", "CampaignUnavailable",
+                        &format!("cannot assemble dossier for campaign '{campaign_ref}': {e}"),
+                    )],
+                }});
+                reports
+                    .patch_status(&name, &PatchParams::apply(MANAGER), &Patch::Merge(&status))
+                    .await?;
             }
-        };
+            telemetry::record_reconcile(&ns, &campaign_ref, "Error", "ok", started.elapsed());
+            return Ok(Action::requeue(Duration::from_secs(60)));
+        }
+    };
 
     // OKF conformance gate. The dossier is consumed by agents, so it has to be
     // a valid Open Knowledge Format document; publishing a malformed one would
@@ -200,8 +203,12 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
                 "blockOwnerDeletion": true,
             }]);
         }
-        cms.patch(&cm_name, &PatchParams::apply(MANAGER).force(), &Patch::Apply(&body))
-            .await?;
+        cms.patch(
+            &cm_name,
+            &PatchParams::apply(MANAGER).force(),
+            &Patch::Apply(&body),
+        )
+        .await?;
     }
 
     // Deterministic citation/formatting reconciliation: pure check over the
@@ -221,12 +228,19 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
     let citations_ok = cc.cited_undefined.is_empty() && cc.defined_uncited.is_empty();
     let citation_condition = if citations_ok {
         condition(
-            "CitationsReconciled", "True", "CitationsConsistent",
-            &format!("{} reference(s), all keys resolve and are cited", report.spec.references.len()),
+            "CitationsReconciled",
+            "True",
+            "CitationsConsistent",
+            &format!(
+                "{} reference(s), all keys resolve and are cited",
+                report.spec.references.len()
+            ),
         )
     } else {
         condition(
-            "CitationsReconciled", "False", "CitationMismatch",
+            "CitationsReconciled",
+            "False",
+            "CitationMismatch",
             &format!(
                 "cited-but-undefined: [{}]; defined-but-uncited: [{}]",
                 cc.cited_undefined.join(", "),
@@ -238,7 +252,11 @@ pub async fn reconcile(report: Arc<ResearchReport>, ctx: Arc<Context>) -> Result
     let link_condition = condition(
         "LinksResolved",
         if link_ok { "True" } else { "False" },
-        if link_ok { "LinksResolve" } else { "BrokenLinks" },
+        if link_ok {
+            "LinksResolve"
+        } else {
+            "BrokenLinks"
+        },
         &link_detail,
     );
 

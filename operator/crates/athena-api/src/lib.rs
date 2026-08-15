@@ -8,5 +8,5 @@ pub mod experiment_template;
 pub mod metric_source;
 pub mod research_campaign;
 pub mod research_report;
-pub mod scheduling;
 pub mod runtime_profile;
+pub mod scheduling;
