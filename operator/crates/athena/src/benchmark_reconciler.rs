@@ -318,7 +318,7 @@ fn build_job(
         .and_then(|output| output.workspace_path.clone())
         .unwrap_or_else(|| format!("/workspace/benchmarks/runs/{namespace}/{run_name}"));
     let metrics_path = format!("{workspace_path}/{}/{seed}/metrics.json", task.name);
-    let labels = BTreeMap::from([
+    let mut labels = BTreeMap::from([
         (
             "app.kubernetes.io/name".to_string(),
             "athena-benchmark-run".to_string(),
@@ -333,6 +333,12 @@ fn build_job(
         ),
         ("athena.nixlab.io/seed".to_string(), seed.to_string()),
     ]);
+    // Kueue admission: opt in by labeling the Job with its LocalQueue. Kueue
+    // only manages Jobs carrying this label (manageJobsWithoutQueueName=false),
+    // so leaving queue_name unset preserves direct scheduling.
+    if let Some(queue) = &profile.spec.scheduling.queue_name {
+        labels.insert("kueue.x-k8s.io/queue-name".to_string(), queue.clone());
+    }
     let suite_json = serde_json::to_string(&suite.spec).unwrap_or_else(|_| "{}".to_string());
     let run_json = serde_json::to_string(&run.spec).unwrap_or_else(|_| "{}".to_string());
 
@@ -341,11 +347,18 @@ fn build_job(
             name: Some(job_name.to_string()),
             namespace: Some(namespace.to_string()),
             labels: Some(labels.clone()),
+            // GC the Job (and its pods) with the BenchmarkRun; without this a
+            // deleted run orphans its Jobs and a recreated one adopts the
+            // stale Job spec instead of rebuilding it.
+            owner_references: kube::Resource::controller_owner_ref(run, &()).map(|r| vec![r]),
             ..Default::default()
         },
         spec: Some(JobSpec {
             backoff_limit: Some(run.spec.budget.max_retries.unwrap_or(0) as i32),
             ttl_seconds_after_finished: run.spec.cleanup_policy.ttl_seconds_after_finished,
+            // Kueue requires managed Jobs to start suspended; it unsuspends on
+            // admission. Only when a queue is set — otherwise schedule directly.
+            suspend: profile.spec.scheduling.queue_name.as_ref().map(|_| true),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(labels),
@@ -994,4 +1007,116 @@ pub fn error_policy(run: Arc<BenchmarkRun>, err: &Error, _ctx: Arc<Context>) -> 
         "error reconciling BenchmarkRun, retrying"
     );
     Action::requeue(Duration::from_secs(30))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use athena_api::runtime_profile::RuntimeProfileSpec;
+
+    fn test_run() -> BenchmarkRun {
+        let mut run: BenchmarkRun = serde_json::from_value(json!({
+            "apiVersion": "research.nixlab.io/v1alpha1",
+            "kind": "BenchmarkRun",
+            "metadata": { "name": "canary", "namespace": "apps", "uid": "run-uid" },
+            "spec": {
+                "suiteRef": { "name": "suite" },
+                "targetRef": {
+                    "apiVersion": "research.nixlab.io/v1alpha1",
+                    "kind": "Experiment",
+                    "name": "exp"
+                }
+            }
+        }))
+        .expect("run deserializes");
+        run.metadata.uid = Some("run-uid".to_string());
+        run
+    }
+
+    fn test_suite_and_task() -> (BenchmarkSuite, BenchmarkTask) {
+        let suite: BenchmarkSuite = serde_json::from_value(json!({
+            "apiVersion": "research.nixlab.io/v1alpha1",
+            "kind": "BenchmarkSuite",
+            "metadata": { "name": "suite", "namespace": "apps" },
+            "spec": {
+                "taxonomy": "runtimeHealth",
+                "suiteVersion": "v1",
+                "tasks": [{
+                    "name": "toy",
+                    "integration": "customCommand",
+                    "metrics": { "primary": "reward_mean", "goal": "maximize" },
+                    "budget": {}
+                }]
+            }
+        }))
+        .expect("suite deserializes");
+        let task = suite.spec.tasks[0].clone();
+        (suite, task)
+    }
+
+    fn profile(queue_name: Option<&str>) -> RuntimeProfile {
+        let mut scheduling = json!({});
+        if let Some(queue) = queue_name {
+            scheduling = json!({ "queueName": queue });
+        }
+        let spec: RuntimeProfileSpec = serde_json::from_value(
+            athena_api::defaults::apply_runtime_profile_defaults(json!({
+                "runtime": { "type": "pytorch", "mode": "batchJob" },
+                "image": "ghcr.io/example/bench:v1",
+                "command": ["python", "bench.py"],
+                "scheduling": scheduling,
+            })),
+        )
+        .expect("profile spec deserializes");
+        RuntimeProfile::new("bench", spec)
+    }
+
+    // A queued profile flows the benchmark Job through Kueue: queue label +
+    // created suspended (Kueue unsuspends on admission), and the Job is owned
+    // by its BenchmarkRun so deletion GCs it.
+    #[test]
+    fn queued_profile_labels_and_suspends_job() {
+        let run = test_run();
+        let (suite, task) = test_suite_and_task();
+        let job = build_job(
+            &run,
+            &suite,
+            &profile(Some("athena-gpu")),
+            &task,
+            0,
+            "apps",
+            "br-canary-toy-0",
+        );
+
+        let labels = job.metadata.labels.as_ref().expect("labels");
+        assert_eq!(
+            labels.get("kueue.x-k8s.io/queue-name"),
+            Some(&"athena-gpu".to_string())
+        );
+        assert_eq!(job.spec.as_ref().unwrap().suspend, Some(true));
+        let owners = job.metadata.owner_references.as_ref().expect("owner refs");
+        assert_eq!(owners[0].kind, "BenchmarkRun");
+        assert_eq!(owners[0].name, "canary");
+    }
+
+    // Without a queueName the Job must schedule directly: no Kueue label, not
+    // suspended (manageJobsWithoutQueueName=false ignores unlabeled Jobs).
+    #[test]
+    fn unqueued_profile_schedules_directly() {
+        let run = test_run();
+        let (suite, task) = test_suite_and_task();
+        let job = build_job(
+            &run,
+            &suite,
+            &profile(None),
+            &task,
+            0,
+            "apps",
+            "br-canary-toy-0",
+        );
+
+        let labels = job.metadata.labels.as_ref().expect("labels");
+        assert!(!labels.contains_key("kueue.x-k8s.io/queue-name"));
+        assert_eq!(job.spec.as_ref().unwrap().suspend, None);
+    }
 }
