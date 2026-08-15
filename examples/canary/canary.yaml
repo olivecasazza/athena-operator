@@ -1,21 +1,13 @@
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: athena-workspace
-  namespace: default
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
-  storageClassName: longhorn
+# End-to-end scheduling canary for the hp RTX 4000 pool (8GB cards): the run
+# itself is a trivial CPU smoke, but it requests a GPU through the
+# apps/athena-gpu LocalQueue so a green canary proves Kueue admission,
+# hephaestus power-on of an hp node, and workspace access all work.
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: RuntimeProfile
 metadata:
   name: hp-8gb-canary
+  namespace: apps
 spec:
   runtime:
     type: pytorch
@@ -65,19 +57,30 @@ spec:
     requests:
       cpu: "100m"
       memory: "256Mi"
+      nvidia.com/gpu: "1"
     limits:
       nvidia.com/gpu: "1"
   storage:
+    # Shared pre-provisioned RWX NFS workspace (same pattern as the other
+    # apps-ns GPU profiles) — Longhorn RWO can't attach on the GPU-tainted
+    # hp nodes.
     workspaceClaimName: "athena-workspace"
     workspaceMountPath: "/workspace"
-    createWorkspaceClaim: true
-    workspaceSize: 10Gi
-    workspaceStorageClassName: longhorn
+    createWorkspaceClaim: false
+    workspaceAccessModes:
+      - ReadWriteMany
+    workspaceStorageClassName: nfs
   scheduling:
+    # Kueue admission via the apps/athena-gpu LocalQueue (hp-gpu ClusterQueue).
+    queueName: athena-gpu
+    # Pin to hp's autoscaled RTX 4000 pool (see gpu-hp-autoscale.yaml); Kueue's
+    # rtx4000 flavor injects this selector anyway, kept explicit for clarity.
     nodeSelector:
-      kubernetes.io/hostname: contra
+      nvidia.com/gpu.product: Quadro-RTX-4000
+    # hp nodes register with nvidia.com/gpu=true:NoSchedule; the flavor does
+    # not inject tolerations, so the profile must carry it.
     tolerations:
-      - key: node-role.kubernetes.io/control-plane
+      - key: nvidia.com/gpu
         operator: Exists
         effect: NoSchedule
   # This smoke canary exits fast and does not run the athena_metrics helper, so
@@ -93,6 +96,7 @@ apiVersion: research.nixlab.io/v1alpha1
 kind: ExperimentTemplate
 metadata:
   name: canary-template
+  namespace: apps
 spec:
   runtimeProfileRef: hp-8gb-canary
   source:
@@ -161,6 +165,7 @@ apiVersion: research.nixlab.io/v1alpha1
 kind: ResearchCampaign
 metadata:
   name: canary-campaign
+  namespace: apps
 spec:
   templateRef: canary-template
   concurrency: 1
@@ -172,6 +177,7 @@ apiVersion: research.nixlab.io/v1alpha1
 kind: Experiment
 metadata:
   name: canary-run-02
+  namespace: apps
 spec:
   campaignRef: canary-campaign
   hypothesis: "Canary test using minimal depth and 15s budget to exercise operator and autoscaler."

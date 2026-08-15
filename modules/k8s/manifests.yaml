@@ -358,24 +358,16 @@ spec:
     matchLabels:
       dashboards: grafana
   json: '{"panels":[{"gridPos":{"h":8,"w":24,"x":0,"y":0},"id":1,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_agent_action_total{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (namespace,experiment,action,result)","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment actions","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":0,"y":8},"id":2,"targets":[{"datasource":{"type":"prometheus"},"expr":"histogram_quantile(0.95, sum(rate(athena_operator_agent_action_duration_seconds_bucket{namespace=~\"$namespace\",experiment=~\"$experiment\"}[5m])) by (le,namespace,experiment,action,result))","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment action p95 latency","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":8},"id":3,"targets":[{"datasource":{"type":"prometheus"},"expr":"sum(rate(athena_operator_reconcile_total{namespace=~\"$namespace\"}[5m])) by (namespace,campaign,phase,result)","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}campaign{{`}}`}} {{`{{`}}phase{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Selected experiment reconciles","type":"timeseries"},{"gridPos":{"h":8,"w":24,"x":0,"y":16},"id":4,"targets":[{"datasource":{"type":"prometheus"},"expr":"{__name__=~\"athena_.*|athena_operator_.*\",namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{`{{`}}namespace{{`}}`}} {{`{{`}}experiment{{`}}`}} {{`{{`}}action{{`}}`}} {{`{{`}}result{{`}}`}}"}],"title":"Latest Athena dynamic samples","type":"table"},{"gridPos":{"h":8,"w":12,"x":0,"y":24},"id":5,"targets":[{"datasource":{"type":"prometheus"},"expr":"athena_train_loss{namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} train_loss"}],"title":"Live training loss","type":"timeseries"},{"gridPos":{"h":8,"w":12,"x":12,"y":24},"id":6,"targets":[{"datasource":{"type":"prometheus"},"expr":"athena_mfu_percent{namespace=~\"$namespace\",experiment=~\"$experiment\"}","legendFormat":"{{`{{`}}namespace{{`}}`}}/{{`{{`}}experiment{{`}}`}} mfu%"}],"title":"Live throughput / MFU","type":"timeseries"}],"refresh":"30s","schemaVersion":39,"tags":["athena","operator","research"],"templating":{"list":[{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"namespace","query":"label_values(athena_operator_reconcile_total, namespace)","refresh":1,"type":"query"},{"current":{"text":"All","value":"$__all"},"datasource":{"type":"prometheus"},"includeAll":true,"name":"experiment","query":"label_values(athena_operator_agent_action_total{namespace=~\"$namespace\"}, experiment)","refresh":1,"type":"query"}]},"time":{"from":"now-6h","to":"now"},"timezone":"browser","title":"Athena / Experiment Debugging","uid":"athena-experiment-debugging"}'
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: athena-workspace
-  namespace: default
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
-  storageClassName: longhorn
+# End-to-end scheduling canary for the hp RTX 4000 pool (8GB cards): the run
+# itself is a trivial CPU smoke, but it requests a GPU through the
+# apps/athena-gpu LocalQueue so a green canary proves Kueue admission,
+# hephaestus power-on of an hp node, and workspace access all work.
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: RuntimeProfile
 metadata:
   name: hp-8gb-canary
+  namespace: apps
 spec:
   runtime:
     type: pytorch
@@ -425,19 +417,30 @@ spec:
     requests:
       cpu: "100m"
       memory: "256Mi"
+      nvidia.com/gpu: "1"
     limits:
       nvidia.com/gpu: "1"
   storage:
+    # Shared pre-provisioned RWX NFS workspace (same pattern as the other
+    # apps-ns GPU profiles) — Longhorn RWO can't attach on the GPU-tainted
+    # hp nodes.
     workspaceClaimName: "athena-workspace"
     workspaceMountPath: "/workspace"
-    createWorkspaceClaim: true
-    workspaceSize: 10Gi
-    workspaceStorageClassName: longhorn
+    createWorkspaceClaim: false
+    workspaceAccessModes:
+      - ReadWriteMany
+    workspaceStorageClassName: nfs
   scheduling:
+    # Kueue admission via the apps/athena-gpu LocalQueue (hp-gpu ClusterQueue).
+    queueName: athena-gpu
+    # Pin to hp's autoscaled RTX 4000 pool (see gpu-hp-autoscale.yaml); Kueue's
+    # rtx4000 flavor injects this selector anyway, kept explicit for clarity.
     nodeSelector:
-      kubernetes.io/hostname: contra
+      nvidia.com/gpu.product: Quadro-RTX-4000
+    # hp nodes register with nvidia.com/gpu=true:NoSchedule; the flavor does
+    # not inject tolerations, so the profile must carry it.
     tolerations:
-      - key: node-role.kubernetes.io/control-plane
+      - key: nvidia.com/gpu
         operator: Exists
         effect: NoSchedule
   # This smoke canary exits fast and does not run the athena_metrics helper, so
@@ -453,6 +456,7 @@ apiVersion: research.nixlab.io/v1alpha1
 kind: ExperimentTemplate
 metadata:
   name: canary-template
+  namespace: apps
 spec:
   runtimeProfileRef: hp-8gb-canary
   source:
@@ -521,6 +525,7 @@ apiVersion: research.nixlab.io/v1alpha1
 kind: ResearchCampaign
 metadata:
   name: canary-campaign
+  namespace: apps
 spec:
   templateRef: canary-template
   concurrency: 1
@@ -532,6 +537,7 @@ apiVersion: research.nixlab.io/v1alpha1
 kind: Experiment
 metadata:
   name: canary-run-02
+  namespace: apps
 spec:
   campaignRef: canary-campaign
   hypothesis: "Canary test using minimal depth and 15s budget to exercise operator and autoscaler."
