@@ -31,7 +31,7 @@ spec:
   image: ghcr.io/olivecasazza/athena-trainer:latest
   command: ["sh", "-c", "python experiments/prepare.py && python experiments/train.py"]
   scheduling:
-    queueName: athena-local # launcher Job is Kueue-admitted
+    queueName: athena-gpu # launcher Job is Kueue-admitted
   sky:
     enabled: true
     accelerators: "A10:1"
@@ -51,7 +51,7 @@ spec:
   image: ghcr.io/olivecasazza/athena-trainer:latest
   command: ["sh", "-c", "python experiments/prepare.py && python experiments/train.py"]
   scheduling:
-    queueName: athena-local
+    queueName: athena-gpu
   sky:
     enabled: true
     accelerators: "A10:8"

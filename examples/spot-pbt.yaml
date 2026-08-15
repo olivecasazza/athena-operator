@@ -72,6 +72,8 @@ spec:
       memory: "32Gi"
       nvidia.com/gpu: "1"
   scheduling:
+    # Kueue admission via the apps/athena-gpu LocalQueue (hp-gpu ClusterQueue).
+    queueName: athena-gpu
     # Pin to hp's autoscaled RTX 4000 pool (see gpu-hp-autoscale.yaml).
     nodeSelector:
       nvidia.com/gpu.product: Quadro-RTX-4000

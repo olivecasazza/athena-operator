@@ -40,6 +40,8 @@ spec:
       memory: "16Gi"
       nvidia.com/gpu: "1"
   scheduling:
+    # Kueue admission via the apps/athena-gpu LocalQueue (hp-gpu ClusterQueue).
+    queueName: athena-gpu
     # Matches the hephaestus hpc-workers CA template AND the real hp node label;
     # pins to the autoscaled RTX 4000 pool.
     nodeSelector:
