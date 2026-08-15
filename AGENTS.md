@@ -158,3 +158,12 @@ Do not add or preserve durable product behavior in ad-hoc scripts, local files, 
 - Do not mutate Kubernetes cluster state imperatively for deployment changes; prefer Nix/GitOps-generated manifests.
 - Read-only Kubernetes inspection is fine when useful; writes must be modeled in Git/Nix/Flux unless the user explicitly requests live intervention.
 - Do not run destructive git commands such as `git reset --hard` without explicit user approval.
+
+## GPU scheduling
+
+All GPU workloads this operator creates flow through Kueue. The canonical strategy lives in the shared `gpu-scheduling` skill (olivecasazza/skills); the operator-local rules:
+
+- Every RuntimeProfile that requests `nvidia.com/gpu` MUST set `scheduling.queueName`. `athena-gpu` (ns apps) for the modern pool (hp01-03 RTX 4000, seir RTX 5000); `athena-kepler` for tyan01's Titan Blacks (CUDA <= 11.4 images only). A GPU profile without a queueName bypasses quota and can strand physical capacity — treat it as a review-blocking defect.
+- Experiment Jobs and BenchmarkRun Jobs are created suspended with the `kueue.x-k8s.io/queue-name` label when the profile sets queueName; Kueue unsuspends on admission. RayJobs (ResearchCampaign vLLM clusters) only need the label — Kueue's ray.io/rayjob integration handles suspension.
+- Admission is quota-based, not node-based: hp01-03 power on via cluster-autoscaler + hephaestus after admission (~5-6 min to first pod start). Never pin GPU-less pods (Ray heads, viewers) to hp nodes — it keeps a physical server powered 24/7.
+- Do not use raw nodeSelectors to grab GPUs outside a queue, and never target contra (its RTX 4000 SFF Ada is reserved for Plex transcode).
