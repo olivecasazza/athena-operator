@@ -427,6 +427,9 @@ async fn propose_and_create(
         ],
         "max_tokens": spec.proposer.max_tokens.unwrap_or(4096),
         "temperature": spec.proposer.temperature.unwrap_or(0.7),
+        // Explicit non-streaming request; some gateways ignore it (the SSE
+        // folding below covers that), but well-behaved ones honor it.
+        "stream": false,
     });
     let mut req = reqwest::Client::builder()
         .timeout(timeout)
@@ -455,10 +458,7 @@ async fn propose_and_create(
             })?;
         req = req.bearer_auth(key);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| Error::Proposer(e.to_string()))?;
+    let resp = req.send().await.map_err(|e| Error::Proposer(e.to_string()))?;
     if !resp.status().is_success() {
         return Err(Error::Proposer(format!("HTTP {}", resp.status())));
     }
@@ -466,8 +466,35 @@ async fn propose_and_create(
         .text()
         .await
         .map_err(|e| Error::ProposerOutput(e.to_string()))?;
-    let body: Value =
-        serde_json::from_str(&text).map_err(|e| Error::ProposerOutput(e.to_string()))?;
+    // Some gateways (OmniRoute combos) answer with an SSE stream even when
+    // `stream` is unset. Detect the `data:` framing and fold the chunks into
+    // one completion; otherwise parse the body as a single JSON object.
+    let body: Value = if text.trim_start().starts_with("data:") {
+        let mut content = String::new();
+        let mut last: Option<Value> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data == "[DONE]" || data.is_empty() {
+                continue;
+            }
+            if let Ok(chunk) = serde_json::from_str::<Value>(data) {
+                if let Some(delta) =
+                    chunk.pointer("/choices/0/delta/content").and_then(Value::as_str)
+                {
+                    content.push_str(delta);
+                }
+                last = Some(chunk);
+            }
+        }
+        // Synthesize the non-streaming shape the rest of the parser expects.
+        json!({ "choices": [{ "message": { "content": content } }], "_streamed": last })
+    } else {
+        serde_json::from_str(&text).map_err(|e| Error::ProposerOutput(e.to_string()))?
+    };
     let content = body
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)

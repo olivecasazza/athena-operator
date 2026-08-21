@@ -37,16 +37,17 @@ spec:
     - spot-walk-speed-v85
     - spot-forage-tyangpu-v84
     - spot-recover-mobile-kepler
+    - spot-walk-pbt
 
-  # Proposer: an OpenAI-compatible endpoint. In-cluster mesh-llm or a vLLM
-  # Service works; an external provider needs apiKeySecretRef (and HTTPS
-  # support in the operator build — see drive_reconciler.rs note).
+  # Proposer: OpenAI-compatible endpoint. This one is OmniRoute (the cluster's
+  # LLM gateway) — plain HTTP in-cluster, bearer key from the omniroute-secrets
+  # Secret. External HTTPS providers work too (operator ships rustls).
   proposer:
-    endpoint: http://mesh-llm-spot-locomotion-drive.apps.svc.cluster.local:9337/v1
-    model: qwen3-32b
-    # apiKeySecretRef:
-    #   name: llm-api-key
-    #   key: token
+    endpoint: http://omniroute.apps.svc.cluster.local:20128/v1
+    model: auto/best-fast
+    apiKeySecretRef:
+      name: omniroute-secrets
+      key: API_KEY_PRIMARY
     maxTokens: 4096
     temperature: 0.7
     timeoutSeconds: 120
@@ -68,8 +69,8 @@ spec:
   stagnation:
     window: 3
 
-  # RequireApproval: structural proposals park the drive until the approval
-  # annotation lands. Auto: recorded but never pause the loop.
-  structuralChangePolicy: RequireApproval
+  # requireApproval: structural proposals park the drive until the approval
+  # annotation lands. auto: recorded but never pause the loop.
+  structuralChangePolicy: requireApproval
 
   paused: false
