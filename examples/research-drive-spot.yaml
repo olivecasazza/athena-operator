@@ -53,9 +53,9 @@ spec:
     timeoutSeconds: 120
 
   limits:
-    # Max simultaneously-running campaigns (DAG width). Proposals beyond this
-    # wait for a slot.
-    maxActiveBranches: 2
+    # 2 branches on the hp pool (3 GPUs, 1 spare) + 1 on tyan01's Kepler pool
+    # (7-GPU quota via athena-kepler; recover/balance templates run there).
+    maxActiveBranches: 3
     # Lifetime campaign cap — reaching it parks the drive in NeedsHuman.
     maxCampaigns: 100
     # Per-campaign budget clamp: proposals can ask for less, never more.

@@ -221,11 +221,15 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
             300,
             Some(cond("Ready", ConditionStatus::False, reason, &msg)),
         )
-    } else if !active.is_empty() {
-        (DrivePhase::CampaignRunning, 60, None)
-    } else {
-        // Slots free and nothing running: propose.
+    } else if active.len() < spec.limits.max_active_branches as usize {
+        // A free branch slot is enough to propose: branches are concurrent by
+        // design (the DAG diverges across hardware pools), so the loop must
+        // not wait for all active campaigns to fold before filling the next
+        // slot. The proposer sees the in-flight campaigns in its context and
+        // is told not to duplicate them.
         (DrivePhase::Proposing, 15, None)
+    } else {
+        (DrivePhase::CampaignRunning, 60, None)
     };
 
     // 5. Propose + create when a slot is free. The phase gate above normally
@@ -390,6 +394,10 @@ async fn propose_and_create(
         },
         "stagnationCounter": status.stagnation_counter,
         "campaignsCompleted": status.campaigns_completed,
+        "inFlightBranches": status.current_campaigns.iter().map(|b| json!({
+            "branch": b.name, "campaign": b.campaign, "templateRef": b.template_ref,
+        })).collect::<Vec<_>>(),
+        "freeBranchSlots": spec.limits.max_active_branches.saturating_sub(status.current_campaigns.len() as u32),
         "recentProposals": status.proposals.iter().map(|p| json!({
             "id": p.id, "summary": p.summary, "decision": format!("{:?}", p.decision),
         })).collect::<Vec<_>>(),
@@ -408,9 +416,10 @@ async fn propose_and_create(
         branches (set seedExperimentRef to the winning experiment to carry knowledge); \
         {\"type\":\"structural\",\"title\":string,\"rationale\":string} — a harness/rigging/\
         sim-design change the controller cannot apply; it is recorded for human review. \
-        Rules: templateRef MUST be one of allowedTemplates. Propose 1-2 campaigns max. \
-        Prefer consolidate when a branch's incumbent clearly won; prefer fork when theories \
-        diverge. seedExperimentRef must be an experiment NAME from the context, or null.";
+        Rules: templateRef MUST be one of allowedTemplates. Do NOT duplicate a branch that is \
+        already in flight (see inFlightBranches) — propose only for freeBranchSlots. Prefer \
+        consolidate when a branch's incumbent clearly won; prefer fork when theories diverge. \
+        seedExperimentRef must be an experiment NAME from the context, or null.";
     let user =
         serde_json::to_string_pretty(&context).map_err(|e| Error::ProposerOutput(e.to_string()))?;
 
