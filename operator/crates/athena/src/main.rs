@@ -2,6 +2,7 @@ mod benchmark_reconciler;
 mod campaign_reconciler;
 mod crd;
 mod dossier;
+mod drive_reconciler;
 pub mod metrics;
 mod reconciler;
 mod report_reconciler;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 use athena_api::benchmark_run::BenchmarkRun;
 use athena_api::experiment::Experiment;
 use athena_api::research_campaign::ResearchCampaign;
+use athena_api::research_drive::ResearchDrive;
 use athena_api::research_report::ResearchReport;
 use futures::StreamExt;
 use kube::{
@@ -106,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
     let experiments: Api<Experiment> = Api::all(client.clone());
     let benchmark_runs: Api<BenchmarkRun> = Api::all(client.clone());
     let campaigns: Api<ResearchCampaign> = Api::all(client.clone());
+    let drives: Api<ResearchDrive> = Api::all(client.clone());
     let reports: Api<ResearchReport> = Api::all(client);
 
     let experiment_controller = Controller::new(experiments, Config::default())
@@ -151,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
         .run(
             report_reconciler::reconcile,
             report_reconciler::error_policy,
-            ctx,
+            ctx.clone(),
         )
         .for_each(|res| async move {
             match res {
@@ -160,11 +163,26 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-    futures::future::join4(
+    let drive_controller = Controller::new(drives, Config::default())
+        .shutdown_on_signal()
+        .run(
+            drive_reconciler::reconcile,
+            drive_reconciler::error_policy,
+            ctx.clone(),
+        )
+        .for_each(|res| async move {
+            match res {
+                Ok(o) => info!(?o, "reconciled ResearchDrive"),
+                Err(e) => error!(%e, "ResearchDrive reconcile error"),
+            }
+        });
+
+    futures::future::join5(
         experiment_controller,
         benchmark_controller,
         campaign_controller,
         report_controller,
+        drive_controller,
     )
     .await;
 

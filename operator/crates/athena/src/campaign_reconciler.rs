@@ -92,6 +92,73 @@ fn is_control_experiment(e: &Experiment) -> bool {
         None => e.spec.hypothesis.starts_with(CONTROL_HYPOTHESIS_PREFIX),
     }
 }
+
+/// True for a founding-cohort experiment: baseline, seed spread, or canary —
+/// anything with no parent experiment. Prefers the typed lineage; falls back
+/// to the bookkeeping parameter for pre-lineage experiments.
+fn is_cold_start(e: &Experiment) -> bool {
+    match &e.spec.lineage {
+        Some(l) => l.parent.is_none(),
+        None => e
+            .spec
+            .parameters
+            .get("parentExperimentId")
+            .is_none_or(Value::is_null),
+    }
+}
+
+/// True when an experiment is in a terminal phase.
+fn is_terminal(e: &Experiment) -> bool {
+    matches!(
+        e.status.as_ref().map(|s| &s.phase),
+        Some(ExperimentPhase::Succeeded | ExperimentPhase::Failed | ExperimentPhase::Error)
+    )
+}
+
+/// A warm-started child reporting its parent's objective BIT-IDENTICALLY did
+/// not train: it resumed the parent's final checkpoint and re-reported the
+/// parent's result. Measured live in v70: five children of -001 finished in
+/// ~35s (parents took ~80min), every one returning 3849.359637757268.
+///
+/// Echoes are not measurements. In the argmax they add a duplicate point that
+/// can masquerade as a search result; in the control sample they drive sigma
+/// toward 0 and turn the selection gate reckless. The seed-rotation design
+/// makes a legit bit-identical re-run impossible across generations (each
+/// generation draws a fresh seed), so exact f64 equality with the parent is
+/// sufficient evidence.
+fn is_echo(e: &Experiment, by_name: &BTreeMap<String, &Experiment>, metric: &str) -> bool {
+    // Only warm-started children can echo.
+    if e.spec
+        .checkpoint_policy
+        .as_ref()
+        .and_then(|p| p.resume_from.as_ref())
+        .is_none()
+    {
+        return false;
+    }
+    let parent_name = e
+        .spec
+        .lineage
+        .as_ref()
+        .and_then(|l| l.parent.clone())
+        .or_else(|| {
+            e.spec
+                .parameters
+                .get("parentExperimentId")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let Some(parent_name) = parent_name else {
+        return false;
+    };
+    let Some(parent) = by_name.get(&parent_name) else {
+        return false;
+    };
+    match (objective_value(e, metric), objective_value(parent, metric)) {
+        (Some(child), Some(par)) => child == par,
+        _ => false,
+    }
+}
 /// Multiplicative step for the hill-climb perturbation of a numeric parameter.
 const STEP: f64 = 0.5;
 /// Default PBT perturbation factor: explore at 1.2x up / ~0.83x (1/1.2) down.
@@ -183,6 +250,35 @@ pub async fn reconcile(
 
     // 3. Evaluate: pick best by objective.
     //
+    // ECHO FILTER. A warm-started child that reports its parent's objective
+    // bit-identically never trained — it resumed a completed checkpoint and
+    // re-reported the parent's result. Measured live in v70: five children of
+    // -001 finished in ~35s each (their parent took ~80min) and every one
+    // returned 3849.359637757268, the parent's exact score; perturbations
+    // never entered a training loop because there was none. Echoes are not
+    // measurements: in the argmax they are duplicate points posing as search
+    // results, and in the control sample they collapse sigma toward 0, which
+    // makes the selection gate reckless. They are excluded from BOTH pools.
+    // (They still count in succeeded/failed tallies — the Job did run.)
+    let by_name: BTreeMap<String, &Experiment> =
+        exps.items.iter().map(|e| (e.name_any(), e)).collect();
+    let echo_names: std::collections::HashSet<String> = completed
+        .iter()
+        .filter(|e| is_echo(e, &by_name, &objective.metric))
+        .map(|e| e.name_any())
+        .collect();
+    if !echo_names.is_empty() {
+        warn!(
+            campaign = %name,
+            echoes = ?echo_names,
+            "excluding echo experiments from selection: objective bit-identical to warm-start parent (no training occurred)"
+        );
+    }
+    let completed: Vec<&Experiment> = completed
+        .into_iter()
+        .filter(|e| !echo_names.contains(&e.name_any()))
+        .collect();
+
     // The canary is deliberately NOT excluded here: it counts like any other
     // succeeded experiment for bestExperiment/bestObjective. Its objective was
     // produced under the same template/metric, so it is comparable in kind —
@@ -229,26 +325,55 @@ pub async fn reconcile(
                 .map(|v| (n, v))
         });
 
+    // COLD-START PEERS ADVANCE FREELY. The sigma gate exists to stop
+    // warm-started challengers from displacing the incumbent on an
+    // uncalibrated comparison. It must NOT gate the founding cohort: cold
+    // starts are independent seeds, and the first-generation champion is the
+    // argmax of ALL of them, whenever they finish. Measured live in v85:
+    // 003 finished first (09:37) walking BACKWARD (-0.134 m/s) and was
+    // adopted; 001 finished 3 minutes later walking FORWARD (+0.026 m/s, the
+    // campaign argmax) and the gate — correctly refusing an uncalibrated
+    // displacement — locked the backward-walker in and discarded the best
+    // run of the campaign. Order of completion is scheduling noise; argmax of
+    // completed cold starts is order-independent.
+    let best_observed_is_cold = best_observed
+        .as_ref()
+        .and_then(|(bn, _)| by_name.get(bn))
+        .is_some_and(|e| is_cold_start(e));
+    let prior_incumbent_is_cold = prior_incumbent
+        .as_ref()
+        .and_then(|(n, _)| by_name.get(n))
+        .is_some_and(|e| is_cold_start(e));
+    let founding_peers = best_observed_is_cold && prior_incumbent_is_cold;
+
     let best = match (&best_observed, &prior_incumbent) {
         (Some((bn, bv)), Some((inc_name, inc_v))) if bn != inc_name => {
-            // Prefer the control slot's fresh re-measurement of the incumbent
-            // over its original (max-selected, upward-biased) score.
-            let baseline = incumbent_remeasured.unwrap_or(*inc_v);
-            if beats_incumbent(*bv, baseline, sigma_gate, &objective.goal) {
+            if founding_peers {
                 info!(
                     challenger = %bn, challenger_score = bv, incumbent = %inc_name,
-                    incumbent_score = baseline, sigma = ?sigma,
-                    "incumbent displaced: challenger cleared the seed-noise floor"
+                    "founding cohort peer finished with a better score; champion advances (sigma gate applies to warm-started challengers only)"
                 );
                 best_observed.clone()
             } else {
-                info!(
-                    challenger = %bn, challenger_score = bv, incumbent = %inc_name,
-                    incumbent_score = baseline, sigma = ?sigma, sigma_gate = ?sigma_gate,
-                    "holding incumbent: challenger is within seed noise, so its lead \
-                     is not distinguishable from a lucky seed"
-                );
-                prior_incumbent.clone()
+                // Prefer the control slot's fresh re-measurement of the incumbent
+                // over its original (max-selected, upward-biased) score.
+                let baseline = incumbent_remeasured.unwrap_or(*inc_v);
+                if beats_incumbent(*bv, baseline, sigma_gate, &objective.goal) {
+                    info!(
+                        challenger = %bn, challenger_score = bv, incumbent = %inc_name,
+                        incumbent_score = baseline, sigma = ?sigma,
+                        "incumbent displaced: challenger cleared the seed-noise floor"
+                    );
+                    best_observed.clone()
+                } else {
+                    info!(
+                        challenger = %bn, challenger_score = bv, incumbent = %inc_name,
+                        incumbent_score = baseline, sigma = ?sigma, sigma_gate = ?sigma_gate,
+                        "holding incumbent: challenger is within seed noise, so its lead \
+                         is not distinguishable from a lucky seed"
+                    );
+                    prior_incumbent.clone()
+                }
             }
         }
         // No prior incumbent (first generation) — adopt the observed best so the
@@ -298,6 +423,25 @@ pub async fn reconcile(
                 let patch = json!({ "status": { "decision": want } });
                 experiments
                     .patch_status(&en, &PatchParams::apply(MANAGER), &Patch::Merge(&patch))
+                    .await?;
+            }
+        }
+        // Echoes are excluded from `completed` above and so escape the
+        // Keep/Discard loop entirely, leaving them decisionless forever.
+        // Stamp them Discard explicitly: a warm-started child that
+        // re-reported its parent's metric is not a candidate for anything.
+        for e in &exps.items {
+            if !echo_names.contains(&e.name_any()) {
+                continue;
+            }
+            if e.status.as_ref().and_then(|s| s.decision.clone()).is_none() {
+                let patch = json!({ "status": { "decision": ExperimentDecision::Discard } });
+                experiments
+                    .patch_status(
+                        &e.name_any(),
+                        &PatchParams::apply(MANAGER),
+                        &Patch::Merge(&patch),
+                    )
                     .await?;
             }
         }
@@ -417,22 +561,57 @@ pub async fn reconcile(
             let best_exp: Option<&Experiment> = best
                 .as_ref()
                 .and_then(|(bn, _)| completed.iter().find(|e| &e.name_any() == bn).copied());
+            // Cross-campaign seed (spec.seedExperimentRef): while the campaign
+            // has no in-campaign best yet, seed the search from the referenced
+            // experiment's parameters and (for PBT) its checkpoint instead of
+            // cold-starting from template defaults. This is how a ResearchDrive
+            // carries a prior branch's incumbent into a consolidation campaign
+            // (the DAG's converge edge). A missing/unreadable seed is non-fatal:
+            // warn and cold-start, never wedge the campaign.
+            let external_seed: Option<Experiment> = if best_exp.is_none() {
+                match &campaign.spec.seed_experiment_ref {
+                    Some(seed_name) => match experiments.get_opt(seed_name).await {
+                        Ok(Some(e)) => Some(e),
+                        Ok(None) => {
+                            warn!(campaign = %name, seed = %seed_name,
+                                "seedExperimentRef experiment not found; cold-starting from template defaults");
+                            None
+                        }
+                        Err(e) => {
+                            warn!(campaign = %name, seed = %seed_name, %e,
+                                "failed to fetch seedExperimentRef experiment; cold-starting");
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let external_seed_name = external_seed.as_ref().map(|e| e.name_any());
+            // The effective seed experiment: an in-campaign best always wins;
+            // the external seed applies only until one exists.
+            let seed_exp: Option<&Experiment> = best_exp.or(external_seed.as_ref());
             // A canary seed's SCIENCE params are a valid hill-climb/PBT start,
             // but its cheapness must not leak into budgeted children: keys the
             // canary explicitly overrode (spec.canary.parameters, e.g.
             // total_timesteps: 2M) are stripped so they revert to template
             // defaults. Caught live: spot-recover-v70-001 ran at the canary's
             // 2M budget instead of the template's 15M.
-            let seed_params: Option<BTreeMap<String, Value>> = best_exp.map(|e| {
+            let seed_params: Option<BTreeMap<String, Value>> = seed_exp.map(|e| {
                 canary_seed_params(
                     &e.spec.parameters,
                     campaign.spec.canary.as_ref().map(|c| &c.parameters),
                 )
             });
-            let best_ctx = best
+            // The seed's identity for lineage/parent bookkeeping: the in-campaign
+            // best's name, or the external seed experiment's name when seeding
+            // cross-campaign.
+            let seed_name: Option<String> = best
                 .as_ref()
-                .zip(seed_params.as_ref())
-                .map(|((bn, _), p)| (bn.as_str(), p));
+                .map(|(bn, _)| bn.clone())
+                .or(external_seed_name);
+            let best_ctx = seed_name.as_deref().zip(seed_params.as_ref());
             // PBT explore factor (guard against non-positive overrides).
             let perturb_factor = match campaign.spec.perturb_factor {
                 Some(f) if f > 0.0 => f,
@@ -485,7 +664,7 @@ pub async fn reconcile(
                     let lineage = ExperimentLineage {
                         relation: DerivationRelation::Remeasure,
                         parent: Some(bn.to_string()),
-                        parent_uid: best_exp.and_then(|e| e.uid()),
+                        parent_uid: seed_exp.and_then(|e| e.uid()),
                         generation: control_pop.map(|pop| idx / pop),
                         strategy: Some(campaign.spec.strategy.strategy_type.clone()),
                         perturbations: Vec::new(),
@@ -498,7 +677,7 @@ pub async fn reconcile(
                         idx,
                         params,
                         lineage.describe(),
-                        pbt_checkpoint_policy(best_exp),
+                        pbt_checkpoint_policy(seed_exp),
                         Some(lineage),
                     );
                     match experiments.create(&PostParams::default(), &exp).await {
@@ -511,7 +690,7 @@ pub async fn reconcile(
                     if is_pbt {
                         let (params, hypothesis) =
                             pbt_experiment(&template, best_ctx, perturb_factor, idx, salt);
-                        (params, hypothesis, pbt_checkpoint_policy(best_exp))
+                        (params, hypothesis, pbt_checkpoint_policy(seed_exp))
                     } else {
                         let (params, hypothesis) = next_experiment(&template, best_ctx, idx, salt);
                         (params, hypothesis, None)
@@ -559,7 +738,7 @@ pub async fn reconcile(
                 let lineage = ExperimentLineage {
                     relation,
                     parent: best_ctx.map(|(bn, _)| bn.to_string()),
-                    parent_uid: best_exp.and_then(|e| e.uid()),
+                    parent_uid: seed_exp.and_then(|e| e.uid()),
                     generation: control_pop.map(|pop| idx / pop),
                     strategy: Some(campaign.spec.strategy.strategy_type.clone()),
                     perturbations: parameter_deltas(best_ctx.map(|(_, bp)| bp), &params),
@@ -2078,6 +2257,7 @@ mod tests {
                 inference_mesh: None,
                 inference_cluster: None,
                 canary: None,
+                seed_experiment_ref: None,
             },
             status: None,
         }
@@ -2442,6 +2622,7 @@ mod tests {
                 inference_mesh: None,
                 inference_cluster: None,
                 canary: None,
+                seed_experiment_ref: None,
             },
             status: None,
         };
@@ -2469,6 +2650,7 @@ mod tests {
             inference_mesh: None,
             inference_cluster: None,
             canary,
+            seed_experiment_ref: None,
         }
     }
 
@@ -2778,5 +2960,113 @@ mod tests {
         let cpu_labels = pod_labels(&cpu_dep);
         assert!(!cpu_labels.contains_key("kueue.x-k8s.io/queue-name"));
         assert!(!cpu_labels.contains_key("kueue.x-k8s.io/priority-class"));
+    }
+
+    // ---- Echo filter (v70 bug) ----
+
+    use athena_api::experiment::{CheckpointPolicy, ExperimentLineage};
+
+    /// A warm-started child with a typed lineage parent.
+    fn warm_child(name: &str, parent: &str, value: f64) -> Experiment {
+        let mut e = exp_with(name, ExperimentPhase::Succeeded, "reward_mean", value);
+        e.spec.checkpoint_policy = Some(CheckpointPolicy {
+            interval_seconds: None,
+            resume_from: Some(format!("/workspace/runs/c/{parent}/checkpoints/x")),
+            retain: None,
+        });
+        e.spec.lineage = Some(ExperimentLineage {
+            relation: DerivationRelation::Perturb,
+            parent: Some(parent.to_string()),
+            parent_uid: None,
+            generation: None,
+            strategy: None,
+            perturbations: Vec::new(),
+            salt: None,
+        });
+        e
+    }
+
+    #[test]
+    fn echo_detected_only_for_warm_started_bit_identical_children() {
+        let parent = exp_with("c-000", ExperimentPhase::Succeeded, "reward_mean", 100.0);
+        let echo = warm_child("c-001", "c-000", 100.0);
+        let real = warm_child("c-002", "c-000", 100.0 + 1e-12);
+        let cold = exp_with("c-003", ExperimentPhase::Succeeded, "reward_mean", 100.0);
+        let by_name: BTreeMap<String, &Experiment> = [&parent, &echo, &real, &cold]
+            .into_iter()
+            .map(|e| (e.name_any(), e))
+            .collect();
+
+        assert!(
+            is_echo(&echo, &by_name, "reward_mean"),
+            "bit-identical warm-started child is an echo"
+        );
+        assert!(
+            !is_echo(&real, &by_name, "reward_mean"),
+            "any float difference means training happened"
+        );
+        assert!(
+            !is_echo(&cold, &by_name, "reward_mean"),
+            "cold start without resume is not an echo"
+        );
+        assert!(
+            !is_echo(&parent, &by_name, "reward_mean"),
+            "parent itself is not an echo"
+        );
+    }
+
+    #[test]
+    fn echo_requires_parent_in_campaign() {
+        let echo = warm_child("c-001", "deleted-parent", 100.0);
+        let by_name: BTreeMap<String, &Experiment> =
+            [&echo].into_iter().map(|e| (e.name_any(), e)).collect();
+        assert!(
+            !is_echo(&echo, &by_name, "reward_mean"),
+            "missing parent → cannot prove echo"
+        );
+    }
+
+    // ---- Founding cohort gate (v85 bug) ----
+
+    fn cold_start_exp(name: &str, phase: ExperimentPhase, value: f64) -> Experiment {
+        let mut e = exp_with(name, phase, "reward_mean", value);
+        e.spec.lineage = Some(ExperimentLineage {
+            relation: DerivationRelation::Seed,
+            parent: None,
+            parent_uid: None,
+            generation: None,
+            strategy: None,
+            perturbations: Vec::new(),
+            salt: None,
+        });
+        e
+    }
+
+    #[test]
+    fn founding_cohort_open_while_any_cold_start_nonterminal() {
+        let done = cold_start_exp("c-000", ExperimentPhase::Succeeded, 1.0);
+        let running = cold_start_exp("c-001", ExperimentPhase::Running, 0.0);
+        let failed = cold_start_exp("c-002", ExperimentPhase::Failed, 0.0);
+        let child = warm_child("c-003", "c-000", 2.0);
+
+        assert!(is_cold_start(&done) && is_terminal(&done));
+        assert!(is_cold_start(&running) && !is_terminal(&running));
+        assert!(
+            is_cold_start(&failed) && is_terminal(&failed),
+            "failed is terminal"
+        );
+        assert!(
+            !is_cold_start(&child),
+            "child with parent is not a cold start"
+        );
+
+        // The v85 scenario: cohort open iff any cold start is non-terminal.
+        let cohort = [&done, &running, &failed, &child];
+        let open = cohort.iter().any(|e| is_cold_start(e) && !is_terminal(e));
+        assert!(open, "running cold start keeps the founding cohort open");
+
+        let all_done = [&done, &failed, &child];
+        let open = all_done.iter().any(|e| is_cold_start(e) && !is_terminal(e));
+        assert!(!open, "cohort closes once every cold start is terminal");
     }
 }

@@ -94,6 +94,7 @@ rules:
       - runtimeprofiles
       - experimenttemplates
       - researchcampaigns
+      - researchdrives
       - experiments
       - benchmarksuites
       - benchmarkruns
@@ -146,6 +147,7 @@ rules:
       - runtimeprofiles
       - experimenttemplates
       - researchcampaigns
+      - researchdrives
       - experiments
       - benchmarksuites
       - benchmarkruns
@@ -160,6 +162,7 @@ rules:
     resources:
       - benchmarkruns
       - experiments
+      - researchcampaigns
     verbs:
       - create
       - update
@@ -179,6 +182,7 @@ rules:
       - runtimeprofiles/status
       - experimenttemplates/status
       - researchcampaigns/status
+      - researchdrives/status
       - experiments/status
       - benchmarksuites/status
       - benchmarkruns/status
@@ -217,6 +221,12 @@ rules:
       - update
       - patch
       - delete
+  - apiGroups:
+      - ''
+    resources:
+      - secrets
+    verbs:
+      - get
   - apiGroups:
       - apps
     resources:

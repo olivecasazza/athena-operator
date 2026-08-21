@@ -7,6 +7,7 @@ pub mod experiment;
 pub mod experiment_template;
 pub mod metric_source;
 pub mod research_campaign;
+pub mod research_drive;
 pub mod research_report;
 pub mod runtime_profile;
 pub mod scheduling;

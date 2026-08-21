@@ -1,0 +1,75 @@
+# ResearchDrive — the PERPETUAL research loop over Spot locomotion campaigns.
+#
+# A ResearchCampaign is a bounded search: it stops at budget.maxExperiments and
+# never speaks again. The drive is the outer loop a human used to play by hand
+# (v70 → v72 → v73 → v84 → v85 were all hand-created): when an owned campaign
+# finishes, the drive folds its result (honest incumbentRemeasured objective,
+# sigma-gated) into drive-level state, then asks the proposer LLM what to run
+# next and creates the campaign itself. Campaigns form a DAG:
+#
+#   fork        — divergent theories run in parallel (≤ limits.maxActiveBranches)
+#   consolidate — a new campaign seeded from a finished branch's winning
+#                 experiment (spec.seedExperimentRef), so knowledge CONVERGES
+#                 instead of every campaign cold-starting from template defaults
+#
+# The loop halts only on: spec.paused, the lifetime campaign cap, the
+# stagnation window (N campaigns without a sigma-gated improvement → phase
+# NeedsHuman), or a structural proposal awaiting human approval.
+#
+# Structural proposals (harness / rigging / sim-design changes) are RECORDED in
+# status.proposals but never applied by the controller — it writes specs, not
+# code. Under structuralChangePolicy: RequireApproval the drive parks in
+# AwaitingApproval until:
+#   kubectl annotate researchdrive spot-locomotion-drive \
+#     research.nixlab.io/approve-proposal="<proposal-id>" --overwrite
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchDrive
+metadata:
+  name: spot-locomotion-drive
+  namespace: apps
+spec:
+  domain: spot-locomotion
+
+  # Templates the proposer may launch campaigns against. The controller REJECTS
+  # any proposal naming a template outside this list.
+  templateRefs:
+    - spot-walk-speed-v85
+    - spot-forage-tyangpu-v84
+    - spot-recover-mobile-kepler
+
+  # Proposer: an OpenAI-compatible endpoint. In-cluster mesh-llm or a vLLM
+  # Service works; an external provider needs apiKeySecretRef (and HTTPS
+  # support in the operator build — see drive_reconciler.rs note).
+  proposer:
+    endpoint: http://mesh-llm-spot-locomotion-drive.apps.svc.cluster.local:9337/v1
+    model: qwen3-32b
+    # apiKeySecretRef:
+    #   name: llm-api-key
+    #   key: token
+    maxTokens: 4096
+    temperature: 0.7
+    timeoutSeconds: 120
+
+  limits:
+    # Max simultaneously-running campaigns (DAG width). Proposals beyond this
+    # wait for a slot.
+    maxActiveBranches: 2
+    # Lifetime campaign cap — reaching it parks the drive in NeedsHuman.
+    maxCampaigns: 100
+    # Per-campaign budget clamp: proposals can ask for less, never more.
+    campaignBudget:
+      maxExperiments: 12
+      maxDuration: 48h
+
+  # N consecutive campaigns without a sigma-gated improvement over the drive
+  # best → phase NeedsHuman (the loop halts rather than burning budget on a
+  # flat landscape).
+  stagnation:
+    window: 3
+
+  # RequireApproval: structural proposals park the drive until the approval
+  # annotation lands. Auto: recorded but never pause the loop.
+  structuralChangePolicy: RequireApproval
+
+  paused: false

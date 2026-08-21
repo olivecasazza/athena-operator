@@ -894,6 +894,11 @@
                     "nullable": true,
                     "type": "integer"
                   },
+                  "seedExperimentRef": {
+                    "description": "Optional namespace-local Experiment to seed the search from. When set and no in-campaign best exists yet, the strategy perturbs from THAT experiment's spec.parameters instead of the template defaults, and (for PBT) warm-starts from its status.latestCheckpoint. This is how cross-campaign knowledge carries: a ResearchDrive consolidation campaign points here at the winning experiment of a prior branch so the new campaign continues from the incumbent rather than cold-starting.",
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "strategy": {
                     "default": {
                       "type": "heuristic"
@@ -1008,6 +1013,394 @@
               "spec"
             ],
             "title": "ResearchCampaign",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "researchdrives.research.nixlab.io"
+  },
+  "spec": {
+    "group": "research.nixlab.io",
+    "names": {
+      "categories": [],
+      "kind": "ResearchDrive",
+      "plural": "researchdrives",
+      "shortNames": [
+        "rsd"
+      ],
+      "singular": "researchdrive"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".status.phase",
+            "name": "Phase",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.campaignsCompleted",
+            "name": "Campaigns",
+            "type": "integer"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for ResearchDriveSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "domain": {
+                    "description": "Research domain label (e.g. \"spot-locomotion\"). Low-cardinality; used in metrics and proposer context.",
+                    "type": "string"
+                  },
+                  "limits": {
+                    "default": {
+                      "campaignBudget": {
+                        "maxDuration": "48h",
+                        "maxExperiments": 12
+                      },
+                      "maxActiveBranches": 2,
+                      "maxCampaigns": 100
+                    },
+                    "description": "Hard bounds the controller enforces on the drive regardless of what the proposer asks for.",
+                    "properties": {
+                      "campaignBudget": {
+                        "default": {
+                          "maxDuration": "48h",
+                          "maxExperiments": 12
+                        },
+                        "description": "Per-campaign budget clamp: any proposed campaign's budget is reduced to at most these values before creation.",
+                        "properties": {
+                          "maxDuration": {
+                            "type": "string"
+                          },
+                          "maxExperiments": {
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "maxDuration",
+                          "maxExperiments"
+                        ],
+                        "type": "object"
+                      },
+                      "maxActiveBranches": {
+                        "default": 2,
+                        "description": "Maximum simultaneously-running campaigns the drive may own. Proposals beyond this are queued by deferral: the controller proposes again when a slot frees.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "maxCampaigns": {
+                        "default": 100,
+                        "description": "Lifetime campaign cap for the drive. Reaching it parks the drive in phase NeedsHuman (budget exhausted), not Failed.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "paused": {
+                    "default": false,
+                    "description": "Manual brake: while true the controller proposes and creates nothing.",
+                    "type": "boolean"
+                  },
+                  "proposer": {
+                    "description": "LLM proposer configuration. The controller calls this OpenAI-compatible endpoint when a campaign the drive owns reaches a terminal phase, asking for the next campaign(s) — the perpetual loop's hypothesis generator.",
+                    "properties": {
+                      "apiKeySecretRef": {
+                        "description": "Optional Secret holding the API key. The key's value is sent as a Bearer token. Omit for unauthenticated in-cluster endpoints.",
+                        "nullable": true,
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "name"
+                        ],
+                        "type": "object"
+                      },
+                      "endpoint": {
+                        "description": "Base URL of an OpenAI-compatible API (e.g. an in-cluster mesh-llm/vLLM Service or an external provider). The controller POSTs to `{endpoint}/chat/completions`.",
+                        "type": "string"
+                      },
+                      "maxTokens": {
+                        "description": "Max completion tokens per proposal call.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "model": {
+                        "description": "Model identifier passed in the request body.",
+                        "type": "string"
+                      },
+                      "temperature": {
+                        "description": "Sampling temperature.",
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
+                      "timeoutSeconds": {
+                        "description": "HTTP timeout for one proposal call.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "endpoint",
+                      "model"
+                    ],
+                    "type": "object"
+                  },
+                  "stagnation": {
+                    "default": {
+                      "window": 3
+                    },
+                    "description": "Stagnation policy: when the last `window` completed campaigns produced no sigma-gated improvement over the drive's best, the drive parks in phase NeedsHuman instead of proposing further.",
+                    "properties": {
+                      "window": {
+                        "default": 3,
+                        "description": "Number of consecutive completed campaigns without a sigma-gated improvement over the drive's bestObjective before the drive parks in NeedsHuman.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "structuralChangePolicy": {
+                    "default": "requireApproval",
+                    "description": "Gate for proposals that are NOT plain campaigns (harness, rigging, or sim-design changes). RequireApproval (default): the drive records the proposal in status.proposals and waits for the `research.nixlab.io/approve-proposal: \"<id>\"` annotation. Auto: structural proposals are still only RECORDED (the controller cannot apply code changes), but the drive keeps proposing/running campaigns without pausing.",
+                    "enum": [
+                      "requireApproval",
+                      "auto"
+                    ],
+                    "type": "string"
+                  },
+                  "templateRefs": {
+                    "description": "ExperimentTemplates the drive's proposer may launch campaigns against. The controller REJECTS any proposed campaign whose templateRef is not in this list. Minimum one entry.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "domain",
+                  "proposer",
+                  "templateRefs"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "nullable": true,
+                "properties": {
+                  "bestExperimentRef": {
+                    "description": "<experiment-name> holding the drive-level best objective.",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "bestObjective": {
+                    "description": "Best sigma-gated objective observed across ALL campaigns of this drive. Unlike campaign-level bestObjective this only moves on re-measured (unbiased) improvements, so it is honest progress evidence.",
+                    "format": "double",
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "bestTemplateRef": {
+                    "description": "Template that produced the current drive-level best. Sigma-gated comparison only happens WITHIN a template — objectives from different templates are not comparable, so a campaign fold against a different template is recorded but never displaces the incumbent (cross-template synthesis is the proposer's job, not a raw number comparison).",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "campaignsCompleted": {
+                    "default": 0,
+                    "description": "Lifetime campaigns completed under this drive.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "conditions": {
+                    "items": {
+                      "properties": {
+                        "lastTransitionTime": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "message": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "reason": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "Unknown",
+                            "True",
+                            "False"
+                          ],
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "controllerVersion": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "currentCampaigns": {
+                    "description": "Campaigns the drive currently owns (live branches).",
+                    "items": {
+                      "description": "One campaign the drive currently owns (a live branch of the research DAG).",
+                      "properties": {
+                        "campaign": {
+                          "description": "Name of the ResearchCampaign running this branch.",
+                          "type": "string"
+                        },
+                        "forkedFrom": {
+                          "description": "Campaign this branch forked from (None for root branches).",
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "name": {
+                          "description": "Branch label (proposer-chosen theory name, e.g. \"gait-frequency\").",
+                          "type": "string"
+                        },
+                        "templateRef": {
+                          "description": "ExperimentTemplate the campaign runs against.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "campaign",
+                        "name",
+                        "templateRef"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "lastProposalAt": {
+                    "description": "RFC 3339 timestamp of the last successful proposer call.",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "observedGeneration": {
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "phase": {
+                    "description": "Loop lifecycle phase.",
+                    "enum": [
+                      "idle",
+                      "campaignRunning",
+                      "proposing",
+                      "awaitingApproval",
+                      "needsHuman",
+                      "paused",
+                      "failed"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "proposals": {
+                    "description": "Bounded ring of proposer decisions (newest last, cap 10).",
+                    "items": {
+                      "description": "One proposer decision recorded in the drive's bounded history (cap 10; the controller drops the oldest entry when full).",
+                      "properties": {
+                        "campaignNames": {
+                          "description": "Campaign names created from this proposal (empty for structural or rejected proposals).",
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "decision": {
+                          "default": "accepted",
+                          "description": "Decision state of this proposal.",
+                          "enum": [
+                            "accepted",
+                            "rejected",
+                            "awaitingApproval",
+                            "approved",
+                            "declined"
+                          ],
+                          "type": "string"
+                        },
+                        "id": {
+                          "description": "Stable id assigned by the controller (proposal-<n>). Humans approve structural proposals via annotation `research.nixlab.io/approve-proposal: \"<id>\"`.",
+                          "type": "string"
+                        },
+                        "summary": {
+                          "description": "Proposer's one-paragraph hypothesis/rationale.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "summary"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "stagnationCounter": {
+                    "default": 0,
+                    "description": "Consecutive completed campaigns without a sigma-gated improvement. Reset to 0 on any accepted improvement.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "ResearchDrive",
             "type": "object"
           }
         },

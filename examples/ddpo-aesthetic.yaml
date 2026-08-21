@@ -1,0 +1,178 @@
+# DDPO aesthetic-alignment campaign for athena.
+#
+# RLHF for images: fine-tune Stable Diffusion 1.5 (LoRA) with Denoising
+# Diffusion Policy Optimization against the improved-aesthetic-predictor reward
+# (CLIP ViT-L/14 + MLP head on AVA human ratings). Reference:
+# https://huggingface.co/blog/trl-ddpo — the swept defaults below are the blog's
+# single-GPU recommendations, adapted for the 8GB Quadro-RTX-4000 pool (LoRA,
+# fp16, batch 1 + grad-accum).
+#
+# OBJECTIVE HONESTY (the v85 lesson): DDPO optimizes the reward directly, so
+# the training reward mean is hackable by construction. The campaign objective
+# is therefore aesthetic_heldout_mean — the aesthetic score on prompts the
+# sampler NEVER sees during training. Reward overfitting to the 27 training
+# animals shows up as a train/held-out gap instead of silently inflating the
+# objective.
+#
+# PREREQUISITES (not runnable until these exist — cf. gpt-research-campaigns.yaml):
+#   1. Trainer image: Dockerfile.ddpo-trainer → ghcr.io/olivecasazza/athena-ddpo-trainer.
+#   2. Model weights (SD1.5, CLIP, aesthetic head) download from HF on first
+#      run into HF_HOME=/workspace/.hf on the shared PVC; later trials reuse it.
+#   3. GPU: 1 per trial on the hp01-03 Quadro-RTX-4000 pool via Kueue
+#      (athena-gpu queue). DDPO sampling is 50-step diffusion per image — each
+#      64-epoch trial is ~1.5-3h on one card. Run the canary first.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: ddpo-trainer-gpu
+  namespace: apps
+spec:
+  runtime:
+    type: pytorch
+    mode: batchJob
+  # Built from Dockerfile.ddpo-trainer (torch 2.3.1 cu121 + trl[diffusers]).
+  image: "ghcr.io/olivecasazza/athena-ddpo-trainer:v1"
+  imagePullSecrets:
+    - name: ghcr-pull
+  resources:
+    # Sampling is GPU-bound; the reward scorer (CLIP) is a small side load.
+    requests:
+      cpu: "2"
+      memory: "6Gi"
+      nvidia.com/gpu: "1"
+    limits:
+      memory: "20Gi"
+      nvidia.com/gpu: "1"
+  scheduling:
+    # Kueue admission via the apps/athena-gpu LocalQueue: the Job starts
+    # suspended and only runs once GPU quota is granted.
+    queueName: athena-gpu
+    nodeSelector:
+      nvidia.com/gpu.product: Quadro-RTX-4000
+    # Checkpointed LoRA weights → safe to run preemptible.
+    priorityClassName: gpu-scavenger
+    # k3s: NVIDIA runtime is not containerd's default on these nodes.
+    runtimeClassName: nvidia
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+  storage:
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+    createWorkspaceClaim: false
+    workspaceAccessModes:
+      - ReadWriteMany
+    workspaceStorageClassName: nfs
+  env:
+    - name: HOME
+      value: /workspace
+    - name: HF_HOME
+      value: /workspace/.hf
+    # Hardware knobs, deliberately NOT searched (a x2 PBT perturbation of batch
+    # size OOMs an 8GB card): the campaign sweeps science, not memory layout.
+    - name: DDPO_SAMPLE_BATCH_SIZE
+      value: "4"
+    - name: DDPO_TRAIN_BATCH_SIZE
+      value: "1"
+    - name: DDPO_GRADIENT_ACCUMULATION_STEPS
+      value: "2"
+  metricsEndpoint:
+    prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: ddpo-aesthetic-alignment
+  namespace: apps
+spec:
+  runtimeProfileRef: ddpo-trainer-gpu
+  source:
+    git:
+      url: "https://github.com/olivecasazza/athena-operator"
+      ref: "main"
+  objective:
+    # HELD-OUT prompts only — never the training reward (DDPO optimizes that
+    # directly; selecting on it would reward reward-hacking).
+    metric: "aesthetic_heldout_mean"
+    goal: "maximize"
+  metrics:
+    parser:
+      type: "file"
+      path: "metrics.json"
+  researchObjective: >-
+    Open-empirical: does DDPO on SD1.5-LoRA improve held-out-prompt aesthetic
+    score over the base model, and which of the blog's recommended knobs
+    (learning rate, denoising steps per sample, batches per epoch, stat-tracking
+    buffer) matter on the 8GB RTX-4000 regime? The blog shows train-prompt gains
+    generalize over prompt variety; we select on held-out prompts to measure
+    that claim rather than assume it. Baseline comparison: the control slot
+    re-measures the incumbent config on fresh seeds, so seed noise is priced in.
+  defaults:
+    train_learning_rate: 0.0003
+    sample_num_steps: 50
+    sample_num_batches_per_epoch: 4
+    per_prompt_stat_tracking_buffer_size: 32
+    num_epochs: 64
+  parameterSchema:
+    train_learning_rate:
+      type: number
+      description: "PPO learning rate for the LoRA adapter. Blog default 3e-4."
+      default: 0.0003
+    sample_num_steps:
+      type: number
+      description: "Denoising steps per sample (the MDP horizon). Blog default 50."
+      default: 50
+    sample_num_batches_per_epoch:
+      type: number
+      description: "Sampling batches per epoch (data reuse ratio). Blog default 4."
+      default: 4
+    per_prompt_stat_tracking_buffer_size:
+      type: number
+      description: "Per-prompt advantage normalization window. Blog default 32."
+      default: 32
+    num_epochs:
+      type: number
+      description: "Training epochs. 64 is the 8GB-pool budget fit; blog runs 200 on A100."
+      default: 64
+  dashboard:
+    title: "DDPO aesthetic alignment (SD1.5-LoRA)"
+    metrics:
+      aesthetic_heldout_mean:
+        label: "Aesthetic score, held-out prompts"
+        unit: score
+        goal: maximize
+        description: "THE objective. Aesthetic predictor on prompts never sampled in training."
+      aesthetic_train_reward_mean:
+        label: "Training reward mean (hackable diagnostic)"
+        unit: score
+        goal: maximize
+        description: "What DDPO directly optimizes. Divergence from held-out = reward overfitting."
+      wall_clock_seconds:
+        label: "Trial wall clock"
+        unit: s
+        goal: minimize
+        description: "Diagnostic; informs budget sizing."
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: ddpo-aesthetic-v1
+  namespace: apps
+spec:
+  templateRef: ddpo-aesthetic-alignment
+  strategy:
+    type: pbt                # perturbs every numeric param around the best
+  populationSize: 2  # hp RTX-4000 pool (3 GPUs); leave 1 for spot RayJob contention
+  perturbFactor: 2
+  concurrency: 2
+  budget:
+    maxExperiments: 8
+    maxDuration: "48h"
+  # Cheap gate before the campaign spends real budget: 4 epochs proves the
+  # recipe end-to-end (image fits in 8GB, reward reads, metrics land) in
+  # ~10-20 min. Nothing reaches the 64-epoch budget without a green canary.
+  canary:
+    parameters:
+      num_epochs: 4

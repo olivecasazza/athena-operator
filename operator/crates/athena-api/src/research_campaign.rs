@@ -68,10 +68,20 @@ pub struct ResearchCampaignSpec {
     pub inference_cluster: Option<VllmClusterSpec>,
 
     /// Optional canary stage: one cheap gate experiment generated before any
-    /// budgeted experiments. Generation of further experiments is held until the
-    /// canary succeeds AND (if a benchmark suite gates it) its gates pass.
+    /// budgeted experiments. Generation of further experiments is held until
+    /// the canary succeeds AND (if a benchmark suite gates it) its gates pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canary: Option<CanarySpec>,
+
+    /// Optional namespace-local Experiment to seed the search from. When set
+    /// and no in-campaign best exists yet, the strategy perturbs from THAT
+    /// experiment's spec.parameters instead of the template defaults, and (for
+    /// PBT) warm-starts from its status.latestCheckpoint. This is how
+    /// cross-campaign knowledge carries: a ResearchDrive consolidation campaign
+    /// points here at the winning experiment of a prior branch so the new
+    /// campaign continues from the incumbent rather than cold-starting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_experiment_ref: Option<String>,
 }
 
 /// One cheap gate experiment run before the campaign spends real budget.

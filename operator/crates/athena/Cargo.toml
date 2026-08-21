@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 athena-api.workspace = true
 kube.workspace = true
 k8s-openapi.workspace = true

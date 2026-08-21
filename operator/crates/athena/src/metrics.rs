@@ -26,6 +26,19 @@ pub static BENCHMARK_RUNS_TOTAL: Lazy<GaugeVec> = Lazy::new(|| {
     gauge
 });
 
+/// Lifetime campaigns completed per ResearchDrive, by drive phase. The drive
+/// is the perpetual outer loop; this is its progress signal.
+pub static DRIVE_CAMPAIGNS_TOTAL: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "drive_campaigns_completed",
+        "Campaigns completed per ResearchDrive by phase",
+    )
+    .namespace("athena");
+    let gauge = GaugeVec::new(opts, &["namespace", "domain", "phase"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
 /// Per-experiment reported metric values, re-published from each Experiment's
 /// `status.metrics` (which the reconciler ingests from the pod termination
 /// message). This is DURABLE regardless of pod lifetime — short-lived experiment
@@ -45,6 +58,7 @@ pub fn init() {
     Lazy::force(&EXPERIMENTS_TOTAL);
     Lazy::force(&BENCHMARK_RUNS_TOTAL);
     Lazy::force(&EXPERIMENT_METRIC);
+    Lazy::force(&DRIVE_CAMPAIGNS_TOTAL);
 }
 
 async fn metrics_handler() -> impl IntoResponse {
