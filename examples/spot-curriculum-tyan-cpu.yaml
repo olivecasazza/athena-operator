@@ -1,0 +1,140 @@
+# tyan01 capacity probe: is the GPU actually load-bearing for this workload?
+#
+# tyan01 holds 8x GTX Titan Black (sm_35). Those GPUs CANNOT run the curriculum
+# trainer: the image is CUDA 12.1 and CUDA 12 removed sm_35 entirely, while Ray
+# 2.54.1's new-API RLModule stack needs torch 2.x, whose wheels ship no sm_35.
+# Using them for GPU training means building torch from source against CUDA
+# 11.4 -- and the one kepler image that exists in the registry
+# (spot-rapier-trainer:v84-recover-kepler) has NO build recipe anywhere in the
+# repo, so it is unreproducible.
+#
+# But the GPU may not matter here. The policy is a 256x256 MLP; the cost is
+# rapier physics stepping, which is CPU work. The GPU profile already requests
+# cpu: 8 -- the tell. If CPU-only on tyan01 lands within ~2x of the RTX 4000
+# baseline (6k-14k steps/min measured across four morphologies), then tyan01
+# adds real parallel capacity for the 4 workloads currently PENDING on
+# athena-gpu, using the SAME image and no Kepler build at all.
+#
+# No queueName: this requests no nvidia.com/gpu, so Kueue GPU quota does not
+# apply and labeling it would put CPU work in a GPU queue. tyan01 has 11
+# allocatable CPU, so cpu:5 requests fit two concurrent experiments.
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: spot-curriculum-trainer-tyan-cpu
+  namespace: apps
+spec:
+  # Identical digest to spot-curriculum-trainer. A different image would make
+  # the throughput comparison meaningless.
+  image: ghcr.io/olivecasazza/spot-rapier-trainer:curriculum-v4@sha256:1fcc5bc872dcbd164f66ee860d7dfb8e983f17640ecd96adff33c49139fb0f19
+  imagePullSecrets:
+    - name: ghcr-pull
+  command: ["python3", "train_curriculum.py"]
+  runtime:
+    mode: batchJob
+    type: pytorch
+  env:
+    - name: GCS_BUCKET
+      value: nixlab-spot-reruns
+    - name: GOOGLE_APPLICATION_CREDENTIALS
+      value: /var/run/secrets/gcs/key.json
+    - name: SPOT_ROBOT_ROOT
+      value: /opt/robots
+  resources:
+    requests:
+      cpu: "5"
+      memory: 8Gi
+    limits:
+      memory: 16Gi
+  scheduling:
+    nodeSelector:
+      nixlab.io/gpu-arch: kepler
+    # tyan01 carries BOTH taints; missing either leaves the pod unschedulable
+    # with no GPU pressure to explain it.
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      - key: nixlab.io/gpu-legacy
+        operator: Exists
+        effect: NoSchedule
+  policy:
+    allowCommandOverride: true
+    allowImageOverride: false
+    allowSecretRefs: false
+  metricsEndpoint:
+    enabled: true
+    path: /metrics
+    port: 9108
+    prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+  secretMounts:
+    - mountPath: /var/run/secrets/gcs/key.json
+      secretName: spot-training-sa
+      subPath: key.json
+  storage:
+    createWorkspaceClaim: false
+    workspaceAccessModes: ["ReadWriteMany"]
+    workspaceClaimName: athena-workspace
+    workspaceMountPath: /workspace
+    workspaceSize: 20Gi
+    workspaceStorageClassName: nfs
+---
+# The profile is reachable only through a template, so the probe needs its own
+# template + campaign. Same objective and defaults as curriculum-spot-stance;
+# ONLY runtimeProfileRef differs, so the comparison isolates hardware.
+#
+# Deliberately absent from every ResearchDrive templateRefs allowlist: the
+# curriculum drive must never propose campaigns onto a capacity probe.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: curriculum-spot-stance-tyan-cpu
+  namespace: apps
+  labels:
+    research.nixlab.io/purpose: capacity-probe
+spec:
+  runtimeProfileRef: spot-curriculum-trainer-tyan-cpu
+  researchObjective: >-
+    Measure curriculum-trainer throughput on tyan01 with no GPU, against the
+    11,393 steps/min RTX 4000 baseline, to decide whether tyan01's CPU is
+    usable capacity for the workloads now pending on athena-gpu.
+  objective:
+    metric: eval_stance_score
+    goal: maximize
+  defaults:
+    mode: stance
+    robot: spot
+    terrain: heightfield
+    terrain_difficulty: 0.3
+    rig_carry: 0.5
+  metrics:
+    parser:
+      type: file
+      path: metrics.json
+  source:
+    git:
+      url: https://github.com/olivecasazza/skypilot-env
+      ref: feat/spot-ground-speed-reward
+---
+# Canary-only: one run, same 400k-step budget as the spot GPU canary
+# (35.2 min wall on an RTX 4000). maxExperiments 1 so a slow result cannot
+# quietly consume the node for hours beyond the measurement.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: tyan-cpu-capacity-probe
+  namespace: apps
+  labels:
+    research.nixlab.io/purpose: capacity-probe
+spec:
+  templateRef: curriculum-spot-stance-tyan-cpu
+  concurrency: 1
+  strategy:
+    type: heuristic
+  budget:
+    maxExperiments: 1
+    maxDuration: 6h
+  canary:
+    parameters:
+      total_timesteps: 400000
+    maxDuration: 6h

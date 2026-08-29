@@ -1,0 +1,290 @@
+# Legacy tyan01 RuntimeProfiles, captured into the repo with their Kueue queue
+# fixed. Both GPU profiles below requested nvidia.com/gpu with NO
+# scheduling.queueName, so their Jobs bypassed Kueue quota entirely and could
+# take a Titan Black outside all accounting -- a review-blocking defect per
+# AGENTS.md. They also existed ONLY as live cluster objects, with no source
+# anywhere in the repo, so nothing could reproduce or review them.
+#
+# Still referenced by live ExperimentTemplates (spot-forage-tyangpu-v84,
+# spot-walk-tyangpu, spot-walk-tyangpu-v76, spot-walk-tyan), so they are fixed
+# rather than deleted.
+#
+# Their images (spot-rapier-trainer:v83-kepler, :v84-forage-kepler) have no
+# build recipe in this repo either; treat them as archival. New Kepler work
+# should not start from them.
+#
+# spot-walk-pbt-trainer-tyan-cpu requests no GPU, so it correctly carries no
+# queueName -- labeling CPU work into a GPU queue would misreport quota.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: spot-forage-pbt-trainer-tyan-gpu
+  namespace: apps
+spec:
+  command:
+    - "python3"
+    - "train_rapier.py"
+    - "--behavior"
+    - "forage"
+    - "--num-workers"
+    - "2"
+    - "--total-timesteps"
+    - "1500000"
+    - "--no-grid"
+    - "--no-wandb"
+    - "--gpu"
+    - "--num-gpus-per-trial"
+    - "1.0"
+  env:
+    - name: "GCS_BUCKET"
+      value: "nixlab-spot-reruns"
+    - name: "GOOGLE_APPLICATION_CREDENTIALS"
+      value: "/var/run/secrets/gcs/key.json"
+    - name: "SPOT_WARM_START_FROM"
+      value: "/workspace/runs/spot-walk-tyangpu-v76/spot-walk-tyangpu-v76-001/checkpoints/spot_rapier_v1"
+    - name: "SPOT_VARIABLE_IMPEDANCE"
+      value: "1"
+    - name: "SPOT_COMPLIANCE_DR"
+      value: "5,40"
+    - name: "SPOT_LOG_STD_MIN"
+      value: "-3.5"
+    - name: "SPOT_LOG_STD_MAX"
+      value: "1.5"
+    - name: "SPOT_TAU_STALL"
+      value: "6.0"
+    - name: "SPOT_W_FREE"
+      value: "7.0"
+    - name: "SPOT_GAIT_REF_AMP"
+      value: "0.25"
+    - name: "SPOT_STROKE_GAIN"
+      value: "0.18"
+    - name: "SPOT_STROKE_BIAS"
+      value: "-0.05"
+    - name: "SPOT_ACTION_EMA"
+      value: "0.0"
+  image: "ghcr.io/olivecasazza/spot-rapier-trainer:v84-forage-kepler"
+  imagePullSecrets:
+    - name: "ghcr-pull"
+  metricsEndpoint:
+    enabled: true
+    path: "/metrics"
+    port: 9108
+    prometheusQueryUrl: "http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090"
+  policy:
+    allowCommandOverride: false
+    allowImageOverride: false
+    allowSecretRefs: false
+  resources:
+    limits:
+      cpu: "4"
+      memory: "16Gi"
+      nvidia.com/gpu: "1"
+    requests:
+      cpu: "2"
+      memory: "8Gi"
+      nvidia.com/gpu: "1"
+  runtime:
+    mode: "batchJob"
+    type: "pytorch"
+  scheduling:
+    nodeSelector:
+      nixlab.io/gpu-arch: "kepler"
+    runtimeClassName: "nvidia"
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+      - key: "nixlab.io/gpu-legacy"
+        operator: "Exists"
+    queueName: "athena-kepler"
+  secretMounts:
+    - mountPath: "/var/run/secrets/gcs/key.json"
+      secretName: "spot-training-sa"
+      subPath: "key.json"
+  storage:
+    createWorkspaceClaim: false
+    workspaceAccessModes:
+      - "ReadWriteMany"
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+    workspaceSize: "20Gi"
+    workspaceStorageClassName: "nfs"
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: spot-walk-pbt-trainer-tyan-gpu
+  namespace: apps
+spec:
+  command:
+    - "python3"
+    - "train_rapier.py"
+    - "--behavior"
+    - "walk"
+    - "--num-workers"
+    - "2"
+    - "--total-timesteps"
+    - "1500000"
+    - "--no-grid"
+    - "--no-wandb"
+    - "--gpu"
+    - "--num-gpus-per-trial"
+    - "1.0"
+  env:
+    - name: "GCS_BUCKET"
+      value: "nixlab-spot-reruns"
+    - name: "GOOGLE_APPLICATION_CREDENTIALS"
+      value: "/var/run/secrets/gcs/key.json"
+    - name: "SPOT_VARIABLE_IMPEDANCE"
+      value: "1"
+    - name: "SPOT_COMPLIANCE_DR"
+      value: "5,40"
+    - name: "SPOT_LOG_STD_MIN"
+      value: "-3.5"
+    - name: "SPOT_LOG_STD_MAX"
+      value: "1.5"
+    - name: "SPOT_TAU_STALL"
+      value: "6.0"
+    - name: "SPOT_W_FREE"
+      value: "7.0"
+    - name: "SPOT_GAIT_REF_AMP"
+      value: "0.25"
+    - name: "SPOT_STROKE_GAIN"
+      value: "0.18"
+    - name: "SPOT_STROKE_BIAS"
+      value: "-0.05"
+    - name: "SPOT_ACTION_EMA"
+      value: "0.0"
+  image: "ghcr.io/olivecasazza/spot-rapier-trainer:v83-kepler"
+  imagePullSecrets:
+    - name: "ghcr-pull"
+  metricsEndpoint:
+    enabled: true
+    path: "/metrics"
+    port: 9108
+    prometheusQueryUrl: "http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090"
+  policy:
+    allowCommandOverride: false
+    allowImageOverride: false
+    allowSecretRefs: false
+  resources:
+    limits:
+      cpu: "4"
+      memory: "16Gi"
+      nvidia.com/gpu: "1"
+    requests:
+      cpu: "3"
+      memory: "12Gi"
+      nvidia.com/gpu: "1"
+  runtime:
+    mode: "batchJob"
+    type: "pytorch"
+  scheduling:
+    nodeSelector:
+      nixlab.io/gpu-arch: "kepler"
+    runtimeClassName: "nvidia"
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+      - key: "nixlab.io/gpu-legacy"
+        operator: "Exists"
+    queueName: "athena-kepler"
+  secretMounts:
+    - mountPath: "/var/run/secrets/gcs/key.json"
+      secretName: "spot-training-sa"
+      subPath: "key.json"
+  storage:
+    createWorkspaceClaim: false
+    workspaceAccessModes:
+      - "ReadWriteMany"
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+    workspaceSize: "20Gi"
+    workspaceStorageClassName: "nfs"
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: spot-walk-pbt-trainer-tyan-cpu
+  namespace: apps
+spec:
+  command:
+    - "python3"
+    - "train_rapier.py"
+    - "--behavior"
+    - "walk"
+    - "--num-workers"
+    - "6"
+    - "--total-timesteps"
+    - "1500000"
+    - "--no-grid"
+    - "--no-wandb"
+    - "--no-gpu"
+  env:
+    - name: "GCS_BUCKET"
+      value: "nixlab-spot-reruns"
+    - name: "GOOGLE_APPLICATION_CREDENTIALS"
+      value: "/var/run/secrets/gcs/key.json"
+    - name: "SPOT_VARIABLE_IMPEDANCE"
+      value: "1"
+    - name: "SPOT_COMPLIANCE_DR"
+      value: "5,40"
+    - name: "SPOT_LOG_STD_MIN"
+      value: "-3.5"
+    - name: "SPOT_LOG_STD_MAX"
+      value: "1.5"
+    - name: "SPOT_TAU_STALL"
+      value: "6.0"
+    - name: "SPOT_W_FREE"
+      value: "7.0"
+    - name: "SPOT_GAIT_REF_AMP"
+      value: "0.25"
+    - name: "SPOT_STROKE_GAIN"
+      value: "0.18"
+    - name: "SPOT_STROKE_BIAS"
+      value: "-0.05"
+    - name: "SPOT_ACTION_EMA"
+      value: "0.0"
+  image: "ghcr.io/olivecasazza/spot-rapier-trainer:v81-gaitgate"
+  imagePullSecrets:
+    - name: "ghcr-pull"
+  metricsEndpoint:
+    enabled: true
+    path: "/metrics"
+    port: 9108
+    prometheusQueryUrl: "http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090"
+  policy:
+    allowCommandOverride: false
+    allowImageOverride: false
+    allowSecretRefs: false
+  resources:
+    limits:
+      cpu: "12"
+      memory: "28Gi"
+    requests:
+      cpu: "10"
+      memory: "20Gi"
+  runtime:
+    mode: "batchJob"
+    type: "pytorch"
+  scheduling:
+    nodeSelector:
+      nixlab.io/gpu-arch: "kepler"
+    runtimeClassName: "nvidia"
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+      - key: "nixlab.io/gpu-legacy"
+        operator: "Exists"
+  secretMounts:
+    - mountPath: "/var/run/secrets/gcs/key.json"
+      secretName: "spot-training-sa"
+      subPath: "key.json"
+  storage:
+    createWorkspaceClaim: false
+    workspaceAccessModes:
+      - "ReadWriteMany"
+    workspaceClaimName: "athena-workspace"
+    workspaceMountPath: "/workspace"
+    workspaceSize: "20Gi"
+    workspaceStorageClassName: "nfs"
