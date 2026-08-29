@@ -56,6 +56,107 @@ pub struct ResearchDriveSpec {
     /// Manual brake: while true the controller proposes and creates nothing.
     #[serde(default)]
     pub paused: bool,
+
+    /// Ordered training curriculum. When set, the drive may only launch
+    /// campaigns against the CURRENT stage's templates (intersected with
+    /// `templateRefs`), and advances a stage only when that stage's promotion
+    /// criteria are met from campaign status.
+    ///
+    /// Absent (the default) preserves the previous behaviour exactly: every
+    /// template in `templateRefs` is proposable at any time. Without this the
+    /// stage ORDER lives in proposer prose, which makes "stance before
+    /// locomotion" a suggestion an LLM may ignore rather than an invariant the
+    /// controller enforces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curriculum: Option<CurriculumSpec>,
+}
+
+/// Ordered stages a morphology must pass through, e.g.
+/// stance -> locomotion -> forage -> arena.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CurriculumSpec {
+    /// Stages in order. The first is entered on creation. Bounded by the CRD
+    /// schema at 16 to keep status.stageHistory bounded too.
+    #[serde(default)]
+    pub stages: Vec<CurriculumStage>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CurriculumStage {
+    /// Stable low-cardinality stage name (used in metrics labels and status).
+    pub name: String,
+
+    /// Templates proposable while this stage is current. Intersected with the
+    /// drive's `templateRefs`, so the allowlist remains the outer bound.
+    #[serde(default)]
+    pub template_refs: Vec<String>,
+
+    /// Name of an EARLIER stage whose winning experiment seeds campaigns in
+    /// this stage (sets `spec.seedExperimentRef`, which carries both parameters
+    /// and the checkpoint the runner warm-starts from). This is what makes the
+    /// ordering pay for itself instead of each stage cold-starting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_from: Option<String>,
+
+    /// Criteria for leaving this stage. Absent means the stage never
+    /// auto-promotes (a deliberate human gate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<PromotionSpec>,
+}
+
+/// When a stage is considered passed. Evaluated from campaign status only.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PromotionSpec {
+    /// Metric to gate on. MUST be a held-out metric: gating on a metric the
+    /// reward optimizes promotes reward hacking.
+    pub metric: String,
+
+    /// Objective value at or above which the stage counts as passed.
+    pub threshold: f64,
+
+    /// Minimum succeeded experiments in the stage before promotion may fire, so
+    /// a single lucky run cannot advance the curriculum.
+    #[serde(default = "default_min_experiments")]
+    pub min_experiments: u32,
+}
+
+fn default_min_experiments() -> u32 {
+    3
+}
+
+/// Observed curriculum progress. Controller-owned.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CurriculumStatus {
+    /// Name of the stage currently proposable. Empty until first reconcile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_stage: Option<String>,
+
+    /// One record per stage entered, oldest first. Bounded by spec.stages.
+    #[serde(default)]
+    pub stage_history: Vec<StageRecord>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StageRecord {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entered_at: Option<String>,
+    /// Set when the stage's promotion criteria were met.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promoted_at: Option<String>,
+    /// Experiment that satisfied promotion; seeds the next stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_experiment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_objective: Option<f64>,
+    /// Succeeded experiments observed in this stage.
+    #[serde(default)]
+    pub succeeded_experiments: u32,
 }
 
 /// OpenAI-compatible LLM endpoint the controller consults for hypotheses.
@@ -259,8 +360,28 @@ pub struct ResearchDriveStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<DrivePhase>,
     /// Campaigns the drive currently owns (live branches).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Deliberately NOT `skip_serializing_if = "Vec::is_empty"`. The status is
+    /// written with a MERGE patch, so an omitted field leaves the server's old
+    /// value intact: skipping the empty vec meant the last branch could never
+    /// be cleared, the folded campaign stayed "listed", and it was re-folded on
+    /// every reconcile — inflating campaignsCompleted and stagnationCounter
+    /// without bound (observed at 5.1M against a stagnation window of 3, which
+    /// pins the drive permanently stagnant).
+    #[serde(default)]
     pub current_campaigns: Vec<BranchRef>,
+    /// Campaigns already folded into drive state, newest last (bounded ring).
+    ///
+    /// Belt-and-braces idempotency for the fold: membership in
+    /// `currentCampaigns` alone made "fold exactly once" depend on a status
+    /// write surviving, and when that write silently dropped the empty list the
+    /// same campaign folded forever. An explicit ledger makes double-folding
+    /// structurally impossible regardless of patch semantics.
+    #[serde(default)]
+    pub folded_campaigns: Vec<String>,
+    /// Observed curriculum progress; present only when spec.curriculum is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curriculum: Option<CurriculumStatus>,
     /// Lifetime campaigns completed under this drive.
     #[serde(default)]
     pub campaigns_completed: u32,
