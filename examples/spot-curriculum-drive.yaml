@@ -1,0 +1,71 @@
+# 72-hour multi-robot curriculum drive.
+#
+# The perpetual outer loop for the curriculum: when a campaign it owns reaches a
+# terminal phase, the drive folds the result into its state, asks the proposer
+# what to run next, and creates that campaign itself. Scoped to the 12
+# curriculum research lines (4 morphologies x 3 stages), so it can advance a
+# morphology from stance to locomotion to forage by pointing a new campaign's
+# seedExperimentRef at the winning experiment of the prior stage — which
+# warm-starts the weights, not just the parameters.
+#
+# STAGE GATING, enforced by the API rather than by prose: the controller
+# REJECTS any proposal whose templateRef is not in `templateRefs`. So the
+# allowlist below IS the current stage of the curriculum — while it holds only
+# the stance templates, the proposer physically cannot start a locomotion or
+# forage campaign for a morphology that has not passed stance. Widen it one
+# stage at a time (or let the `curriculum` field do it once that lands on
+# ResearchDriveSpec, which is the proper home for ordered stages).
+#
+# What is still NOT expressed in the API: automatic promotion. Deciding that
+# "spider passed stance, so add curriculum-spider-locomotion" is a human edit
+# today. That is the remaining gap between this manifest and the hierarchy the
+# design law wants owned by a controller.
+#
+# Budget shape for a 72h window: 3 concurrent branches on the modern GPU pool
+# (hp01-03 RTX 4000 + seir RTX 5000), each campaign capped at 12h and 6
+# experiments, so a stalled line cannot eat the window. maxCampaigns 40 is a
+# lifetime cap, not a target.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchDrive
+metadata:
+  name: multi-robot-curriculum-drive
+  namespace: apps
+spec:
+  domain: multi-robot-curriculum
+
+  # STAGE 1 ONLY. See the gating note above before adding later stages.
+  templateRefs:
+    - curriculum-spider-stance
+    - curriculum-snake-stance
+    - curriculum-humanoid-stance
+    - curriculum-spot-stance
+
+  proposer:
+    endpoint: http://omniroute.apps.svc.cluster.local:20128/v1
+    model: auto/best-fast
+    apiKeySecretRef:
+      name: omniroute-secrets
+      key: API_KEY_PRIMARY
+    maxTokens: 4096
+    temperature: 0.7
+    timeoutSeconds: 120
+
+  limits:
+    # 3 branches: enough to advance three morphologies in parallel while
+    # leaving a GPU for the spot-locomotion drive and interactive work.
+    maxActiveBranches: 3
+    maxCampaigns: 40
+    campaignBudget:
+      maxExperiments: 6
+      maxDuration: 12h
+
+  # Stance is near-trivial for the statically stable morphologies (spider and
+  # snake hold upright_frac 1.0 under random actions), so several consecutive
+  # flat campaigns are EXPECTED early and a tight window would park the drive
+  # immediately. 4 gives it room to move on to locomotion before giving up.
+  stagnation:
+    window: 4
+
+  structuralChangePolicy: requireApproval
+  paused: false
