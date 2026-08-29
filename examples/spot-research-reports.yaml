@@ -1,0 +1,166 @@
+# Findings that were produced outside the record and are being written back into
+# it. Both were originally left in git commit bodies and a kubectl annotation,
+# neither of which the console or a steering agent can query.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchReport
+metadata:
+  name: tyan01-cpu-capacity
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: spot
+    research.nixlab.io/purpose: capacity
+spec:
+  campaignRef: multi-robot-curriculum-drive-spot-stance-cpu-longtrain
+  title: >-
+    tyan01's 8 GTX Titan Blacks are unusable for the curriculum trainer and
+    unnecessary: its CPU alone reaches 0.86x an RTX 4000, at exactly one slot
+  sections:
+    Findings: >-
+      tyan01 was completely idle (athena-kepler ClusterQueue: 0 admitted, 0
+      pending) while athena-gpu held 4 PENDING workloads. Its 8 GPUs cannot
+      help: GTX Titan Black is sm_35 (node label
+      nvidia.com/cuda.compute.major=3), CUDA 12 removed sm_35, and the
+      curriculum trainer image is CUDA 12.1. Ray 2.54.1's new-API RLModule
+      stack requires torch 2.x, which ships no sm_35 wheels, so GPU use there
+      means building torch from source against CUDA 11.4.
+      That turns out not to matter. The policy is a 256x256 MLP and the cost is
+      rapier physics stepping, so the work is CPU-bound -- the GPU RuntimeProfile
+      already requested cpu: 8, which was the tell. With the SAME image, config
+      and 400k-step budget as the spot GPU canary, tyan01 with no GPU sustained
+      9,825-10,233 steps/min against the RTX 4000's 11,393: 0.86x. The GPU is
+      worth roughly 10 percent on this workload.
+      Capacity is exactly ONE slot. Two concurrent experiments on tyan01 fell to
+      1,364 steps/min each (2,728 aggregate) -- 3.7x WORSE than running one --
+      because torch sizes its thread pool to all 11 cores per process, so a
+      second experiment thrashes rather than shares. Causally confirmed by
+      deleting the second experiment and watching the first recover to 9,827.
+    Method: >-
+      Identical image digest (spot-rapier-trainer:curriculum-v4), identical
+      template defaults (mode=stance, robot=spot, terrain=heightfield,
+      terrain_difficulty=0.3, rig_carry=0.5) and identical 400,000-step budget
+      across arms; only the RuntimeProfile differed
+      (spot-curriculum-trainer-tyan-cpu, no nvidia.com/gpu request, cpu: 5).
+      Throughput read from the trainer's own step counter over >=150 s windows,
+      never from a single sample. GPU baselines derived from Job
+      startTime/completionTime because Experiment status carries no timing
+      fields (see Limitations).
+    Footguns: >-
+      1. A GPU node sitting idle can be an ARCHITECTURE problem, not a
+      scheduling one. Check nvidia.com/cuda.compute.major against the image's
+      CUDA major before assuming quota or selectors are at fault.
+      2. spot-rapier-trainer:v84-recover-kepler and :v83-kepler exist in the
+      registry but have NO build recipe anywhere in this repo. They are
+      unreproducible; do not start new Kepler work from them.
+      3. cpu requests do NOT bound torch thread pools. A pod requesting 5 of 11
+      cores still spawns threads for all 11, so "the node has spare cores" does
+      not imply a second experiment is free. Measure aggregate throughput, not
+      per-pod placement, before raising concurrency.
+      4. Two RuntimeProfiles requested nvidia.com/gpu with no
+      scheduling.queueName, so their Jobs took GPUs outside Kueue accounting
+      entirely, and existed only as live cluster objects with no repo source.
+      Audit for this whenever GPU capacity appears to vanish.
+    Limitations: >-
+      One morphology (spot) and one stage (stance). Snake was the slowest
+      morphology on GPU (6,074 steps/min) so the CPU:GPU ratio may differ per
+      morphology. Says nothing about workloads with larger networks, where the
+      GPU should matter far more.
+      Experiment.status exposes no wallClockSeconds, queueLatencySeconds or
+      gpuHours despite AGENTS.md requiring controller-computed runtime/cost
+      metrics, so every timing here had to be derived from Job objects by hand.
+      Until that lands, capacity questions are not answerable from the console.
+  seededHypotheses:
+    - >-
+      Pinning OMP_NUM_THREADS and torch intra-op threads to floor(cores/N) per
+      experiment lets tyan01 run 2 concurrent experiments at aggregate
+      throughput above the 9,827 steps/min single-slot figure. Test with N=2 at
+      4 threads each before raising maxActiveBranches on tyan01's account.
+    - >-
+      If the GPU is worth only ~10% for a 256x256 MLP, curriculum experiments
+      may not warrant nvidia.com/gpu requests at all; running them CPU-only
+      would free hp01-03 for large-network work and stop keeping those servers
+      powered for marginal gain. Measure a CPU arm per morphology first, since
+      snake's GPU rate was 1.9x lower than spider's.
+    - >-
+      Adding controller-computed wallClockSeconds/queueLatencySeconds/gpuHours
+      to Experiment status makes throughput regressions visible in Grafana
+      instead of requiring per-question shell archaeology.
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchReport
+metadata:
+  name: walk-speed-v85-objective-divergence
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: spot
+    research.nixlab.io/purpose: defect
+spec:
+  campaignRef: spot-locomotion-drive-spot-walk-speed-baseline
+  title: >-
+    walk-speed-v85 reward and objective measure different things: body-frame
+    velocity tracking pays a robot that turns around and trots away
+  sections:
+    Findings: >-
+      The drive's proposal-6 claimed walk-speed-v85's reward structure is
+      "fundamentally misaligned". The data supports a specific mechanism, not a
+      vague misalignment. tracking_lin_vel compares BODY-frame velocity against
+      a BODY-frame command, so a policy that yaws 180 degrees and trots scores
+      perfect tracking; tracking_ang_vel pays yaw RATE, never accumulated
+      heading error, so drifting off the commanded heading is free. The held-out
+      probe pins yaw and measures displacement along the SPAWN heading, and
+      correctly reports <= 0.
+      Reward is ANTI-correlated with the objective. Across succeeded runs:
+      gait_fwd_speed_mps -0.297 with reward_mean 3672 (the highest reward
+      observed), -0.196 with 3220, +0.047 with 2689. Every policy covered
+      2.3-3.5 m net (gait_progress_m) with a real trot (0.64-0.75) and full
+      1000-step survival; 10 of 14 runs had negative forward speed.
+      A metric sign error was the obvious explanation and is RULED OUT: measured
+      in-sim at settled stance, body +X maps to world [+1.000, -0.011, +0.007],
+      so body-forward and world +X coincide at spawn and the world-X measurement
+      is correct at its stated intent.
+      Mitigation applied: the template objective moved from gait_fwd_speed_mps
+      to gait_fwd_speed_quality (max(0, spd) * trot), the template's own
+      self-guarding fallback, so backward drift can no longer be selected. The
+      drive's stagnationCounter was reset because all prior stagnation was
+      measured against the hacked objective.
+    Method: >-
+      Read gait_fwd_speed_mps, gait_progress_m, gait_trot_score,
+      gait_fwd_trot_score and reward_mean from status.metrics across 32
+      walk-speed experiments in two campaigns (baseline, from-pbt). Body-axis
+      orientation verified by stepping SpotSim to a settled stand and rotating
+      unit body axes by the base quaternion.
+    Footguns: >-
+      1. A held-out metric can silently disagree with the reward it is meant to
+      audit. v85 moved the REWARD to body-frame velocity but left the probe in
+      world frame; the two then answer different questions and the gap looks
+      like a plateau.
+      2. High reward with a flat or negative objective is the signature of
+      objective/reward divergence, not of a hard task. Check the correlation
+      sign before proposing more compute.
+      3. "Misaligned reward" from an LLM proposer is a hypothesis, not a
+      diagnosis. Here the magnitude and gait quality were already present and
+      only the direction was wrong.
+      4. gait_progress_m stays healthy (2.3-3.5 m) while gait_fwd_speed_mps goes
+      negative, because the former is mixed-command net displacement and the
+      latter is heading-pinned. Do not treat them as interchangeable.
+    Limitations: >-
+      The switch to gait_fwd_speed_quality stops the metric being farmed but
+      does NOT make progress possible: the reward still pays a yawing policy, so
+      achievable quality stays near the observed 0.03 ceiling. The structural
+      fix is unimplemented and needs a human decision, since it changes the
+      reward on a live line.
+      Yaw drift is inferred from the reward/objective structure plus the
+      displacement evidence; per-episode heading traces were not recorded.
+  seededHypotheses:
+    - >-
+      Adding a heading-hold term (penalize accumulated heading error from the
+      commanded direction, or reward displacement projected onto the commanded
+      world heading) makes gait_fwd_speed_mps positive without reducing
+      gait_trot_score. This is the structural fix proposal-6 was reaching for.
+    - >-
+      Logging per-episode net yaw in the forward probe would convert the
+      inferred spin-and-walk mechanism into a directly measured one, and costs
+      one scalar.
+    - >-
+      Any future reward change on this line should ship with the held-out probe
+      updated in the same commit; the v85 divergence arose precisely because
+      reward and probe were changed independently.

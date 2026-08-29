@@ -30,6 +30,17 @@ Do not add or preserve durable product behavior in ad-hoc scripts, local files, 
 - Ignore legacy experiment-loop instructions in older docs unless the task is explicitly to remove or migrate them.
 - `AGENTS.md` and `docs/openspec.md` override older docs whenever legacy local loops conflict with Athena Kubernetes-native design.
 
+## Research Memory
+
+The CRDs are not just execution plumbing; they are the project's memory. A steering agent reads them to learn what was tried, what failed, and which footguns exist. Full rules: `operator/crates/athena-console/AGENTS.md`.
+
+- Every investigation runs as a `ResearchCampaign` + `Experiment`, including work that is not ML: capacity probes, throughput comparisons, scheduler behavior, hardware qualification, bug hunts. If the answer is a measurement, it is an experiment.
+- The question belongs in `Experiment.spec.hypothesis` as a falsifiable claim; the variable belongs in `spec.parameters`.
+- Conclusions belong in a `ResearchReport` (`sections`, `seededHypotheses`). Chat, git commit bodies, `kubectl annotate`, local notes, and script stdout are NOT the record — nothing can query them.
+- Never `kubectl delete` a campaign or experiment that produced a measurement. Deletion erases memory irrecoverably. Retire work by letting `budget` complete or by dropping the template from a drive's `templateRefs`; prune an analysis with `ResearchReport.spec.excludedExperiments`.
+- Record negative results, refuted hypotheses, and footguns explicitly. A recorded failure is the highest-value entry in the system.
+- Search prior art before running anything: existing campaigns, reports, and experiment hypotheses for the same robot/stage.
+
 ## Project Shape
 
 - `docs/openspec.md` is the build spec for Athena architecture, CRD/API shape, benchmark behavior, observability, and rollout order.
@@ -154,7 +165,7 @@ Do not add or preserve durable product behavior in ad-hoc scripts, local files, 
 
 ## Safety
 
-- Treat local logs, model outputs, and experiment artifacts as disposable unless the user says otherwise.
+- Treat local logs, model outputs, and workspace artifact blobs as disposable unless the user says otherwise. This does NOT extend to the CRDs: `Experiment`, `ResearchCampaign`, and `ResearchReport` objects are the research record and must not be deleted to tidy up (see Research Memory).
 - Do not mutate Kubernetes cluster state imperatively for deployment changes; prefer Nix/GitOps-generated manifests.
 - Read-only Kubernetes inspection is fine when useful; writes must be modeled in Git/Nix/Flux unless the user explicitly requests live intervention.
 - Do not run destructive git commands such as `git reset --hard` without explicit user approval.

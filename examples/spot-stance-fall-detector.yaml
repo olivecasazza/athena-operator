@@ -1,0 +1,115 @@
+# Controlled test of WHY spot scores 0.000 on stance.
+#
+# Observation across 5 recorded spot stance experiments (GPU and CPU branches
+# alike): eval_upright_frac 0.766-0.832 with eval_fall_rate 1.00. A toppling
+# robot's upright_cos collapses, so a robot that is upright ~80% of steps and
+# still terminates every episode is being ended by the OTHER termination branch:
+#
+#   height = float(pos[1])                              # ABSOLUTE world Y
+#   sag_allowance = max(0.05, 0.4 * self._stand_height)
+#   fallen = upright < 0.3 or height < self._stand_height - sag_allowance
+#
+# _stand_height is sampled ONCE at reset after 10 settle steps, then compared
+# against absolute height for the whole episode. Two ways that misfires:
+#   (a) terrain -- spawn jitter puts the robot on heightfield geometry, and any
+#       settling or sliding to lower ground drops absolute Y while the robot is
+#       perfectly upright;
+#   (b) settling -- 10 steps may not settle a 3 kg quadruped, so _stand_height
+#       is captured mid-descent, leaving the threshold above the true resting
+#       height and guaranteeing termination.
+#
+# Spot is statically stable on four legs. Failing to stand in 100% of episodes
+# is the anomaly this campaign is meant to explain, and the drive's own
+# proposal-6 independently flagged it as a suspected termination bug.
+#
+# Runs on the CPU template so it uses tyan01's otherwise-idle slot rather than
+# taking an RTX 4000 from the curriculum drive (0.86x throughput; see the
+# tyan01-cpu-capacity report).
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: spot-stance-fall-detector
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: spot
+    research.nixlab.io/curriculum-stage: stance
+    research.nixlab.io/purpose: defect
+spec:
+  templateRef: curriculum-spot-stance-cpu
+  concurrency: 1
+  strategy:
+    type: heuristic
+  budget:
+    maxExperiments: 2
+    maxDuration: 8h
+  # No canary: the recorded heightfield runs already ARE the treatment arm, so
+  # a canary would only re-measure what is known and spend the budget on it.
+---
+# Arm 1 -- isolates terrain geometry. Identical to the recorded spot stance runs
+# except terrain=flat, where absolute height and terrain-relative height are the
+# same quantity by construction.
+apiVersion: research.nixlab.io/v1alpha1
+kind: Experiment
+metadata:
+  name: spot-stance-flat-control
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: spot
+    research.nixlab.io/purpose: defect
+spec:
+  campaignRef: spot-stance-fall-detector
+  hypothesis: >-
+    Spot's eval_stance_score of 0.000 is caused by the absolute-height fall
+    criterion terminating an upright robot on non-flat ground, not by an
+    inability to stand. On terrain=flat, where absolute and terrain-relative
+    height coincide, eval_fall_rate will drop below 1.00 and eval_stance_score
+    will exceed 0.000 under otherwise identical settings. If flat still yields
+    fall_rate 1.00, terrain is exonerated and the cause is either the 10-step
+    settle window that sets _stand_height or spot's own dynamics.
+  lineage:
+    generation: 0
+    relation: Baseline
+    strategy: heuristic
+  parameters:
+    experimentIteration: 0
+    mode: stance
+    robot: spot
+    terrain: flat
+    terrain_difficulty: 0.0
+    rig_carry: 0.5
+    max_time: 8
+    total_timesteps: 400000
+---
+# Arm 2 -- separates terrain TYPE from terrain AMPLITUDE. Same heightfield code
+# path as the failing runs, but flattened. If arm 1 passes and this one fails,
+# the fault is in the heightfield sampling rather than in surface relief.
+apiVersion: research.nixlab.io/v1alpha1
+kind: Experiment
+metadata:
+  name: spot-stance-heightfield-zero-relief
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: spot
+    research.nixlab.io/purpose: defect
+spec:
+  campaignRef: spot-stance-fall-detector
+  hypothesis: >-
+    If terrain relief is the cause, the heightfield path at
+    terrain_difficulty=0.0 behaves like flat ground and eval_fall_rate falls
+    below 1.00. If this arm still terminates every episode while terrain=flat
+    does not, the defect is in heightfield height sampling at the spawn point
+    (the robot is measured against a surface it is not standing on) rather than
+    in relief amplitude.
+  lineage:
+    generation: 0
+    relation: Baseline
+    strategy: heuristic
+  parameters:
+    experimentIteration: 1
+    mode: stance
+    robot: spot
+    terrain: heightfield
+    terrain_difficulty: 0.0
+    rig_carry: 0.5
+    max_time: 8
+    total_timesteps: 400000
