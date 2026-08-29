@@ -138,3 +138,50 @@ spec:
     parameters:
       total_timesteps: 400000
     maxDuration: 6h
+---
+# Drive-schedulable twin of the probe template. This one IS in the curriculum
+# drive's stance allowlist, which turns tyan01 from idle into a fourth
+# concurrent slot alongside hp01/hp02/hp03.
+#
+# Measured, not assumed: one experiment on tyan01 with no GPU sustains 9,827-
+# 10,233 steps/min against an RTX 4000's 11,393 (0.86x). TWO concurrent
+# experiments collapse to 1,364 each -- 2,728 aggregate, 3.7x WORSE than
+# running one -- because torch sizes its thread pool to all 11 cores per
+# process, so a second experiment thrashes rather than shares. Hence exactly
+# one slot here; do not raise it without pinning thread counts first.
+#
+# Safe to compare against the GPU spot line: the campaign reconciler judges
+# improvement WITHIN a template only, so this template forms its own sigma
+# comparison group and slower hardware can never displace a GPU incumbent.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: curriculum-spot-stance-cpu
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: spot
+    research.nixlab.io/curriculum-stage: stance
+spec:
+  runtimeProfileRef: spot-curriculum-trainer-tyan-cpu
+  researchObjective: >-
+    Curriculum stage 1 (stance) for spot on CPU-only hardware. Exists to use
+    tyan01's cores, whose 8 GTX Titan Blacks are sm_35 and cannot run the
+    CUDA 12.1 trainer image at all. Same image, same objective, same defaults
+    as curriculum-spot-stance; the GPU is worth roughly 10% on this workload.
+  objective:
+    metric: eval_stance_score
+    goal: maximize
+  defaults:
+    mode: stance
+    robot: spot
+    terrain: heightfield
+    terrain_difficulty: 0.3
+    rig_carry: 0.5
+  metrics:
+    parser:
+      type: file
+      path: metrics.json
+  source:
+    git:
+      url: https://github.com/olivecasazza/skypilot-env
+      ref: feat/spot-ground-speed-reward

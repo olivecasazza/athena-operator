@@ -41,6 +41,10 @@ spec:
     - curriculum-snake-stance
     - curriculum-humanoid-stance
     - curriculum-spot-stance
+    # tyan01, CPU-only. Its 8 Titan Blacks are sm_35 and cannot run the CUDA
+    # 12.1 image; its cores can, at 0.86x an RTX 4000. One slot only -- two
+    # concurrent experiments on that node collapse to 3.7x worse aggregate.
+    - curriculum-spot-stance-cpu
     - curriculum-spider-locomotion
     - curriculum-snake-locomotion
     - curriculum-humanoid-locomotion
@@ -74,6 +78,7 @@ spec:
           - curriculum-snake-stance
           - curriculum-humanoid-stance
           - curriculum-spot-stance
+          - curriculum-spot-stance-cpu
         promotion:
           metric: eval_stance_score
           threshold: 0.6
@@ -112,9 +117,11 @@ spec:
     timeoutSeconds: 120
 
   limits:
-    # 3 branches: enough to advance three morphologies in parallel while
-    # leaving a GPU for the spot-locomotion drive and interactive work.
-    maxActiveBranches: 3
+    # 4 branches: three RTX 4000s (hp01-03) plus tyan01's single CPU-only
+    # slot. Measured 0.86x an RTX 4000 for one experiment there; a second
+    # concurrent experiment on that node is 3.7x worse in aggregate, so this
+    # must not be raised again on tyan01's account.
+    maxActiveBranches: 4
     maxCampaigns: 40
     campaignBudget:
       maxExperiments: 6
