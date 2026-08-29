@@ -43,8 +43,9 @@ use athena_api::research_campaign::{
     CampaignBudget, ResearchCampaign, ResearchCampaignSpec, StrategySpec,
 };
 use athena_api::research_drive::{
-    BranchRef, CurriculumSpec, CurriculumStatus, DrivePhase, ProposalDecision, ProposalRecord,
-    ResearchDrive, ResearchDriveStatus, StageRecord, StructuralChangePolicy,
+    BranchRef, CurriculumSpec, CurriculumStatus, DrivePhase, PromotionQuantifier, ProposalDecision,
+    ProposalRecord, ResearchDrive, ResearchDriveStatus, StageRecord, StructuralChangePolicy,
+    TemplateProgress,
 };
 use chrono::Utc;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -314,15 +315,31 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
             crate::metrics::DRIVE_CURRICULUM_STAGE
                 .with_label_values(&[&ns, &spec.domain, &stage.name])
                 .set(if stage.name == current { 1.0 } else { 0.0 });
-            let succeeded = cstatus
-                .stage_history
-                .iter()
-                .find(|r| r.name == stage.name)
-                .map(|r| r.succeeded_experiments)
-                .unwrap_or(0);
+            let rec = cstatus.stage_history.iter().find(|r| r.name == stage.name);
             crate::metrics::DRIVE_CURRICULUM_STAGE_EXPERIMENTS
                 .with_label_values(&[&ns, &spec.domain, &stage.name])
-                .set(succeeded as f64);
+                .set(rec.map(|r| r.succeeded_experiments).unwrap_or(0) as f64);
+
+            // Per-template rows, for every DECLARED template rather than only
+            // those with a status row, so a line that has produced nothing is
+            // visibly not-passed instead of missing from the dashboard.
+            for t in &stage.template_refs {
+                let row =
+                    rec.and_then(|r| r.template_progress.iter().find(|p| &p.template_ref == t));
+                crate::metrics::DRIVE_CURRICULUM_TEMPLATE_PASSED
+                    .with_label_values(&[&ns, &spec.domain, &stage.name, t])
+                    .set(if row.is_some_and(|p| p.passed) {
+                        1.0
+                    } else {
+                        0.0
+                    });
+                // Skipped entirely when unmeasured: see the gauge's doc comment.
+                if let Some(obj) = row.and_then(|p| p.best_objective) {
+                    crate::metrics::DRIVE_CURRICULUM_TEMPLATE_OBJECTIVE
+                        .with_label_values(&[&ns, &spec.domain, &stage.name, t])
+                        .set(obj);
+                }
+            }
         }
     }
     write_status(&ctx, &ns, &name, &drive, status, final_phase).await?;
@@ -435,7 +452,9 @@ pub(crate) fn evaluate_promotion(
     if spec_curriculum.stages.is_empty() {
         return None;
     }
-    let cs = status.curriculum.get_or_insert_with(CurriculumStatus::default);
+    let cs = status
+        .curriculum
+        .get_or_insert_with(CurriculumStatus::default);
     let current = cs
         .current_stage
         .clone()
@@ -455,25 +474,57 @@ pub(crate) fn evaluate_promotion(
         .position(|s| s.name == current)?;
     let stage = &spec_curriculum.stages[idx];
 
-    // Best succeeded experiment across this stage's campaigns, using the same
-    // honest score fold_campaign prefers: the unbiased re-measure when present.
-    let mut best: Option<(f64, String)> = None;
-    let mut succeeded = 0u32;
-    for c in owned {
-        if !stage.template_refs.iter().any(|t| t == &c.spec.template_ref) {
-            continue;
-        }
-        let st = c.status.clone().unwrap_or_default();
-        succeeded = succeeded.saturating_add(st.succeeded_experiments);
-        if let (Some(score), Some(exp)) = (
-            st.incumbent_remeasured.or(st.best_objective),
-            st.best_experiment.clone(),
-        ) {
-            if best.as_ref().is_none_or(|(b, _)| score > *b) {
-                best = Some((score, exp));
+    // Per-template evidence, one row per DECLARED template in declared order —
+    // including templates with no campaigns yet, which is what lets the `All`
+    // quantifier block on a line that has produced nothing. Scores use the same
+    // honest fold fold_campaign prefers: the unbiased re-measure when present.
+    //
+    // This is the only place the fold happens; both the status rows and the
+    // promotion gate read it, so the dashboard can never disagree with the
+    // decision that was actually made.
+    let promo = stage.promotion.as_ref();
+    let mut rows: Vec<TemplateProgress> = Vec::with_capacity(stage.template_refs.len());
+    for t in &stage.template_refs {
+        let mut row = TemplateProgress {
+            template_ref: t.clone(),
+            ..Default::default()
+        };
+        for c in owned.iter().filter(|c| &c.spec.template_ref == t) {
+            let st = c.status.clone().unwrap_or_default();
+            row.succeeded_experiments = row
+                .succeeded_experiments
+                .saturating_add(st.succeeded_experiments);
+            if let (Some(score), Some(exp)) = (
+                st.incumbent_remeasured.or(st.best_objective),
+                st.best_experiment.clone(),
+            ) {
+                if row.best_objective.is_none_or(|b| score > b) {
+                    row.best_objective = Some(score);
+                    row.best_experiment = Some(exp);
+                }
             }
         }
+        // No promotion block means nothing to satisfy, so `passed` stays false
+        // even for a strong line: the stage is a deliberate human gate.
+        row.passed = promo.is_some_and(|p| {
+            row.best_objective.is_some_and(|b| b >= p.threshold)
+                && row.succeeded_experiments >= p.min_experiments
+        });
+        rows.push(row);
     }
+
+    // Stage-level aggregates stay exactly as before: the console reads them,
+    // and `best_experiment` is what `stage_seed` hands to the next stage.
+    let succeeded: u32 = rows
+        .iter()
+        .fold(0u32, |a, r| a.saturating_add(r.succeeded_experiments));
+    let best: Option<(f64, String)> = rows
+        .iter()
+        .filter_map(|r| r.best_objective.zip(r.best_experiment.clone()))
+        .fold(None, |acc: Option<(f64, String)>, (score, exp)| match acc {
+            Some((b, _)) if b >= score => acc,
+            _ => Some((score, exp)),
+        });
 
     if let Some(rec) = cs.stage_history.iter_mut().find(|r| r.name == current) {
         rec.succeeded_experiments = succeeded;
@@ -481,13 +532,27 @@ pub(crate) fn evaluate_promotion(
             rec.best_objective = Some(*score);
             rec.best_experiment = Some(exp.clone());
         }
+        rec.template_progress = rows.clone();
     }
 
     // No promotion block = deliberate human gate; stay put.
-    let promo = stage.promotion.as_ref()?;
-    let (score, _) = best.as_ref()?;
-    if succeeded < promo.min_experiments || *score < promo.threshold {
-        return None;
+    let promo = promo?;
+    match promo.quantifier {
+        // Templates are alternative routes to one goal: the best result decides.
+        PromotionQuantifier::Any => {
+            let (score, _) = best.as_ref()?;
+            if succeeded < promo.min_experiments || *score < promo.threshold {
+                return None;
+            }
+        }
+        // Templates are independent research lines: each must pass on its own
+        // evidence. An empty template list is NOT vacuously true — promoting a
+        // stage that gates nothing would defeat the point of declaring it.
+        PromotionQuantifier::All => {
+            if rows.is_empty() || !rows.iter().all(|r| r.passed) {
+                return None;
+            }
+        }
     }
     let next = spec_curriculum.stages.get(idx + 1)?.name.clone();
     if let Some(rec) = cs.stage_history.iter_mut().find(|r| r.name == current) {
@@ -647,7 +712,10 @@ async fn propose_and_create(
             })?;
         req = req.bearer_auth(key);
     }
-    let resp = req.send().await.map_err(|e| Error::Proposer(e.to_string()))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| Error::Proposer(e.to_string()))?;
     if !resp.status().is_success() {
         return Err(Error::Proposer(format!("HTTP {}", resp.status())));
     }
@@ -671,8 +739,9 @@ async fn propose_and_create(
                 continue;
             }
             if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-                if let Some(delta) =
-                    chunk.pointer("/choices/0/delta/content").and_then(Value::as_str)
+                if let Some(delta) = chunk
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
                 {
                     content.push_str(delta);
                 }
@@ -1064,7 +1133,9 @@ mod tests {
         }
     }
 
-    fn drive_spec_with(curriculum: CurriculumSpec) -> athena_api::research_drive::ResearchDriveSpec {
+    fn drive_spec_with(
+        curriculum: CurriculumSpec,
+    ) -> athena_api::research_drive::ResearchDriveSpec {
         use athena_api::research_drive::{
             DriveLimits, ProposerSpec, ResearchDriveSpec, SecretKeyRef, StagnationSpec,
         };
@@ -1117,6 +1188,9 @@ mod tests {
                         metric: "eval_upright_frac".into(),
                         threshold: 0.8,
                         min_experiments: 2,
+                        // Explicit: this test is the regression guard proving
+                        // the default best-of path still behaves as it did.
+                        quantifier: PromotionQuantifier::Any,
                     }),
                 },
                 CurriculumStage {
@@ -1127,6 +1201,121 @@ mod tests {
                 },
             ],
         }
+    }
+
+    /// Two INDEPENDENT research lines in one stage — the multi-morphology
+    /// shape that made best-of gating wrong.
+    fn curriculum_two_lines(quantifier: PromotionQuantifier) -> CurriculumSpec {
+        use athena_api::research_drive::{CurriculumStage, PromotionSpec};
+        CurriculumSpec {
+            stages: vec![
+                CurriculumStage {
+                    name: "stance".into(),
+                    template_refs: vec!["t-snake".into(), "t-spot".into()],
+                    seed_from: None,
+                    promotion: Some(PromotionSpec {
+                        metric: "eval_stance_score".into(),
+                        threshold: 0.6,
+                        min_experiments: 2,
+                        quantifier,
+                    }),
+                },
+                CurriculumStage {
+                    name: "locomotion".into(),
+                    template_refs: vec!["t-loco".into()],
+                    seed_from: Some("stance".into()),
+                    promotion: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn promotion_all_blocks_until_every_template_passes() {
+        let cur = curriculum_two_lines(PromotionQuantifier::All);
+        let mut status = ResearchDriveStatus::default();
+
+        // Snake standing perfectly cannot carry spot, which falls every
+        // episode. This is the live incident: stance promoted on snake's 1.000
+        // while spot sat at 0.000.
+        let owned = vec![
+            staged_campaign("snake", "t-snake", Some(1.0), 4),
+            staged_campaign("spot", "t-spot", Some(0.0), 4),
+        ];
+        assert_eq!(evaluate_promotion(&cur, &mut status, &owned, "t0"), None);
+
+        // Once the lagging line clears the bar on its own evidence, advance.
+        let owned = vec![
+            staged_campaign("snake", "t-snake", Some(1.0), 4),
+            staged_campaign("spot", "t-spot", Some(0.7), 4),
+        ];
+        assert_eq!(
+            evaluate_promotion(&cur, &mut status, &owned, "t1").as_deref(),
+            Some("locomotion")
+        );
+    }
+
+    #[test]
+    fn promotion_all_blocks_template_with_no_campaigns() {
+        let cur = curriculum_two_lines(PromotionQuantifier::All);
+        let mut status = ResearchDriveStatus::default();
+        // A line that has produced NOTHING is not a pass; absence of evidence
+        // must not read as evidence.
+        let owned = vec![staged_campaign("snake", "t-snake", Some(1.0), 4)];
+        assert_eq!(evaluate_promotion(&cur, &mut status, &owned, "t0"), None);
+    }
+
+    #[test]
+    fn promotion_all_counts_min_experiments_per_template() {
+        let cur = curriculum_two_lines(PromotionQuantifier::All);
+        let mut status = ResearchDriveStatus::default();
+        // Both lines above threshold, but spot has one run. Stage-wide the
+        // count is 5 and would pass; per template it must not.
+        let owned = vec![
+            staged_campaign("snake", "t-snake", Some(1.0), 4),
+            staged_campaign("spot", "t-spot", Some(0.9), 1),
+        ];
+        assert_eq!(evaluate_promotion(&cur, &mut status, &owned, "t0"), None);
+    }
+
+    #[test]
+    fn promotion_any_preserves_best_of_behavior() {
+        let cur = curriculum_two_lines(PromotionQuantifier::Any);
+        let mut status = ResearchDriveStatus::default();
+        // Same lopsided evidence that `All` rejects: `Any` must still promote,
+        // because templates there are alternative routes to one goal.
+        let owned = vec![
+            staged_campaign("snake", "t-snake", Some(1.0), 4),
+            staged_campaign("spot", "t-spot", Some(0.0), 4),
+        ];
+        assert_eq!(
+            evaluate_promotion(&cur, &mut status, &owned, "t0").as_deref(),
+            Some("locomotion")
+        );
+    }
+
+    #[test]
+    fn template_progress_is_populated_for_lagging_lines() {
+        let cur = curriculum_two_lines(PromotionQuantifier::All);
+        let mut status = ResearchDriveStatus::default();
+        let owned = vec![staged_campaign("snake", "t-snake", Some(1.0), 4)];
+        evaluate_promotion(&cur, &mut status, &owned, "t0");
+
+        let cs = status.curriculum.clone().unwrap();
+        let stance = cs
+            .stage_history
+            .iter()
+            .find(|r| r.name == "stance")
+            .unwrap();
+        // One row per DECLARED template, in declared order, so "which line is
+        // blocking promotion" is answerable from status alone.
+        assert_eq!(stance.template_progress.len(), 2);
+        assert_eq!(stance.template_progress[0].template_ref, "t-snake");
+        assert!(stance.template_progress[0].passed);
+        assert_eq!(stance.template_progress[1].template_ref, "t-spot");
+        assert!(!stance.template_progress[1].passed);
+        assert_eq!(stance.template_progress[1].best_objective, None);
+        assert_eq!(stance.template_progress[1].succeeded_experiments, 0);
     }
 
     #[test]
@@ -1154,7 +1343,11 @@ mod tests {
         );
         let cs = status.curriculum.clone().unwrap();
         assert_eq!(cs.current_stage.as_deref(), Some("locomotion"));
-        let stance = cs.stage_history.iter().find(|r| r.name == "stance").unwrap();
+        let stance = cs
+            .stage_history
+            .iter()
+            .find(|r| r.name == "stance")
+            .unwrap();
         assert_eq!(stance.promoted_at.as_deref(), Some("t2"));
         assert_eq!(stance.best_experiment.as_deref(), Some("c1-000"));
     }

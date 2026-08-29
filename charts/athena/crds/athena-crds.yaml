@@ -1093,10 +1093,19 @@
                                 },
                                 "minExperiments": {
                                   "default": 3,
-                                  "description": "Minimum succeeded experiments in the stage before promotion may fire, so a single lucky run cannot advance the curriculum.",
+                                  "description": "Minimum succeeded experiments before promotion may fire, so a single lucky run cannot advance the curriculum. Counted stage-wide under `Any`, PER TEMPLATE under `All` — a stage-wide count is meaningless under `All`, since 8 runs concentrated on one template would satisfy it while the other templates hold no evidence at all.",
                                   "format": "uint32",
                                   "minimum": 0.0,
                                   "type": "integer"
+                                },
+                                "quantifier": {
+                                  "default": "Any",
+                                  "description": "How many of the stage's templates must clear `threshold`.\n\nDefaults to `Any` because that is the pre-existing behavior and this field is additive; a multi-line curriculum almost always wants `All`.\n\n`Any` promotes on the single best result anywhere in the stage. That is correct when the templates are alternative routes to ONE goal (pick the winner and move on), and wrong when each template is its own research line. Observed live: the multi-robot curriculum promoted stance -> locomotion on snake's eval_stance_score of 1.000 while spot and humanoid sat at 0.000 with eval_fall_rate 1.00, so two morphologies advanced to locomotion having never learned to stand — and the next stage would warm-start them from checkpoints of a falling robot. `minExperiments: 8` did not prevent it, because 8 runs stage-wide were satisfied by the lines that were already succeeding.",
+                                  "enum": [
+                                    "Any",
+                                    "All"
+                                  ],
+                                  "type": "string"
                                 },
                                 "threshold": {
                                   "description": "Objective value at or above which the stage counts as passed.",
@@ -1428,6 +1437,46 @@
                               "format": "uint32",
                               "minimum": 0.0,
                               "type": "integer"
+                            },
+                            "templateProgress": {
+                              "description": "Per-template evidence within this stage, one entry per `stage.templateRefs`, ordered as declared.\n\nWithout this, a stage that fails to promote gives no answer to \"which line is holding it back\" — the stage-level `bestObjective` shows only the leader. Bounded by the stage's template count.",
+                              "items": {
+                                "description": "One template's evidence inside a curriculum stage. Controller-owned.",
+                                "properties": {
+                                  "bestExperiment": {
+                                    "description": "Experiment holding `bestObjective`.",
+                                    "nullable": true,
+                                    "type": "string"
+                                  },
+                                  "bestObjective": {
+                                    "description": "Best honest score for this template: the unbiased re-measure when the campaign has one, else its best objective. Same fold the drive-level best uses, so the two are comparable.",
+                                    "format": "double",
+                                    "nullable": true,
+                                    "type": "number"
+                                  },
+                                  "passed": {
+                                    "default": false,
+                                    "description": "Whether this template independently satisfies the stage's promotion criteria. Under `All`, promotion fires only when every row is true.",
+                                    "type": "boolean"
+                                  },
+                                  "succeededExperiments": {
+                                    "default": 0,
+                                    "description": "Succeeded experiments observed for this template in this stage.",
+                                    "format": "uint32",
+                                    "minimum": 0.0,
+                                    "type": "integer"
+                                  },
+                                  "templateRef": {
+                                    "description": "The `ExperimentTemplate` this row summarizes.",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "templateRef"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
                             }
                           },
                           "required": [

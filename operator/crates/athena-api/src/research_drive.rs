@@ -117,10 +117,44 @@ pub struct PromotionSpec {
     /// Objective value at or above which the stage counts as passed.
     pub threshold: f64,
 
-    /// Minimum succeeded experiments in the stage before promotion may fire, so
-    /// a single lucky run cannot advance the curriculum.
+    /// Minimum succeeded experiments before promotion may fire, so a single
+    /// lucky run cannot advance the curriculum. Counted stage-wide under
+    /// `Any`, PER TEMPLATE under `All` — a stage-wide count is meaningless
+    /// under `All`, since 8 runs concentrated on one template would satisfy it
+    /// while the other templates hold no evidence at all.
     #[serde(default = "default_min_experiments")]
     pub min_experiments: u32,
+
+    /// How many of the stage's templates must clear `threshold`.
+    ///
+    /// Defaults to `Any` because that is the pre-existing behavior and this
+    /// field is additive; a multi-line curriculum almost always wants `All`.
+    ///
+    /// `Any` promotes on the single best result anywhere in the stage. That is
+    /// correct when the templates are alternative routes to ONE goal (pick the
+    /// winner and move on), and wrong when each template is its own research
+    /// line. Observed live: the multi-robot curriculum promoted stance ->
+    /// locomotion on snake's eval_stance_score of 1.000 while spot and
+    /// humanoid sat at 0.000 with eval_fall_rate 1.00, so two morphologies
+    /// advanced to locomotion having never learned to stand — and the next
+    /// stage would warm-start them from checkpoints of a falling robot.
+    /// `minExperiments: 8` did not prevent it, because 8 runs stage-wide were
+    /// satisfied by the lines that were already succeeding.
+    #[serde(default)]
+    pub quantifier: PromotionQuantifier,
+}
+
+/// How many of a stage's templates must clear the promotion threshold.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Default)]
+pub enum PromotionQuantifier {
+    /// The best result in the stage decides. Templates are alternative routes
+    /// to one goal.
+    #[default]
+    Any,
+    /// EVERY template in the stage must independently clear `threshold` with at
+    /// least `minExperiments` succeeded runs. Templates are parallel research
+    /// lines that must each pass on their own evidence.
+    All,
 }
 
 fn default_min_experiments() -> u32 {
@@ -157,6 +191,37 @@ pub struct StageRecord {
     /// Succeeded experiments observed in this stage.
     #[serde(default)]
     pub succeeded_experiments: u32,
+    /// Per-template evidence within this stage, one entry per
+    /// `stage.templateRefs`, ordered as declared.
+    ///
+    /// Without this, a stage that fails to promote gives no answer to "which
+    /// line is holding it back" — the stage-level `bestObjective` shows only
+    /// the leader. Bounded by the stage's template count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub template_progress: Vec<TemplateProgress>,
+}
+
+/// One template's evidence inside a curriculum stage. Controller-owned.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateProgress {
+    /// The `ExperimentTemplate` this row summarizes.
+    pub template_ref: String,
+    /// Best honest score for this template: the unbiased re-measure when the
+    /// campaign has one, else its best objective. Same fold the drive-level
+    /// best uses, so the two are comparable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_objective: Option<f64>,
+    /// Experiment holding `bestObjective`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_experiment: Option<String>,
+    /// Succeeded experiments observed for this template in this stage.
+    #[serde(default)]
+    pub succeeded_experiments: u32,
+    /// Whether this template independently satisfies the stage's promotion
+    /// criteria. Under `All`, promotion fires only when every row is true.
+    #[serde(default)]
+    pub passed: bool,
 }
 
 /// OpenAI-compatible LLM endpoint the controller consults for hypotheses.

@@ -1,0 +1,91 @@
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchReport
+metadata:
+  name: curriculum-promotion-quantifier
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-stage: stance
+    research.nixlab.io/purpose: defect
+spec:
+  campaignRef: curriculum-snake-stance
+  title: >-
+    Curriculum stage promotion gated on the stage's BEST template, so one
+    succeeding morphology advanced three others that had never learned to stand
+  sections:
+    Findings: >-
+      The multi-robot curriculum drive promoted stage stance -> locomotion at
+      2026-08-29T19:26:39Z with bestObjective 1 and succeededExperiments 8,
+      recorded in status.curriculum.stageHistory. The gate was satisfied by
+      snake alone. Per-morphology eval_stance_score at that moment: snake
+      1.000, spider 1.000 (one run 0.800), spot 0.000, humanoid 0.000. Spot
+      showed eval_upright_frac 0.766-0.832 with eval_fall_rate 1.00; humanoid
+      showed eval_upright_frac 1.000 with eval_fall_rate 1.00. So two of four
+      morphologies advanced to locomotion having never learned to stand, and
+      because the locomotion stage uses seedFrom: stance, they would
+      warm-start from the checkpoints of a robot that falls in 100% of eval
+      episodes.
+      Root cause: evaluate_promotion gated on the MAX honest score across the
+      stage's templates, so a stage composed of independent research lines
+      promoted on its single best line. The stage-wide fold also meant the
+      recorded bestObjective described one morphology while being read as the
+      stage's state.
+      Fix: promotion.quantifier, an enum of Any (default, preserving best-of
+      for templates that are alternative routes to one goal) and All, which
+      requires every template in the stage to clear threshold independently
+      with its own minExperiments. Per-template evidence is now published as
+      status.curriculum.stageHistory[].templateProgress[] and as the Prometheus
+      series athena_drive_curriculum_template_passed and
+      athena_drive_curriculum_template_objective.
+    Method: >-
+      Read status.curriculum.stageHistory, campaign status.bestObjective, and
+      per-experiment status.metrics (eval_stance_score, eval_upright_frac,
+      eval_fall_rate) across 16 scored curriculum experiments spanning 4
+      morphologies. The gate itself was then reproduced in unit tests: the same
+      lopsided evidence (one line at 1.000 with 4 runs, one at 0.000 with 4
+      runs) promotes under Any and blocks under All.
+    Footguns: >-
+      1. minExperiments does NOT protect a multi-line stage. It counted
+      stage-wide, so 8 runs contributed by the succeeding lines satisfied it
+      while two lines held nothing but failures. Under All it must be counted
+      per template, which is why the manifest dropped 8 -> 3.
+      2. A promotion gate reading max() silently converts parallel research
+      lines into a race. The symptom surfaces one stage LATER as unexplained
+      failures warm-started from bad checkpoints, far from the cause, which is
+      what makes this class expensive to diagnose.
+      3. eval_upright_frac 1.000 with eval_fall_rate 1.00 is not a
+      contradiction: it is the signature of a robot holding vertical
+      orientation while its legs collapse. Orientation-only metrics must never
+      be a stance objective; that is why the objective is the survival-gated
+      composite eval_stance_score.
+      4. A stage that failed to promote gave no signal about which line was
+      lagging, because only the stage-wide best was recorded. Absence of that
+      breakdown is what allowed the premature promotion to look reasonable in
+      status; hence templateProgress[].
+      5. A template with no campaigns at all must count as NOT passed. Treating
+      an empty line as vacuously satisfied would reintroduce the same failure
+      through a different door, so All also refuses to promote a stage whose
+      templateRefs list is empty.
+    Limitations: >-
+      The fix makes the SHARED stage pointer advance honestly; it does not give
+      each morphology its own pointer, so all lines still advance together once
+      the slowest passes. A permanently blocked morphology now blocks the whole
+      curriculum, which is the deliberate trade against advancing on a lie.
+      Whether spot and humanoid can pass stance at all is a separate open
+      question, being tested by the spot-stance-fall-detector campaign, which
+      is investigating whether the absolute-height fall criterion terminates an
+      upright robot. This report does not establish that spot CAN stand.
+  seededHypotheses:
+    - >-
+      One drive per morphology, or a per-line stage field, would let a passing
+      morphology proceed without waiting for the slowest, and is the natural
+      successor to All. Test by splitting the curriculum into four drives and
+      confirming stage pointers diverge without duplicating templates.
+    - >-
+      A Fraction quantifier (promote when k of n lines pass) is a middle ground
+      worth evaluating if one morphology proves permanently blocked; it keeps
+      the curriculum moving without promoting a line that failed.
+    - >-
+      Asserting in the reconciler that seedFrom never seeds a stage from a
+      checkpoint whose source experiment had eval_fall_rate 1.00 would have
+      caught this class of error at the point of harm rather than one stage
+      later, and is independent of the quantifier.

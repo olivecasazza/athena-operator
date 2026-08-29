@@ -88,8 +88,45 @@ pub static DRIVE_CURRICULUM_STAGE_EXPERIMENTS: Lazy<GaugeVec> = Lazy::new(|| {
     gauge
 });
 
+/// 1 when a template independently satisfies its stage's promotion criteria.
+///
+/// The stage-level series show only the leader, so a stage that refuses to
+/// promote gives no answer to WHICH research line is holding it back — the
+/// question you actually have at 3am. `template` is bounded and
+/// low-cardinality (a stage's declared `templateRefs`), unlike an experiment
+/// name or UID, so it is safe as a label.
+pub static DRIVE_CURRICULUM_TEMPLATE_PASSED: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "drive_curriculum_template_passed",
+        "1 when a curriculum template independently meets its stage's promotion criteria",
+    )
+    .namespace("athena");
+    let gauge = GaugeVec::new(opts, &["namespace", "domain", "stage", "template"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
+/// A template's best honest objective within its stage (unbiased re-measure
+/// when the campaign has one, else best objective).
+///
+/// Deliberately NOT emitted for a template with no measurement: a real 0.0
+/// score and "no data" must stay distinguishable, and a fabricated zero would
+/// read as a failing line rather than an unstarted one.
+pub static DRIVE_CURRICULUM_TEMPLATE_OBJECTIVE: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "drive_curriculum_template_objective",
+        "Best honest objective per curriculum template within its stage",
+    )
+    .namespace("athena");
+    let gauge = GaugeVec::new(opts, &["namespace", "domain", "stage", "template"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
 pub fn init() {
     Lazy::force(&DRIVE_CURRICULUM_STAGE);
+    Lazy::force(&DRIVE_CURRICULUM_TEMPLATE_PASSED);
+    Lazy::force(&DRIVE_CURRICULUM_TEMPLATE_OBJECTIVE);
     Lazy::force(&DRIVE_CURRICULUM_STAGE_EXPERIMENTS);
     Lazy::force(&EXPERIMENTS_TOTAL);
     Lazy::force(&BENCHMARK_RUNS_TOTAL);

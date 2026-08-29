@@ -637,7 +637,7 @@ status:
   lastCanaryBenchmarkRun: athena-canary-gpu-20260520
 ```
 
-### 6.5 `ResearchDrive` curriculum extensions (PROPOSED — not implemented)
+### 6.5 `ResearchDrive` curriculum extensions
 
 The multi-robot curriculum trains every mkRobotSpec morphology through an
 ordered hierarchy, each stage seeded by the previous stage's winner:
@@ -646,13 +646,9 @@ ordered hierarchy, each stage seeded by the previous stage's winner:
 stance ──▶ locomotion ──▶ forage/seek ──▶ arena (hunt + evade)
 ```
 
-This ordering is currently expressed by which templates appear in
-`spec.templateRefs` — the controller rejects proposals naming a template
-outside that list, so the allowlist acts as the active stage gate. What it
-cannot do is PROMOTE: deciding "spider passed stance, so allow
-curriculum-spider-locomotion" is a human edit today. Per §3 that ordering is
-durable product behavior and belongs in the API, not in an operator's memory or
-a proposer prompt. Proposed additive fields:
+This ordering is an API invariant, not prose: the controller rejects proposals
+naming a template outside the current stage, and PROMOTES the stage itself from
+observed campaign status. Fields:
 
 ```yaml
 spec:
@@ -661,15 +657,17 @@ spec:
       - name: stance
         templateRefs: [curriculum-spider-stance, curriculum-snake-stance]
         promotion:
-          metric: eval_upright_frac   # must be a HELD-OUT metric
-          threshold: 0.8
-          minExperiments: 3
+          metric: eval_stance_score   # must be a HELD-OUT metric
+          threshold: 0.6
+          minExperiments: 3           # PER TEMPLATE when quantifier is All
+          quantifier: All             # All | Any (default Any)
       - name: locomotion
         templateRefs: [curriculum-spider-locomotion]
         seedFrom: stance              # -> spec.seedExperimentRef on the campaign
         promotion:
-          metric: eval_track_score
-          threshold: 50.0
+          metric: eval_track_quality
+          threshold: 25.0
+          quantifier: All
 ```
 
 ```yaml
@@ -678,23 +676,80 @@ status:
     currentStage: stance
     stageHistory:
       - name: stance
-        enteredAt: "2026-08-29T01:20:00Z"
+        enteredAt: "2026-08-29T05:22:45Z"
         promotedAt: null
-        bestExperiment: curriculum-spider-stance-canary
+        bestExperiment: curriculum-snake-stance-explore-000
         bestObjective: 1.0
+        succeededExperiments: 8
+        templateProgress:                       # one row per DECLARED template
+          - templateRef: curriculum-snake-stance
+            bestObjective: 1.0
+            bestExperiment: curriculum-snake-stance-explore-000
+            succeededExperiments: 4
+            passed: true
+          - templateRef: curriculum-spot-stance
+            bestObjective: 0.0
+            succeededExperiments: 4
+            passed: false
 ```
+
+`promotion.quantifier` decides how many of a stage's templates must clear
+`threshold`:
+
+- `Any` (default, and the pre-existing behavior): the stage's single best
+  result decides. Correct when the templates are alternative routes to ONE
+  goal — pick the winner and move on.
+- `All`: every template in `stage.templateRefs` must independently clear
+  `threshold` with at least `minExperiments` succeeded runs **of its own**.
+  Correct when each template is a separate research line.
+
+`minExperiments` is counted stage-wide under `Any` and per template under
+`All`. A stage-wide count is meaningless under `All`: runs concentrated on one
+template would satisfy it while the other templates hold no evidence at all.
+A template with no campaigns yet counts as not passed, so it blocks promotion
+under `All` — absence of evidence is not evidence.
+
+`All` exists because of a recorded failure, not a hypothetical. The multi-robot
+curriculum promoted `stance -> locomotion` on snake's `eval_stance_score` of
+1.000 while spot and humanoid sat at 0.000 with `eval_fall_rate` 1.00. Two
+morphologies advanced to locomotion having never learned to stand, and because
+that stage uses `seedFrom: stance`, they would have warm-started from the
+checkpoints of a robot that falls in 100% of eval episodes. `minExperiments: 8`
+did not prevent it: the eight stage-wide runs came from the lines that were
+already succeeding.
+
+`status.curriculum.stageHistory[].templateProgress[]` carries one row per
+declared template, in declared order, each with `templateRef`,
+`bestObjective`, `bestExperiment`, `succeededExperiments` and `passed`. Without
+it a stage that refuses to promote gives no answer to which line is holding it
+back, because the stage-level `bestObjective` shows only the leader.
 
 Controller rules:
 
 - Only the current stage's `templateRefs` are proposable; later stages are
-  rejected exactly as an unlisted template is today.
+  rejected exactly as an unlisted template is.
 - Promotion is evaluated from campaign status, never from client input, and
-  emits an Event plus a `status.curriculum` transition.
+  records a `status.curriculum` transition.
 - A promoted stage sets the next stage's campaign `seedExperimentRef` to the
-  prior stage's `bestExperiment`, which is what carries WEIGHTS forward
-  (`ATHENA_RESUME_FROM`), not just parameters.
+  prior stage's stage-wide `bestExperiment`, which is what carries WEIGHTS
+  forward (`ATHENA_RESUME_FROM`), not just parameters. This holds under both
+  quantifiers: `All` decides WHETHER to advance, never which winner seeds.
 - Promotion metrics must be held out. A stage gated on a metric the reward
   optimizes promotes on reward hacking.
+- Per-template rows are folded once and used for both `templateProgress` and
+  the `All` gate, so the dashboard can never disagree with the decision the
+  controller actually made.
+- Two Prometheus series expose the same evidence:
+  `athena_drive_curriculum_template_passed` and
+  `athena_drive_curriculum_template_objective`, both labelled
+  `{namespace, domain, stage, template}`. `template` is bounded by the stage's
+  declared list, so it is low-cardinality and safe as a label. The objective
+  series is NOT emitted for a template with no measurement, keeping a real
+  `0.0` distinguishable from "no data".
+- Remaining limitation: the stage pointer is per-DRIVE, so all lines advance
+  together once the slowest passes. Simultaneous per-morphology stage pointers
+  would need one drive per morphology or a per-line stage field, and are not
+  modeled.
 
 ### 6.6 Gym environment model: (mode × terrain)
 
