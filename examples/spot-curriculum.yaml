@@ -31,7 +31,7 @@ spec:
   runtime:
     type: pytorch
     mode: batchJob
-  image: ghcr.io/olivecasazza/spot-rapier-trainer:curriculum-v2@sha256:adb7802a0bfc1879371c0a7eb82b73a2501e332bd8955c54cae15283585f9251
+  image: ghcr.io/olivecasazza/spot-rapier-trainer:curriculum-v3@sha256:2a8cb3c43a0dea2a596b0ccffdc1d9fc1cbccb467a4258aef7b664922116310b
   imagePullSecrets:
     - name: ghcr-pull
   # Bundle + mode come from the template's per-stage command override; this
