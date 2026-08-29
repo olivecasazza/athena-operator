@@ -637,6 +637,121 @@ status:
   lastCanaryBenchmarkRun: athena-canary-gpu-20260520
 ```
 
+### 6.5 `ResearchDrive` curriculum extensions (PROPOSED — not implemented)
+
+The multi-robot curriculum trains every mkRobotSpec morphology through an
+ordered hierarchy, each stage seeded by the previous stage's winner:
+
+```
+stance ──▶ locomotion ──▶ forage/seek ──▶ arena (hunt + evade)
+```
+
+This ordering is currently expressed by which templates appear in
+`spec.templateRefs` — the controller rejects proposals naming a template
+outside that list, so the allowlist acts as the active stage gate. What it
+cannot do is PROMOTE: deciding "spider passed stance, so allow
+curriculum-spider-locomotion" is a human edit today. Per §3 that ordering is
+durable product behavior and belongs in the API, not in an operator's memory or
+a proposer prompt. Proposed additive fields:
+
+```yaml
+spec:
+  curriculum:
+    stages:
+      - name: stance
+        templateRefs: [curriculum-spider-stance, curriculum-snake-stance]
+        promotion:
+          metric: eval_upright_frac   # must be a HELD-OUT metric
+          threshold: 0.8
+          minExperiments: 3
+      - name: locomotion
+        templateRefs: [curriculum-spider-locomotion]
+        seedFrom: stance              # -> spec.seedExperimentRef on the campaign
+        promotion:
+          metric: eval_track_score
+          threshold: 50.0
+```
+
+```yaml
+status:
+  curriculum:
+    currentStage: stance
+    stageHistory:
+      - name: stance
+        enteredAt: "2026-08-29T01:20:00Z"
+        promotedAt: null
+        bestExperiment: curriculum-spider-stance-canary
+        bestObjective: 1.0
+```
+
+Controller rules:
+
+- Only the current stage's `templateRefs` are proposable; later stages are
+  rejected exactly as an unlisted template is today.
+- Promotion is evaluated from campaign status, never from client input, and
+  emits an Event plus a `status.curriculum` transition.
+- A promoted stage sets the next stage's campaign `seedExperimentRef` to the
+  prior stage's `bestExperiment`, which is what carries WEIGHTS forward
+  (`ATHENA_RESUME_FROM`), not just parameters.
+- Promotion metrics must be held out. A stage gated on a metric the reward
+  optimizes promotes on reward hacking.
+
+### 6.6 Gym environment model: (mode × terrain)
+
+The training gym is factored as a mode crossed with a terrain type, so any
+behavior can be trained on any ground without a per-combination env class:
+
+| mode | objective metric | notes |
+|---|---|---|
+| `stance` | `eval_upright_frac` | optional elastic sky-rig (`rig_carry`) |
+| `locomotion` | `eval_track_score` | commanded planar velocity + yaw rate |
+| `forage` | `eval_collected` | battery seeking; requires `foraging` terrain |
+| `arena` | `arena_predator_return_mean` | multi-agent, per-morphology policies |
+
+Terrain types come from the shared `spot_physics::terrain` registry: `flat`,
+`heightfield`, `stairs`, `platforms`, `obstacles`, `dynamic_obstacles`,
+`slopes`, `mixed`, `foraging`.
+
+Two constraints are NOT optional:
+
+1. **The matrix has holes.** `forage` needs the `foraging` terrain because that
+   generator spawns the batteries; pairing it with `stairs` yields an empty
+   world that trains nothing while reporting success. Declare valid
+   combinations rather than assuming a free cross product.
+2. **Non-flat terrain only exists away from the origin.** Stairs and slopes rise
+   with x, so an env that always spawns at (0, 0) trains on flat ground while
+   claiming a terrain type. Spawn jitter is required for the terrain parameter
+   to mean anything.
+
+#### stanceRig (elastic sky-tether)
+
+`stanceRig` is not a mode: it is `stance` with `rig_carry > 0`, a tether that
+carries part of the robot's weight while a morphology is still learning to hold
+itself up. Three rules, each learned from a measurement:
+
+- **Constant force, not a position spring.** A spring pulling toward a target
+  height self-cancels: a robot that can stand rises until the force vanishes
+  (measured assist 0.00 for spot and humanoid) while one that cannot hangs at
+  full weight (0.98 for snake). The carried fraction then tracks competence
+  instead of the parameter. Constant-force gravity compensation makes
+  `rig_carry` and the measured assist the same number by construction.
+- **Anneal on competence, not step count.** A wall-clock schedule removes the
+  support whether or not the policy is ready.
+- **Every eval runs disarmed.** The objective is measured with the rig off, and
+  `eval_rig_assist_frac` is published every run (it must read 0 on an eval) so a
+  policy that learned to hang is visible rather than rewarded.
+
+#### Cross-stage warm-start requires one observation space
+
+Every stage — including the multi-agent arena — emits the same observation
+vector and consumes the same action vector, so a stage's weights load into the
+next. The morphology one-hot is a FIXED-width slice, never `len(bundles)`: a
+dimension that moves with the robot set silently changes shape when a
+morphology is added and makes inheritance impossible. Warm-start must be
+VERIFIED, not assumed — restoring into the env-runner's inference-only module
+applies a partial subset, never reaches the learner, and yields a curriculum
+whose stage ordering only costs GPU-hours.
+
 ## 7. Metric model
 
 Athena has two metric layers:
