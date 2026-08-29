@@ -54,7 +54,43 @@ pub static EXPERIMENT_METRIC: Lazy<GaugeVec> = Lazy::new(|| {
     gauge
 });
 
+/// Curriculum progress per ResearchDrive: 1 for the stage a drive is currently
+/// in, 0 for every other declared stage. A gauge-per-stage rather than a single
+/// numeric index so a dashboard can show which stage is live without hardcoding
+/// an ordering, and so promotion shows up as one series falling while the next
+/// rises.
+///
+/// `stage` is bounded by spec.curriculum.stages and low-cardinality by design
+/// (stance/locomotion/forage/arena); never label by experiment or morphology
+/// here, which would multiply series per run.
+pub static DRIVE_CURRICULUM_STAGE: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "drive_curriculum_stage",
+        "1 for the ResearchDrive's current curriculum stage, 0 for the others",
+    )
+    .namespace("athena");
+    let gauge = GaugeVec::new(opts, &["namespace", "domain", "stage"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
+/// Succeeded experiments observed in each curriculum stage, straight from
+/// status.curriculum.stageHistory. Makes "is the promotion gate's
+/// minExperiments satisfied yet" answerable from the dashboard.
+pub static DRIVE_CURRICULUM_STAGE_EXPERIMENTS: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "drive_curriculum_stage_experiments",
+        "Succeeded experiments per curriculum stage",
+    )
+    .namespace("athena");
+    let gauge = GaugeVec::new(opts, &["namespace", "domain", "stage"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
 pub fn init() {
+    Lazy::force(&DRIVE_CURRICULUM_STAGE);
+    Lazy::force(&DRIVE_CURRICULUM_STAGE_EXPERIMENTS);
     Lazy::force(&EXPERIMENTS_TOTAL);
     Lazy::force(&BENCHMARK_RUNS_TOTAL);
     Lazy::force(&EXPERIMENT_METRIC);

@@ -23,7 +23,7 @@ spec:
     Curriculum stage 1 (stance) for the spider morphology.
     Can this morphology hold a stable upright stance, and does an elastic sky-rig carrying part of its body weight get it there faster than unassisted training? Selection is on upright fraction measured with the rig DISARMED, so tethered standing earns nothing.
   objective:
-    metric: eval_upright_frac
+    metric: eval_stance_score
     goal: maximize
   metrics:
     parser:
@@ -59,10 +59,13 @@ spec:
   dashboard:
     title: "Curriculum 1/stance — spider"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -98,7 +101,7 @@ spec:
     Curriculum stage 1 (stance) for the snake morphology.
     Can this morphology hold a stable upright stance, and does an elastic sky-rig carrying part of its body weight get it there faster than unassisted training? Selection is on upright fraction measured with the rig DISARMED, so tethered standing earns nothing.
   objective:
-    metric: eval_upright_frac
+    metric: eval_stance_score
     goal: maximize
   metrics:
     parser:
@@ -134,10 +137,13 @@ spec:
   dashboard:
     title: "Curriculum 1/stance — snake"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -173,7 +179,7 @@ spec:
     Curriculum stage 1 (stance) for the humanoid morphology.
     Can this morphology hold a stable upright stance, and does an elastic sky-rig carrying part of its body weight get it there faster than unassisted training? Selection is on upright fraction measured with the rig DISARMED, so tethered standing earns nothing.
   objective:
-    metric: eval_upright_frac
+    metric: eval_stance_score
     goal: maximize
   metrics:
     parser:
@@ -209,10 +215,13 @@ spec:
   dashboard:
     title: "Curriculum 1/stance — humanoid"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -248,7 +257,7 @@ spec:
     Curriculum stage 1 (stance) for the spot morphology.
     Can this morphology hold a stable upright stance, and does an elastic sky-rig carrying part of its body weight get it there faster than unassisted training? Selection is on upright fraction measured with the rig DISARMED, so tethered standing earns nothing.
   objective:
-    metric: eval_upright_frac
+    metric: eval_stance_score
     goal: maximize
   metrics:
     parser:
@@ -284,10 +293,13 @@ spec:
   dashboard:
     title: "Curriculum 1/stance — spot"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -323,7 +335,7 @@ spec:
     Curriculum stage 2 (locomotion) for the spider morphology.
     Seeded from this morphology's stance winner. Can a robot that can stand learn to track a commanded planar velocity and yaw rate across terrain? Selection is on integrated tracking score, which rewards tracking quality AND survival, rather than raw speed — which a diving policy maximizes.
   objective:
-    metric: eval_track_score
+    metric: eval_track_quality
     goal: maximize
   metrics:
     parser:
@@ -359,10 +371,13 @@ spec:
   dashboard:
     title: "Curriculum 2/locomotion — spider"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -374,10 +389,13 @@ spec:
       reward_mean:
         label: Episode reward mean (diagnostic — farmable)
         unit: score
-      eval_track_score:
-        label: Command-tracking score (objective)
+      eval_track_quality:
+        label: Tracking score x survived (objective)
         unit: score
         goal: maximize
+      eval_track_score:
+        label: Raw command-tracking score (diagnostic)
+        unit: score
       eval_fwd_speed_mps:
         label: Realized speed along command
         unit: m/s
@@ -403,7 +421,7 @@ spec:
     Curriculum stage 2 (locomotion) for the snake morphology.
     Seeded from this morphology's stance winner. Can a robot that can stand learn to track a commanded planar velocity and yaw rate across terrain? Selection is on integrated tracking score, which rewards tracking quality AND survival, rather than raw speed — which a diving policy maximizes.
   objective:
-    metric: eval_track_score
+    metric: eval_track_quality
     goal: maximize
   metrics:
     parser:
@@ -439,10 +457,13 @@ spec:
   dashboard:
     title: "Curriculum 2/locomotion — snake"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -454,10 +475,13 @@ spec:
       reward_mean:
         label: Episode reward mean (diagnostic — farmable)
         unit: score
-      eval_track_score:
-        label: Command-tracking score (objective)
+      eval_track_quality:
+        label: Tracking score x survived (objective)
         unit: score
         goal: maximize
+      eval_track_score:
+        label: Raw command-tracking score (diagnostic)
+        unit: score
       eval_fwd_speed_mps:
         label: Realized speed along command
         unit: m/s
@@ -483,7 +507,7 @@ spec:
     Curriculum stage 2 (locomotion) for the humanoid morphology.
     Seeded from this morphology's stance winner. Can a robot that can stand learn to track a commanded planar velocity and yaw rate across terrain? Selection is on integrated tracking score, which rewards tracking quality AND survival, rather than raw speed — which a diving policy maximizes.
   objective:
-    metric: eval_track_score
+    metric: eval_track_quality
     goal: maximize
   metrics:
     parser:
@@ -519,10 +543,13 @@ spec:
   dashboard:
     title: "Curriculum 2/locomotion — humanoid"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -534,10 +561,13 @@ spec:
       reward_mean:
         label: Episode reward mean (diagnostic — farmable)
         unit: score
-      eval_track_score:
-        label: Command-tracking score (objective)
+      eval_track_quality:
+        label: Tracking score x survived (objective)
         unit: score
         goal: maximize
+      eval_track_score:
+        label: Raw command-tracking score (diagnostic)
+        unit: score
       eval_fwd_speed_mps:
         label: Realized speed along command
         unit: m/s
@@ -563,7 +593,7 @@ spec:
     Curriculum stage 2 (locomotion) for the spot morphology.
     Seeded from this morphology's stance winner. Can a robot that can stand learn to track a commanded planar velocity and yaw rate across terrain? Selection is on integrated tracking score, which rewards tracking quality AND survival, rather than raw speed — which a diving policy maximizes.
   objective:
-    metric: eval_track_score
+    metric: eval_track_quality
     goal: maximize
   metrics:
     parser:
@@ -599,10 +629,13 @@ spec:
   dashboard:
     title: "Curriculum 2/locomotion — spot"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -614,10 +647,13 @@ spec:
       reward_mean:
         label: Episode reward mean (diagnostic — farmable)
         unit: score
-      eval_track_score:
-        label: Command-tracking score (objective)
+      eval_track_quality:
+        label: Tracking score x survived (objective)
         unit: score
         goal: maximize
+      eval_track_score:
+        label: Raw command-tracking score (diagnostic)
+        unit: score
       eval_fwd_speed_mps:
         label: Realized speed along command
         unit: m/s
@@ -679,10 +715,13 @@ spec:
   dashboard:
     title: "Curriculum 3/forage — spider"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -758,10 +797,13 @@ spec:
   dashboard:
     title: "Curriculum 3/forage — snake"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -837,10 +879,13 @@ spec:
   dashboard:
     title: "Curriculum 3/forage — humanoid"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction
@@ -916,10 +961,13 @@ spec:
   dashboard:
     title: "Curriculum 3/forage — spot"
     metrics:
-      eval_upright_frac:
-        label: Upright fraction, untethered eval
-        unit: fraction
+      eval_stance_score:
+        label: Stance score = upright x survived, untethered eval
+        unit: score
         goal: maximize
+      eval_upright_frac:
+        label: Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that crumples straight down)
+        unit: fraction
       eval_fall_rate:
         label: Fall rate, untethered eval
         unit: fraction

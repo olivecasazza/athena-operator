@@ -303,6 +303,28 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
     crate::metrics::DRIVE_CAMPAIGNS_TOTAL
         .with_label_values(&[&ns, &spec.domain, &phase_label(&final_phase)])
         .set(status.campaigns_completed as f64);
+
+    // Per-stage curriculum series. Emitted for EVERY declared stage each pass,
+    // not only the current one, so a promotion reads as one series dropping to
+    // 0 while the next rises to 1 — a stale 1 left on the old stage would make
+    // the dashboard show two live stages forever.
+    if let (Some(cur), Some(cstatus)) = (spec.curriculum.as_ref(), status.curriculum.as_ref()) {
+        let current = cstatus.current_stage.clone().unwrap_or_default();
+        for stage in &cur.stages {
+            crate::metrics::DRIVE_CURRICULUM_STAGE
+                .with_label_values(&[&ns, &spec.domain, &stage.name])
+                .set(if stage.name == current { 1.0 } else { 0.0 });
+            let succeeded = cstatus
+                .stage_history
+                .iter()
+                .find(|r| r.name == stage.name)
+                .map(|r| r.succeeded_experiments)
+                .unwrap_or(0);
+            crate::metrics::DRIVE_CURRICULUM_STAGE_EXPERIMENTS
+                .with_label_values(&[&ns, &spec.domain, &stage.name])
+                .set(succeeded as f64);
+        }
+    }
     write_status(&ctx, &ns, &name, &drive, status, final_phase).await?;
 
     Ok(Action::requeue(Duration::from_secs(requeue_secs)))

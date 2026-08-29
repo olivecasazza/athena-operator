@@ -34,12 +34,72 @@ metadata:
 spec:
   domain: multi-robot-curriculum
 
-  # STAGE 1 ONLY. See the gating note above before adding later stages.
+  # Outer bound. The CURRENT stage (spec.curriculum below) narrows this
+  # further; the controller rejects any proposal outside the intersection.
   templateRefs:
     - curriculum-spider-stance
     - curriculum-snake-stance
     - curriculum-humanoid-stance
     - curriculum-spot-stance
+    - curriculum-spider-locomotion
+    - curriculum-snake-locomotion
+    - curriculum-humanoid-locomotion
+    - curriculum-spot-locomotion
+    - curriculum-spider-forage
+    - curriculum-snake-forage
+    - curriculum-humanoid-forage
+    - curriculum-spot-forage
+
+  # The hierarchy, now an API invariant rather than prose: only the current
+  # stage is proposable, and each stage seeds the next from its winner (which
+  # carries WEIGHTS via seedExperimentRef -> ATHENA_RESUME_FROM).
+  #
+  # Promotion gates on SURVIVAL-COMPOSITE metrics. eval_upright_frac measures
+  # orientation while alive, so a robot that stays vertical while its legs
+  # crumple reads 1.000 while falling every episode (measured: spider,
+  # humanoid and spot all did exactly that). eval_stance_score multiplies in
+  # survival, so only genuine standing promotes.
+  #
+  # KNOWN LIMITATION: the stage is per-DRIVE, not per-morphology, so the whole
+  # drive advances when the stage's BEST result passes. Today snake stands
+  # (1.000) while spider/humanoid/spot score 0.000, so minExperiments is set
+  # high enough that one morphology cannot drag the rest forward prematurely.
+  # Per-morphology progression wants one drive per morphology (or a per-line
+  # stage field); tracked, not pretended away.
+  curriculum:
+    stages:
+      - name: stance
+        templateRefs:
+          - curriculum-spider-stance
+          - curriculum-snake-stance
+          - curriculum-humanoid-stance
+          - curriculum-spot-stance
+        promotion:
+          metric: eval_stance_score
+          threshold: 0.6
+          minExperiments: 8
+      - name: locomotion
+        seedFrom: stance
+        templateRefs:
+          - curriculum-spider-locomotion
+          - curriculum-snake-locomotion
+          - curriculum-humanoid-locomotion
+          - curriculum-spot-locomotion
+        promotion:
+          metric: eval_track_quality
+          threshold: 25.0
+          minExperiments: 8
+      - name: forage
+        seedFrom: locomotion
+        templateRefs:
+          - curriculum-spider-forage
+          - curriculum-snake-forage
+          - curriculum-humanoid-forage
+          - curriculum-spot-forage
+        promotion:
+          metric: eval_collected
+          threshold: 2.0
+          minExperiments: 8
 
   proposer:
     endpoint: http://omniroute.apps.svc.cluster.local:20128/v1

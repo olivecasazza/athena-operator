@@ -37,7 +37,7 @@ MORPHOLOGIES = ["spider", "snake", "humanoid", "spot"]
 STAGES = {
     "stance": {
         "order": 1,
-        "objective": "eval_upright_frac",
+        "objective": "eval_stance_score",
         "terrain": "heightfield",
         "rig_carry": 0.5,
         "max_time": 8.0,
@@ -54,13 +54,15 @@ STAGES = {
     },
     "locomotion": {
         "order": 2,
-        "objective": "eval_track_score",
+        "objective": "eval_track_quality",
         "terrain": "mixed",
         "rig_carry": 0.0,
         "max_time": 12.0,
         "timesteps": 5_000_000,
         "extra_metrics": {
-            "eval_track_score": ("Command-tracking score (objective)", "score", "maximize"),
+            "eval_track_quality": (
+                "Tracking score x survived (objective)", "score", "maximize"),
+            "eval_track_score": ("Raw command-tracking score (diagnostic)", "score", None),
             "eval_fwd_speed_mps": ("Realized speed along command", "m/s", "maximize"),
         },
         "question": (
@@ -93,7 +95,11 @@ STAGES = {
 }
 
 SHARED_METRICS = {
-    "eval_upright_frac": ("Upright fraction, untethered eval", "fraction", "maximize"),
+    "eval_stance_score": (
+        "Stance score = upright x survived, untethered eval", "score", "maximize"),
+    "eval_upright_frac": (
+        "Upright fraction WHILE ALIVE (diagnostic — reads 1.0 for a robot that "
+        "crumples straight down)", "fraction", None),
     "eval_fall_rate": ("Fall rate, untethered eval", "fraction", "minimize"),
     "eval_rig_assist_frac": ("Rig assist during eval (MUST be 0 — audit)", "fraction", "minimize"),
     "reward_mean": ("Episode reward mean (diagnostic — farmable)", "score", None),
