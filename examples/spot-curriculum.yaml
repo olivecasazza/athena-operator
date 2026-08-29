@@ -66,8 +66,12 @@ spec:
     # land on tyan01's Kepler cards.
     queueName: athena-gpu
     runtimeClassName: nvidia
-    nodeSelector:
-      nvidia.com/gpu.product: Quadro-RTX-4000
+    # Deliberately NO gpu.product nodeSelector. athena-gpu spans hp01-03
+    # (RTX 4000) AND seir (2x RTX 5000); pinning the product excluded seir and
+    # left four admitted workloads unschedulable behind hp01's single GPU while
+    # two idle RTX 5000s sat in the same queue. The CUDA 12.1 image runs on
+    # either Turing card, and Kepler (tyan01, CUDA <= 11.4) is a separate queue,
+    # so the queue itself is the correct hardware boundary here.
     tolerations:
       - key: nvidia.com/gpu
         operator: Exists
