@@ -59,6 +59,17 @@ spec:
       scheduling.queueName, so their Jobs took GPUs outside Kueue accounting
       entirely, and existed only as live cluster objects with no repo source.
       Audit for this whenever GPU capacity appears to vanish.
+      5. CPU-only profiles have NO admission control. Kueue quota here is
+      GPU-only, so a profile that requests no nvidia.com/gpu is correctly
+      unqueued -- and therefore nothing serializes it. Observed live: two
+      CPU experiments landed on tyan01 together and both fell to 1,364
+      steps/min. Because a hand-created Experiment is not counted by its
+      campaign's `concurrency`, campaign-level limits do not save you either.
+      Size requests.cpu so only one pod fits the node (8 of 11 here) and let
+      the kube-scheduler serialize, or add a CPU ClusterQueue.
+      6. Throughput thrash degrades TIME, not correctness. Do not delete
+      running experiments to reclaim speed -- a slow 400k-step run still
+      produces a valid measurement, and the deletion is unrecoverable.
     Limitations: >-
       One morphology (spot) and one stage (stance). Snake was the slowest
       morphology on GPU (6,074 steps/min) so the CPU:GPU ratio may differ per
@@ -84,6 +95,11 @@ spec:
       Adding controller-computed wallClockSeconds/queueLatencySeconds/gpuHours
       to Experiment status makes throughput regressions visible in Grafana
       instead of requiring per-question shell archaeology.
+    - >-
+      A CPU ClusterQueue (cohort separate from hp-gpu/kepler-gpu) would give
+      CPU-only experiments real admission control instead of relying on request
+      sizing to serialize them, and would make CPU capacity visible in the same
+      queue metrics as GPU capacity.
 ---
 apiVersion: research.nixlab.io/v1alpha1
 kind: ResearchReport

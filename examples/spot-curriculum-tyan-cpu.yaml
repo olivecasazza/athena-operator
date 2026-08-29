@@ -40,9 +40,16 @@ spec:
       value: /var/run/secrets/gcs/key.json
     - name: SPOT_ROBOT_ROOT
       value: /opt/robots
+  # cpu: 8 of tyan01's 11 allocatable is deliberate ADMISSION CONTROL, not a
+  # capacity estimate. A CPU-only profile carries no queueName (Kueue quota is
+  # GPU-only), so nothing gates concurrency and the node WILL be oversubscribed
+  # -- observed live: two experiments landed together and both dropped to
+  # 1,364 steps/min against 9,827 solo. Sizing the request so only one pod
+  # fits makes the kube-scheduler itself serialize them, with no new queue.
+  # Lower this only alongside pinned torch/OMP thread counts.
   resources:
     requests:
-      cpu: "5"
+      cpu: "8"
       memory: 8Gi
     limits:
       memory: 16Gi
