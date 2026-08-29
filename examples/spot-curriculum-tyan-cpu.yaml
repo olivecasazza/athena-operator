@@ -1,3 +1,9 @@
+# NOTE: the capacity-probe ResearchCampaign that once lived here was removed
+# after the measurement was published as ResearchReport/tyan01-cpu-capacity.
+# It is deliberately NOT kept in this file: re-applying the file to edit the
+# profile silently RECREATED it and queued another 5 hours of tyan01 for an
+# answered question. A one-shot probe campaign does not belong in a file that
+# holds durable profiles/templates.
 # tyan01 capacity probe: is the GPU actually load-bearing for this workload?
 #
 # tyan01 holds 8x GTX Titan Black (sm_35). Those GPUs CANNOT run the curriculum
@@ -122,29 +128,6 @@ spec:
     git:
       url: https://github.com/olivecasazza/skypilot-env
       ref: feat/spot-ground-speed-reward
----
-# Canary-only: one run, same 400k-step budget as the spot GPU canary
-# (35.2 min wall on an RTX 4000). maxExperiments 1 so a slow result cannot
-# quietly consume the node for hours beyond the measurement.
-apiVersion: research.nixlab.io/v1alpha1
-kind: ResearchCampaign
-metadata:
-  name: tyan-cpu-capacity-probe
-  namespace: apps
-  labels:
-    research.nixlab.io/purpose: capacity-probe
-spec:
-  templateRef: curriculum-spot-stance-tyan-cpu
-  concurrency: 1
-  strategy:
-    type: heuristic
-  budget:
-    maxExperiments: 1
-    maxDuration: 6h
-  canary:
-    parameters:
-      total_timesteps: 400000
-    maxDuration: 6h
 ---
 # Drive-schedulable twin of the probe template. This one IS in the curriculum
 # drive's stance allowlist, which turns tyan01 from idle into a fourth
