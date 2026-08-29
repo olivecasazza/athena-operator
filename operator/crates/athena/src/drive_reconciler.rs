@@ -43,8 +43,8 @@ use athena_api::research_campaign::{
     CampaignBudget, ResearchCampaign, ResearchCampaignSpec, StrategySpec,
 };
 use athena_api::research_drive::{
-    BranchRef, DrivePhase, ProposalDecision, ProposalRecord, ResearchDrive, ResearchDriveStatus,
-    StructuralChangePolicy,
+    BranchRef, CurriculumSpec, CurriculumStatus, DrivePhase, ProposalDecision, ProposalRecord,
+    ResearchDrive, ResearchDriveStatus, StageRecord, StructuralChangePolicy,
 };
 use chrono::Utc;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -111,14 +111,12 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
             .as_deref()
             .is_some_and(|p| TERMINAL_PHASES.contains(&p));
         if is_terminal {
-            // Fold only campaigns not already folded: membership in
-            // currentCampaigns marks "known active"; a terminal campaign still
-            // listed there hasn't been folded yet.
-            let listed = status
-                .current_campaigns
-                .iter()
-                .any(|b| b.campaign == c.name_any());
-            if listed {
+            // Fold each campaign EXACTLY once, tracked by an explicit ledger.
+            // The previous guard was membership in currentCampaigns, which made
+            // once-only depend on a status write surviving; when the empty-list
+            // write was dropped by merge-patch semantics the same campaign
+            // re-folded on every reconcile and the counters ran away.
+            if !status.folded_campaigns.iter().any(|n| n == &c.name_any()) {
                 terminal_unfolded.push(c);
             }
         } else {
@@ -132,6 +130,15 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
         status
             .current_campaigns
             .retain(|b| b.campaign != c.name_any());
+        status.folded_campaigns.push(c.name_any());
+        // Bounded status: keep the ledger to the most recent entries. A drive
+        // never revisits a campaign this old, and unbounded status fields are
+        // prohibited.
+        const FOLDED_LEDGER_CAP: usize = 200;
+        if status.folded_campaigns.len() > FOLDED_LEDGER_CAP {
+            let excess = status.folded_campaigns.len() - FOLDED_LEDGER_CAP;
+            status.folded_campaigns.drain(0..excess);
+        }
         status.campaigns_completed = status.campaigns_completed.saturating_add(1);
         info!(
             drive = %name,
@@ -146,6 +153,20 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
         owned.items.iter().any(|c| c.name_any() == b.campaign)
             && active.iter().any(|c| c.name_any() == b.campaign)
     });
+
+    // 2b. Curriculum promotion. Evaluated from campaign status after folds, so
+    // a stage advances on observed results only.
+    //
+    // The transition is recorded in status.curriculum.stageHistory (entered_at
+    // / promoted_at / best_experiment) rather than a Kubernetes Event: this
+    // operator has no event recorder on Context and emits none anywhere, and
+    // introducing one belongs in its own change rather than riding along here.
+    if let Some(cur) = spec.curriculum.as_ref() {
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Some(next) = evaluate_promotion(cur, &mut status, &owned.items, &now) {
+            info!(drive = %name, stage = %next, "curriculum stage promoted");
+        }
+    }
 
     // 3. Structural approval gate. AwaitingApproval proposals block the loop
     // under RequireApproval; the approve annotation flips them to Approved,
@@ -326,6 +347,139 @@ fn fold_campaign(status: &mut ResearchDriveStatus, campaign: &ResearchCampaign) 
     }
 }
 
+/// Templates proposable right now: the current curriculum stage's list
+/// intersected with the drive allowlist, or the whole allowlist when no
+/// curriculum is configured.
+///
+/// This is the enforcement point that turns stage ORDER from proposer prose
+/// into an invariant: a locomotion template simply is not offerable while
+/// stance is current, and `build_campaign` rejects it if proposed anyway.
+pub(crate) fn allowed_templates(drive: &ResearchDrive) -> Vec<String> {
+    let all = &drive.spec.template_refs;
+    let Some(cur) = drive.spec.curriculum.as_ref() else {
+        return all.clone();
+    };
+    let stage_name = drive
+        .status
+        .as_ref()
+        .and_then(|s| s.curriculum.as_ref())
+        .and_then(|c| c.current_stage.clone())
+        .or_else(|| cur.stages.first().map(|s| s.name.clone()));
+    let Some(stage) = cur
+        .stages
+        .iter()
+        .find(|s| Some(&s.name) == stage_name.as_ref())
+    else {
+        return all.clone();
+    };
+    all.iter()
+        .filter(|t| stage.template_refs.iter().any(|s| s == *t))
+        .cloned()
+        .collect()
+}
+
+/// The experiment that seeds a stage's campaigns: the winner recorded for the
+/// stage named by `seedFrom`. None when the stage has no `seedFrom` or the
+/// referenced stage has not produced a winner yet.
+pub(crate) fn stage_seed(drive: &ResearchDrive, template_ref: &str) -> Option<String> {
+    let cur = drive.spec.curriculum.as_ref()?;
+    let stage = cur
+        .stages
+        .iter()
+        .find(|s| s.template_refs.iter().any(|t| t == template_ref))?;
+    let from = stage.seed_from.as_ref()?;
+    drive
+        .status
+        .as_ref()?
+        .curriculum
+        .as_ref()?
+        .stage_history
+        .iter()
+        .find(|r| &r.name == from)
+        .and_then(|r| r.best_experiment.clone())
+}
+
+/// Advance the curriculum when the current stage's promotion criteria are met.
+///
+/// Evaluated purely from campaign status (never client input), and only for
+/// campaigns whose templateRef belongs to the current stage. Returns the new
+/// stage name when a promotion happened, so the caller can emit an Event.
+pub(crate) fn evaluate_promotion(
+    spec_curriculum: &CurriculumSpec,
+    status: &mut ResearchDriveStatus,
+    owned: &[ResearchCampaign],
+    now: &str,
+) -> Option<String> {
+    if spec_curriculum.stages.is_empty() {
+        return None;
+    }
+    let cs = status.curriculum.get_or_insert_with(CurriculumStatus::default);
+    let current = cs
+        .current_stage
+        .clone()
+        .unwrap_or_else(|| spec_curriculum.stages[0].name.clone());
+    cs.current_stage = Some(current.clone());
+    if !cs.stage_history.iter().any(|r| r.name == current) {
+        cs.stage_history.push(StageRecord {
+            name: current.clone(),
+            entered_at: Some(now.to_string()),
+            ..Default::default()
+        });
+    }
+
+    let idx = spec_curriculum
+        .stages
+        .iter()
+        .position(|s| s.name == current)?;
+    let stage = &spec_curriculum.stages[idx];
+
+    // Best succeeded experiment across this stage's campaigns, using the same
+    // honest score fold_campaign prefers: the unbiased re-measure when present.
+    let mut best: Option<(f64, String)> = None;
+    let mut succeeded = 0u32;
+    for c in owned {
+        if !stage.template_refs.iter().any(|t| t == &c.spec.template_ref) {
+            continue;
+        }
+        let st = c.status.clone().unwrap_or_default();
+        succeeded = succeeded.saturating_add(st.succeeded_experiments);
+        if let (Some(score), Some(exp)) = (
+            st.incumbent_remeasured.or(st.best_objective),
+            st.best_experiment.clone(),
+        ) {
+            if best.as_ref().is_none_or(|(b, _)| score > *b) {
+                best = Some((score, exp));
+            }
+        }
+    }
+
+    if let Some(rec) = cs.stage_history.iter_mut().find(|r| r.name == current) {
+        rec.succeeded_experiments = succeeded;
+        if let Some((score, exp)) = &best {
+            rec.best_objective = Some(*score);
+            rec.best_experiment = Some(exp.clone());
+        }
+    }
+
+    // No promotion block = deliberate human gate; stay put.
+    let promo = stage.promotion.as_ref()?;
+    let (score, _) = best.as_ref()?;
+    if succeeded < promo.min_experiments || *score < promo.threshold {
+        return None;
+    }
+    let next = spec_curriculum.stages.get(idx + 1)?.name.clone();
+    if let Some(rec) = cs.stage_history.iter_mut().find(|r| r.name == current) {
+        rec.promoted_at = Some(now.to_string());
+    }
+    cs.current_stage = Some(next.clone());
+    cs.stage_history.push(StageRecord {
+        name: next.clone(),
+        entered_at: Some(now.to_string()),
+        ..Default::default()
+    });
+    Some(next)
+}
+
 /// Call the LLM proposer, validate its actions, create the campaigns.
 /// Returns the created branches plus the proposal record for the ring.
 async fn propose_and_create(
@@ -386,7 +540,11 @@ async fn propose_and_create(
 
     let context = json!({
         "domain": spec.domain,
-        "allowedTemplates": spec.template_refs,
+        "allowedTemplates": allowed_templates(drive),
+        "curriculumStage": status
+            .curriculum
+            .as_ref()
+            .and_then(|c| c.current_stage.clone()),
         "driveBest": {
             "objective": status.best_objective,
             "experiment": status.best_experiment_ref,
@@ -641,9 +799,13 @@ async fn build_campaign(
         .get("templateRef")
         .and_then(Value::as_str)
         .ok_or("action missing templateRef")?;
-    if !spec.template_refs.iter().any(|t| t == template_ref) {
+    // Stage-gated: while a curriculum is configured this is the CURRENT
+    // stage's templates, so proposing a later stage is rejected here rather
+    // than trusted to the proposer's prompt.
+    let allowed = allowed_templates(drive);
+    if !allowed.iter().any(|t| t == template_ref) {
         return Err(format!(
-            "templateRef {template_ref} not in drive templateRefs"
+            "templateRef {template_ref} not proposable now (allowed: {allowed:?})"
         ));
     }
     templates
@@ -696,11 +858,20 @@ async fn build_campaign(
             }
             Some(seed.to_string())
         }
-        _ if action_type == "consolidate" => drive
-            .status
-            .as_ref()
-            .and_then(|s| s.best_experiment_ref.clone()),
-        _ => None,
+        // A curriculum stage with `seedFrom` always seeds from the named
+        // stage's winner: that reference carries WEIGHTS across the stage
+        // boundary (seedExperimentRef -> ATHENA_RESUME_FROM), which is the
+        // entire reason for training in an order.
+        _ => stage_seed(drive, template_ref).or_else(|| {
+            if action_type == "consolidate" {
+                drive
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.best_experiment_ref.clone())
+            } else {
+                None
+            }
+        }),
     };
 
     let hypothesis = action
@@ -869,6 +1040,144 @@ mod tests {
                 ..Default::default()
             }),
         }
+    }
+
+    fn drive_spec_with(curriculum: CurriculumSpec) -> athena_api::research_drive::ResearchDriveSpec {
+        use athena_api::research_drive::{
+            DriveLimits, ProposerSpec, ResearchDriveSpec, SecretKeyRef, StagnationSpec,
+        };
+        ResearchDriveSpec {
+            domain: "test".into(),
+            template_refs: vec!["t-stance".into(), "t-loco".into()],
+            proposer: ProposerSpec {
+                endpoint: "http://localhost".into(),
+                model: "m".into(),
+                api_key_secret_ref: Some(SecretKeyRef {
+                    name: "s".into(),
+                    key: "k".into(),
+                }),
+                max_tokens: Some(128),
+                temperature: Some(0.0),
+                timeout_seconds: Some(5),
+            },
+            limits: DriveLimits::default(),
+            stagnation: StagnationSpec::default(),
+            structural_change_policy: StructuralChangePolicy::default(),
+            paused: false,
+            curriculum: Some(curriculum),
+        }
+    }
+
+    fn staged_campaign(
+        name: &str,
+        template: &str,
+        best: Option<f64>,
+        succeeded: u32,
+    ) -> ResearchCampaign {
+        let mut c = campaign_with(template, None, best, None);
+        c.metadata.name = Some(name.into());
+        if let Some(st) = c.status.as_mut() {
+            st.succeeded_experiments = succeeded;
+            st.best_experiment = Some(format!("{name}-000"));
+        }
+        c
+    }
+
+    fn curriculum_two_stage() -> CurriculumSpec {
+        use athena_api::research_drive::{CurriculumStage, PromotionSpec};
+        CurriculumSpec {
+            stages: vec![
+                CurriculumStage {
+                    name: "stance".into(),
+                    template_refs: vec!["t-stance".into()],
+                    seed_from: None,
+                    promotion: Some(PromotionSpec {
+                        metric: "eval_upright_frac".into(),
+                        threshold: 0.8,
+                        min_experiments: 2,
+                    }),
+                },
+                CurriculumStage {
+                    name: "locomotion".into(),
+                    template_refs: vec!["t-loco".into()],
+                    seed_from: Some("stance".into()),
+                    promotion: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn promotion_requires_threshold_and_min_experiments() {
+        let cur = curriculum_two_stage();
+        let mut status = ResearchDriveStatus::default();
+
+        // Above threshold but only one succeeded run: a single lucky result
+        // must not advance the curriculum.
+        let owned = vec![staged_campaign("c1", "t-stance", Some(0.95), 1)];
+        assert_eq!(evaluate_promotion(&cur, &mut status, &owned, "t0"), None);
+        let cs = status.curriculum.clone().unwrap();
+        assert_eq!(cs.current_stage.as_deref(), Some("stance"));
+
+        // Enough runs but below threshold: still no promotion.
+        let owned = vec![staged_campaign("c1", "t-stance", Some(0.5), 4)];
+        assert_eq!(evaluate_promotion(&cur, &mut status, &owned, "t1"), None);
+
+        // Both satisfied: advance, and record the winner that seeds the next
+        // stage.
+        let owned = vec![staged_campaign("c1", "t-stance", Some(0.9), 3)];
+        assert_eq!(
+            evaluate_promotion(&cur, &mut status, &owned, "t2").as_deref(),
+            Some("locomotion")
+        );
+        let cs = status.curriculum.clone().unwrap();
+        assert_eq!(cs.current_stage.as_deref(), Some("locomotion"));
+        let stance = cs.stage_history.iter().find(|r| r.name == "stance").unwrap();
+        assert_eq!(stance.promoted_at.as_deref(), Some("t2"));
+        assert_eq!(stance.best_experiment.as_deref(), Some("c1-000"));
+    }
+
+    #[test]
+    fn allowed_templates_gate_to_current_stage() {
+        let mut drive = ResearchDrive::new(
+            "d",
+            crate::drive_reconciler::tests::drive_spec_with(curriculum_two_stage()),
+        );
+        drive.metadata.namespace = Some("default".into());
+
+        // No status yet -> first stage is current.
+        assert_eq!(allowed_templates(&drive), vec!["t-stance".to_string()]);
+
+        // After promotion only the later stage's template is proposable, so a
+        // proposer cannot skip ahead OR fall back.
+        drive.status = Some(ResearchDriveStatus {
+            curriculum: Some(CurriculumStatus {
+                current_stage: Some("locomotion".into()),
+                stage_history: vec![StageRecord {
+                    name: "stance".into(),
+                    best_experiment: Some("c1-000".into()),
+                    ..Default::default()
+                }],
+            }),
+            ..Default::default()
+        });
+        assert_eq!(allowed_templates(&drive), vec!["t-loco".to_string()]);
+
+        // The later stage seeds from the earlier stage's winner: this is what
+        // carries weights across the boundary.
+        assert_eq!(stage_seed(&drive, "t-loco").as_deref(), Some("c1-000"));
+        assert_eq!(stage_seed(&drive, "t-stance"), None);
+    }
+
+    #[test]
+    fn no_curriculum_leaves_allowlist_untouched() {
+        let mut spec = drive_spec_with(CurriculumSpec::default());
+        spec.curriculum = None;
+        let drive = ResearchDrive::new("d", spec);
+        assert_eq!(
+            allowed_templates(&drive),
+            vec!["t-stance".to_string(), "t-loco".to_string()]
+        );
     }
 
     #[test]
