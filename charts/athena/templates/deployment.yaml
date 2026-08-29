@@ -35,12 +35,12 @@ spec:
             - containerPort: 8080
               name: metrics
               protocol: TCP
+          # Rendered from .Values.resources: these were hardcoded, so every
+          # HelmRelease `values.resources` override was silently ignored — the
+          # operator stayed at 256Mi and OOM-crash-looped even after the value
+          # was raised in GitOps.
           resources:
-            limits:
-              memory: 256Mi
-            requests:
-              cpu: 100m
-              memory: 128Mi
+            {{- toYaml .Values.resources | nindent 12 }}
       imagePullSecrets:
         - name: ghcr-pull
       serviceAccountName: athena-operator

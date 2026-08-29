@@ -1,0 +1,304 @@
+# Multi-robot curriculum: RuntimeProfile + one ExperimentTemplate per stage.
+#
+# The hierarchy is stance -> locomotion -> forage -> arena, trained for EVERY
+# mkRobotSpec morphology (spider, snake, humanoid, spot) rather than spot alone.
+# Stages chain through `spec.seedExperimentRef` on the ResearchCampaign: the
+# winning experiment of a stage seeds the next stage's search AND warm-starts
+# its weights (ATHENA_RESUME_FROM -> train_curriculum.py --init-from). That
+# chaining is the whole point of the ordering, so the gym gives every stage an
+# identical (110,) observation / (32,) action space; a stage whose spaces
+# differed could not inherit anything and the curriculum would be four
+# unrelated cold starts.
+#
+# stanceRig is not a separate stage: it is `stance` with rig_carry > 0, an
+# elastic sky-tether applying constant upward force (gravity compensation)
+# equal to `rig_carry` x body weight. The trainer ALWAYS measures the objective
+# on a final eval pass with the rig disarmed, so a policy that can only stand
+# while tethered scores what it is worth untethered. `eval_rig_assist_frac` is
+# published every run as the audit trail (it must read 0 on any eval).
+#
+# Image: ghcr.io/olivecasazza/spot-rapier-trainer:curriculum-v1
+#   - bakes mkRobotSpec bundles at /opt/robots/<morphology>
+#   - pins ray==2.54.1 (the version the warm-start assertion was verified on)
+#   - in-image acceptance: `python smoke_curriculum.py --robot-root /opt/robots`
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: RuntimeProfile
+metadata:
+  name: spot-curriculum-trainer
+  namespace: apps
+spec:
+  runtime:
+    type: pytorch
+    mode: batchJob
+  image: ghcr.io/olivecasazza/spot-rapier-trainer:curriculum-v1@sha256:57bb396cacdf6ba584e8fce5fabb9ff2bbf66a174caf88bdbadae2fe56de5054
+  imagePullSecrets:
+    - name: ghcr-pull
+  # Bundle + mode come from the template's per-stage command override; this
+  # profile carries only what every stage shares.
+  command:
+    - python3
+    - train_curriculum.py
+  env:
+    - name: GCS_BUCKET
+      value: nixlab-spot-reruns
+    - name: GOOGLE_APPLICATION_CREDENTIALS
+      value: /var/run/secrets/gcs/key.json
+    - name: SPOT_ROBOT_ROOT
+      value: /opt/robots
+  policy:
+    # Stages differ only by argv, so the template must be allowed to set it.
+    allowCommandOverride: true
+    allowImageOverride: false
+    allowSecretRefs: false
+  resources:
+    requests:
+      cpu: "8"
+      memory: 16Gi
+      nvidia.com/gpu: "1"
+    limits:
+      memory: 24Gi
+      nvidia.com/gpu: "1"
+  scheduling:
+    # REQUIRED for any GPU profile: without a queueName the Job bypasses Kueue
+    # quota and can strand physical capacity. athena-gpu is the modern pool
+    # (hp01-03 RTX 4000, seir RTX 5000); the image is CUDA 12.1 so it must NOT
+    # land on tyan01's Kepler cards.
+    queueName: athena-gpu
+    runtimeClassName: nvidia
+    nodeSelector:
+      nvidia.com/gpu.product: Quadro-RTX-4000
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+  secretMounts:
+    - secretName: spot-training-sa
+      mountPath: /var/run/secrets/gcs/key.json
+      subPath: key.json
+  storage:
+    workspaceClaimName: athena-workspace
+    workspaceMountPath: /workspace
+    createWorkspaceClaim: false
+    workspaceAccessModes:
+      - ReadWriteMany
+    workspaceStorageClassName: nfs
+    workspaceSize: 20Gi
+  metricsEndpoint:
+    enabled: true
+    port: 9108
+    path: /metrics
+    prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+---
+# Stage 1 — STANCE (with optional sky-rig). Hold yourself upright.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: spot-curriculum-stance
+  namespace: apps
+spec:
+  runtimeProfileRef: spot-curriculum-trainer
+  source:
+    git:
+      url: https://github.com/olivecasazza/skypilot-env
+      ref: feat/spot-ground-speed-reward
+  researchObjective: >-
+    Stage 1 of the multi-robot curriculum. Can each morphology (spider, snake,
+    humanoid, spot) learn to hold a stable upright stance, and does an elastic
+    sky-rig that carries part of its body weight get a morphology there faster
+    than unassisted training? Selection is on eval_upright_frac measured with
+    the rig DISARMED, so tethered standing earns nothing. Watch
+    eval_rig_assist_frac (must be 0 on eval) and eval_fall_rate; reward_mean is
+    a diagnostic only, since stance reward is trivially farmed by a policy that
+    freezes in a low crouch.
+  objective:
+    metric: eval_upright_frac
+    goal: maximize
+  metrics:
+    parser:
+      type: file
+      path: metrics.json
+  parameterSchema:
+    rig_carry:
+      type: number
+      default: 0.5
+      description: >-
+        Fraction of body weight the elastic sky-rig carries at arm time, as a
+        constant upward force. 0 trains unassisted. Annealed toward 0 inside the
+        env once an episode clears the upright competence gate, so this is the
+        STARTING support level, not a permanent crutch.
+    terrain_difficulty:
+      type: number
+      default: 0.0
+      description: Terrain roughness 0..1, passed to the shared terrain registry.
+    max_time:
+      type: number
+      default: 8.0
+      description: Episode length in seconds.
+    total_timesteps:
+      type: number
+      default: 3000000
+      description: Training budget in env steps.
+  dashboard:
+    title: Curriculum Stage 1 — Stance (all morphologies)
+    metrics:
+      eval_upright_frac:
+        label: Upright fraction, untethered eval (objective)
+        unit: fraction
+        goal: maximize
+      eval_upright_cos_mean:
+        label: Mean upright cosine, untethered eval
+        unit: cosine
+        goal: maximize
+      eval_fall_rate:
+        label: Fall rate, untethered eval
+        unit: fraction
+        goal: minimize
+      eval_rig_assist_frac:
+        label: Rig assist during eval (MUST be 0 — audit)
+        unit: fraction
+        goal: minimize
+      rig_carry_requested:
+        label: Rig support requested at training time
+        unit: fraction
+      eval_body_height_mean:
+        label: Mean body height, untethered eval
+        unit: m
+      reward_mean:
+        label: Episode reward mean (diagnostic — farmable)
+        unit: score
+---
+# Stage 2 — LOCOMOTION. Track a commanded velocity without falling.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: spot-curriculum-locomotion
+  namespace: apps
+spec:
+  runtimeProfileRef: spot-curriculum-trainer
+  source:
+    git:
+      url: https://github.com/olivecasazza/skypilot-env
+      ref: feat/spot-ground-speed-reward
+  researchObjective: >-
+    Stage 2 of the multi-robot curriculum, seeded from the stage-1 stance
+    winner (seedExperimentRef warm-starts the weights). Can a morphology that
+    can stand learn to track a commanded planar velocity and yaw rate across
+    terrain types? Selection is on eval_track_score (integrated
+    exp(-err^2/sigma^2) over the episode, so it rewards tracking quality AND
+    survival) rather than raw speed, which a diving policy maximizes.
+    eval_fwd_speed_mps is the realized speed along the command for context.
+  objective:
+    metric: eval_track_score
+    goal: maximize
+  metrics:
+    parser:
+      type: file
+      path: metrics.json
+  parameterSchema:
+    terrain_difficulty:
+      type: number
+      default: 0.3
+      description: Terrain roughness 0..1.
+    max_time:
+      type: number
+      default: 12.0
+      description: Episode length in seconds.
+    total_timesteps:
+      type: number
+      default: 5000000
+      description: Training budget in env steps.
+    rig_carry:
+      type: number
+      default: 0.0
+      description: >-
+        Normally 0 by this stage — a robot that still needs the tether to walk
+        has not finished stage 1. Exposed so a hard morphology (snake) can be
+        given residual support deliberately rather than silently.
+  dashboard:
+    title: Curriculum Stage 2 — Locomotion (all morphologies)
+    metrics:
+      eval_track_score:
+        label: Command-tracking score, untethered eval (objective)
+        unit: score
+        goal: maximize
+      eval_fwd_speed_mps:
+        label: Realized speed along command
+        unit: m/s
+        goal: maximize
+      eval_fall_rate:
+        label: Fall rate, untethered eval
+        unit: fraction
+        goal: minimize
+      eval_upright_frac:
+        label: Upright fraction (regression guard vs stage 1)
+        unit: fraction
+        goal: maximize
+      eval_rig_assist_frac:
+        label: Rig assist during eval (MUST be 0 — audit)
+        unit: fraction
+        goal: minimize
+---
+# Stage 3 — FORAGE. Seek and collect energy while staying upright.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: spot-curriculum-forage
+  namespace: apps
+spec:
+  runtimeProfileRef: spot-curriculum-trainer
+  source:
+    git:
+      url: https://github.com/olivecasazza/skypilot-env
+      ref: feat/spot-ground-speed-reward
+  researchObjective: >-
+    Stage 3 of the multi-robot curriculum, seeded from the stage-2 locomotion
+    winner. Can a morphology that can walk learn to SEEK — navigate to and
+    collect battery waypoints on foraging terrain? This is the last
+    single-agent stage and the direct precursor to the arena, where the same
+    seeking behavior becomes pursuit (hunt) and its inverse becomes evasion.
+    Selection is on eval_collected (batteries per episode).
+  objective:
+    metric: eval_collected
+    goal: maximize
+  metrics:
+    parser:
+      type: file
+      path: metrics.json
+  parameterSchema:
+    max_time:
+      type: number
+      default: 20.0
+      description: Episode length in seconds — seeking needs a longer horizon.
+    total_timesteps:
+      type: number
+      default: 5000000
+      description: Training budget in env steps.
+    terrain_difficulty:
+      type: number
+      default: 0.0
+      description: >-
+        Foraging terrain is flat ground plus batteries; difficulty is accepted
+        for schema uniformity across stages but has little effect here.
+  dashboard:
+    title: Curriculum Stage 3 — Forage / Seek (all morphologies)
+    metrics:
+      eval_collected:
+        label: Batteries collected per episode (objective)
+        unit: count
+        goal: maximize
+      eval_fall_rate:
+        label: Fall rate, untethered eval
+        unit: fraction
+        goal: minimize
+      eval_upright_frac:
+        label: Upright fraction (regression guard)
+        unit: fraction
+        goal: maximize
+      eval_episode_duration_s:
+        label: Episode duration, untethered eval
+        unit: s
+      eval_rig_assist_frac:
+        label: Rig assist during eval (MUST be 0 — audit)
+        unit: fraction
+        goal: minimize
