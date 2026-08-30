@@ -32,7 +32,7 @@ metadata:
 spec:
   # Identical digest to spot-curriculum-trainer. A different image would make
   # the throughput comparison meaningless.
-  image: ghcr.io/olivecasazza/spot-rapier-trainer:curriculum-v4@sha256:1fcc5bc872dcbd164f66ee860d7dfb8e983f17640ecd96adff33c49139fb0f19
+  image: ghcr.io/olivecasazza/spot-rapier-trainer:curriculum-v5@sha256:8e985e18ee41c1686b63bd512d0bc7f15d9b8c2fe3753e2f55a3e1242a1f43f5
   imagePullSecrets:
     - name: ghcr-pull
   command: ["python3", "train_curriculum.py"]

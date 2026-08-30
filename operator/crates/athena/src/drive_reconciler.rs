@@ -429,6 +429,33 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
         });
     }
 
+    // Structural proposals the controller CANNOT apply — harness, rigging or
+    // sim-design changes. Under `Auto` these are recorded and the loop keeps
+    // researching, which is what stops a single unaddressed note from halting
+    // the fleet. The risk is the opposite failure, and it is not theoretical:
+    // this drive ran 8+ experiments across 4 campaigns that COULD NOT succeed
+    // while the real blocker (a destructive action frame) sat recorded and
+    // unread. So the backlog is surfaced loudly rather than left to whoever
+    // thinks to page through status.proposals.
+    let pending_structural: Vec<&ProposalRecord> = status
+        .proposals
+        .iter()
+        .filter(|p| p.decision == ProposalDecision::AwaitingApproval)
+        .collect();
+    if !pending_structural.is_empty() {
+        let newest = pending_structural[pending_structural.len() - 1];
+        conditions.push(cond(
+            "StructuralProposalPending",
+            ConditionStatus::True,
+            "AwaitingHuman",
+            &format!(
+                "{} structural proposal(s) recorded and unaddressed; newest {}: {}",
+                pending_structural.len(),
+                newest.id,
+                newest.summary.chars().take(160).collect::<String>()
+            ),
+        ));
+    }
     status.conditions = conditions;
     crate::metrics::DRIVE_PHASE
         .with_label_values(&[&ns, &spec.domain, &phase_label(&final_phase)])

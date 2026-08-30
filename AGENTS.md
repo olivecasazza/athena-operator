@@ -41,9 +41,20 @@ The CRDs are not just execution plumbing; they are the project's memory. A steer
 - Record negative results, refuted hypotheses, and footguns explicitly. A recorded failure is the highest-value entry in the system.
 - Search prior art before running anything: existing campaigns, reports, and experiment hypotheses for the same robot/stage.
 
+## Research Docs Corpus
+
+Curated reference knowledge — appraisals, surveys, feasibility and design studies — lives in `docs/research/<topic>/`: one directory per topic, `index.md` as the entry point linking focused per-subtopic files.
+
+- Single canonical copy. Before writing, search `docs/research/` for the topic; update it in place. Never fork a near-duplicate topic or a second copy elsewhere.
+- Never commit standalone NOTES/PLAN/REVIEW/FINAL_REPORT-style files anywhere in the tree. The pre-corpus `docs/plans/` and `docs/reviews/` sprawl was purged twice; review conclusions go into the topic they reviewed, or into a `ResearchReport`.
+- Cross-reference other topics with relative links; never copy content between files.
+- Keep `Last reviewed:` current in `index.md`; delete superseded text rather than appending contradictions.
+- Boundary: measurements, outcomes, and conclusions from runs belong to CRDs (`Experiment`, `ResearchReport`) per Research Memory. `docs/research/` holds reference knowledge that informs specs and hypotheses, not results.
+
 ## Project Shape
 
 - `docs/openspec.md` is the build spec for Athena architecture, CRD/API shape, benchmark behavior, observability, and rollout order.
+- `docs/research/` is the curated research corpus (see Research Docs Corpus).
 - `README.md` provides overview and usage context.
 - `operator/` contains the Rust kube-rs operator and CRD API crates.
 - `operator/crates/athena-console/` contains the Rust/Iced console for watching and comparing Athena resources through local kubeconfig.
