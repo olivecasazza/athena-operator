@@ -70,6 +70,10 @@ const MAX_PROPOSAL_RECORDS: usize = 10;
 /// history is compressed to one-line summaries to bound prompt size.
 const PROMPT_DETAIL_CAMPAIGNS: usize = 3;
 
+/// Prior reports summarized into the proposer prompt. Small on purpose: this is
+/// the loop's working memory, not its archive, and footgun text is verbose.
+const PROMPT_MEMORY_REPORTS: usize = 6;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("kube error: {0}")]
@@ -141,6 +145,25 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
             status.folded_campaigns.drain(0..excess);
         }
         status.campaigns_completed = status.campaigns_completed.saturating_add(1);
+        // Write the campaign up while folding it. The fold is the moment the
+        // campaign's outcome becomes final, and it happens exactly once per
+        // campaign (guarded by the folded ledger), so this is the natural
+        // authoring point.
+        //
+        // A failure here must never block the fold: the drive's job is to keep
+        // researching, and a missing write-up is a gap in the record, not a
+        // reason to stall the loop. It is logged and left for the next pass —
+        // authoring is create-if-absent, so a later retry still lands.
+        match author_report(&drive, &ctx, &ns, c).await {
+            Ok(true) => info!(drive = %name, campaign = %c.name_any(), "authored research report"),
+            Ok(false) => {}
+            Err(e) => warn!(
+                drive = %name,
+                campaign = %c.name_any(),
+                error = %e,
+                "research report authoring failed; campaign still folded"
+            ),
+        }
         info!(
             drive = %name,
             campaign = %c.name_any(),
@@ -567,107 +590,20 @@ pub(crate) fn evaluate_promotion(
     Some(next)
 }
 
-/// Call the LLM proposer, validate its actions, create the campaigns.
-/// Returns the created branches plus the proposal record for the ring.
-async fn propose_and_create(
-    drive: &ResearchDrive,
+/// One OpenAI-compatible chat completion against the drive's proposer, returning
+/// the assistant text with markdown fences stripped.
+///
+/// Extracted so the drive's TWO uses share one transport: proposing the next
+/// campaign, and writing up a finished one. They must agree on auth, SSE
+/// folding and fence handling — a second hand-rolled copy is how the write-up
+/// path silently rots while the proposing path is exercised every reconcile.
+async fn chat_completion(
+    spec: &athena_api::research_drive::ResearchDriveSpec,
     ctx: &Arc<Context>,
     ns: &str,
-    name: &str,
-    owned: &[ResearchCampaign],
-    status: &ResearchDriveStatus,
-) -> Result<(Vec<BranchRef>, ProposalRecord), Error> {
-    let spec = &drive.spec;
-    let proposal_id = format!(
-        "proposal-{}",
-        status.proposals.len() + 1 + status.campaigns_completed as usize
-    );
-
-    // ---- Build the context the proposer reasons over. ----
-    let experiments: Api<Experiment> = Api::namespaced(ctx.client.clone(), ns);
-    let mut campaign_summaries: Vec<Value> = Vec::new();
-    let detail_from = owned.len().saturating_sub(PROMPT_DETAIL_CAMPAIGNS);
-    for (i, c) in owned.iter().enumerate() {
-        let cs = c.status.clone().unwrap_or_default();
-        let mut summary = json!({
-            "campaign": c.name_any(),
-            "templateRef": c.spec.template_ref,
-            "phase": cs.phase,
-            "bestObjective": cs.best_objective,
-            "incumbentRemeasured": cs.incumbent_remeasured,
-            "seedNoiseSigma": cs.seed_noise_sigma,
-            "totalExperiments": cs.total_experiments,
-            "succeededExperiments": cs.succeeded_experiments,
-            "failedExperiments": cs.failed_experiments,
-        });
-        // Detail only the most recent campaigns: full experiment-level
-        // hypotheses/decisions. Older ones stay one-line (bounded prompt).
-        if i >= detail_from {
-            let lp = ListParams::default()
-                .labels(&format!("athena.nixlab.io/campaign={}", c.name_any()));
-            if let Ok(exps) = experiments.list(&lp).await {
-                let details: Vec<Value> = exps
-                    .items
-                    .iter()
-                    .map(|e| {
-                        json!({
-                            "name": e.name_any(),
-                            "phase": e.status.as_ref().map(|s| format!("{:?}", s.phase)),
-                            "decision": e.status.as_ref().and_then(|s| s.decision.clone()),
-                            "hypothesis": e.spec.hypothesis,
-                            "parameters": e.spec.parameters,
-                        })
-                    })
-                    .collect();
-                summary["experiments"] = json!(details);
-            }
-        }
-        campaign_summaries.push(summary);
-    }
-
-    let context = json!({
-        "domain": spec.domain,
-        "allowedTemplates": allowed_templates(drive),
-        "curriculumStage": status
-            .curriculum
-            .as_ref()
-            .and_then(|c| c.current_stage.clone()),
-        "driveBest": {
-            "objective": status.best_objective,
-            "experiment": status.best_experiment_ref,
-            "templateRef": status.best_template_ref,
-        },
-        "stagnationCounter": status.stagnation_counter,
-        "campaignsCompleted": status.campaigns_completed,
-        "inFlightBranches": status.current_campaigns.iter().map(|b| json!({
-            "branch": b.name, "campaign": b.campaign, "templateRef": b.template_ref,
-        })).collect::<Vec<_>>(),
-        "freeBranchSlots": spec.limits.max_active_branches.saturating_sub(status.current_campaigns.len() as u32),
-        "recentProposals": status.proposals.iter().map(|p| json!({
-            "id": p.id, "summary": p.summary, "decision": format!("{:?}", p.decision),
-        })).collect::<Vec<_>>(),
-        "campaigns": campaign_summaries,
-    });
-
-    // ---- Call the proposer (OpenAI-compatible chat completions). ----
-    let system = "You are the research proposer for an autonomous RL platform. \
-        Given campaign results (hypotheses, decisions, objectives, seed-noise sigma), \
-        propose the next experiment campaign(s). Reply with STRICT JSON only: \
-        {\"summary\": string, \"actions\": [ ... ]}. Each action is one of: \
-        {\"type\":\"fork\",\"branch\":string,\"templateRef\":string,\"strategy\":\"pbt\"|\"heuristic\",\
-        \"budget\":{\"maxExperiments\":int,\"maxDuration\":string},\"seedExperimentRef\":string|null,\
-        \"hypothesis\":string} — start a new campaign branch; \
-        {\"type\":\"consolidate\", ...same fields...} — like fork but the branch MERGES prior \
-        branches (set seedExperimentRef to the winning experiment to carry knowledge); \
-        {\"type\":\"structural\",\"title\":string,\"rationale\":string} — a harness/rigging/\
-        sim-design change the controller cannot apply; it is recorded for human review. \
-        Rules: templateRef MUST be one of allowedTemplates. Do NOT duplicate a branch that is \
-        already in flight (see inFlightBranches) — propose only for freeBranchSlots. Prefer \
-        consolidate when a branch's incumbent clearly won; prefer fork when theories diverge. \
-        seedExperimentRef must be an experiment NAME from the context, or null.";
-    let user =
-        serde_json::to_string_pretty(&context).map_err(|e| Error::ProposerOutput(e.to_string()))?;
-
+    system: &str,
+    user: &str,
+) -> Result<String, Error> {
     let timeout = Duration::from_secs(spec.proposer.timeout_seconds.unwrap_or(120).max(5) as u64);
     // NOTE: reqwest is built without the `json` feature — the body is
     // serialized manually. rustls-tls IS enabled so the proposer endpoint may
@@ -759,14 +695,306 @@ async fn propose_and_create(
         .ok_or_else(|| Error::ProposerOutput("no choices[0].message.content".into()))?;
 
     // Tolerate markdown fences around the JSON.
-    let cleaned = content
+    Ok(content
         .trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
-        .trim();
+        .trim()
+        .to_string())
+}
+
+/// Prior findings this drive has already published, newest first, as compact
+/// context for the proposer.
+///
+/// Without this the loop is amnesiac: it re-proposes campaigns down avenues a
+/// previous report already recorded as dead ends, and the Footgun sections
+/// exist for humans only. Only `title` and `Footguns` are lifted — the whole
+/// dossier would swamp the prompt, and footguns are the part that changes what
+/// to try next.
+async fn recent_findings(ctx: &Arc<Context>, ns: &str, limit: usize) -> Vec<Value> {
+    let api: Api<athena_api::research_report::ResearchReport> =
+        Api::namespaced(ctx.client.clone(), ns);
+    let Ok(list) = api.list(&ListParams::default()).await else {
+        // Memory is an enhancement to the prompt, never a precondition for
+        // proposing: a read failure must not stall the research loop.
+        return Vec::new();
+    };
+    let mut items = list.items;
+    items.sort_by(|a, b| {
+        b.metadata
+            .creation_timestamp
+            .cmp(&a.metadata.creation_timestamp)
+    });
+    items
+        .iter()
+        .take(limit)
+        .map(|r| {
+            json!({
+                "campaign": r.spec.campaign_ref,
+                "title": r.spec.title,
+                "footguns": r.spec.sections.get("Footguns"),
+            })
+        })
+        .collect()
+}
+
+/// Author a `ResearchReport` for a campaign the drive just folded.
+///
+/// This is the half of the loop that was missing. `report_reconciler` assembles
+/// a dossier from a report's spec, but nothing ever CREATED a report, so the
+/// narrative record — hypothesis, analysis, conclusions, footguns — only
+/// existed when a human hand-wrote the spec. An autonomous platform whose
+/// memory depends on someone remembering to write it down does not have
+/// memory.
+///
+/// Create-if-absent, never update: once the object exists, its spec is
+/// scientist-authored curation (see `report_reconciler`) and the controller
+/// must not overwrite a human's edits with a fresh generation.
+async fn author_report(
+    drive: &ResearchDrive,
+    ctx: &Arc<Context>,
+    ns: &str,
+    campaign: &ResearchCampaign,
+) -> Result<bool, Error> {
+    let name = dns_name(&campaign.name_any());
+    let api: Api<athena_api::research_report::ResearchReport> =
+        Api::namespaced(ctx.client.clone(), ns);
+    if api.get_opt(&name).await?.is_some() {
+        return Ok(false);
+    }
+
+    // Every experiment's hypothesis and measured metrics: the raw material a
+    // write-up needs. Sourced from controller-written status only — a report
+    // must never restate a number the workload claimed about itself.
+    //
+    // Filtered on spec.campaignRef rather than a label: controller-created
+    // experiments carry the campaign label, but hand-authored ones need not,
+    // and a write-up that silently omits the human-added arms of a campaign is
+    // worse than none.
+    let exps: Api<Experiment> = Api::namespaced(ctx.client.clone(), ns);
+    let runs: Vec<Value> = exps
+        .list(&ListParams::default())
+        .await?
+        .items
+        .iter()
+        .filter(|e| e.spec.campaign_ref == campaign.name_any())
+        .map(|e| {
+            let st = e.status.clone().unwrap_or_default();
+            json!({
+                "experiment": e.name_any(),
+                "hypothesis": e.spec.hypothesis,
+                "parameters": e.spec.parameters,
+                "phase": st.phase,
+                "metrics": st.metrics,
+            })
+        })
+        .collect();
+    let cs = campaign.status.clone().unwrap_or_default();
+    let context = json!({
+        "campaign": campaign.name_any(),
+        "templateRef": campaign.spec.template_ref,
+        "bestObjective": cs.best_objective,
+        "incumbentRemeasured": cs.incumbent_remeasured,
+        "bestExperiment": cs.best_experiment,
+        "experiments": runs,
+        "priorFindings": recent_findings(ctx, ns, PROMPT_MEMORY_REPORTS).await,
+    });
+
+    let system = "You are the research scientist for an autonomous RL platform, writing up a \
+        FINISHED campaign so a future agent can reuse it. Reply with STRICT JSON only: \
+        {\"title\": string, \"sections\": {\"Findings\": string, \"Method\": string, \
+        \"Footguns\": string, \"Limitations\": string}, \"seededHypotheses\": [string]}. \
+        Rules: cite real numbers inline from the supplied metrics — a claim without a number \
+        is not a finding. Record NEGATIVE results and refuted hypotheses explicitly; they are \
+        the highest-value content, because they stop the next agent repeating the work. \
+        Footguns must name a symptom AND the tell that identifies it, so it is recognizable \
+        next time. Limitations must state what this campaign does NOT establish. Invent \
+        nothing: if a metric is absent, say so rather than estimating it. seededHypotheses \
+        are testable claims, not tasks.";
+    let user =
+        serde_json::to_string_pretty(&context).map_err(|e| Error::ProposerOutput(e.to_string()))?;
+    let cleaned = chat_completion(&drive.spec, ctx, ns, system, &user).await?;
+    let out: Value =
+        serde_json::from_str(&cleaned).map_err(|e| Error::ProposerOutput(e.to_string()))?;
+
+    let mut sections: std::collections::BTreeMap<String, String> = Default::default();
+    if let Some(map) = out.get("sections").and_then(Value::as_object) {
+        for (k, v) in map {
+            if let Some(s) = v.as_str() {
+                sections.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    // A write-up with no sections is not a record; refuse rather than create an
+    // empty object that looks like memory and holds none.
+    if sections.is_empty() {
+        return Err(Error::ProposerOutput(
+            "report author returned no sections".into(),
+        ));
+    }
+    let seeded: Vec<String> = out
+        .get("seededHypotheses")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let report = athena_api::research_report::ResearchReport {
+        metadata: ObjectMeta {
+            name: Some(name),
+            namespace: Some(ns.to_string()),
+            labels: Some(std::collections::BTreeMap::from([
+                (DRIVE_LABEL.to_string(), drive.name_any()),
+                ("athena.nixlab.io/campaign".to_string(), campaign.name_any()),
+            ])),
+            // Owned by the campaign it describes: the report cannot assemble
+            // without resolving `campaignRef`, so outliving its subject would
+            // leave a permanently broken record rather than durable memory.
+            owner_references: Some(vec![OwnerReference {
+                api_version: "research.nixlab.io/v1alpha1".into(),
+                kind: "ResearchCampaign".into(),
+                name: campaign.name_any(),
+                uid: campaign.uid().unwrap_or_default(),
+                controller: Some(false),
+                block_owner_deletion: Some(false),
+            }]),
+            ..Default::default()
+        },
+        spec: athena_api::research_report::ResearchReportSpec {
+            campaign_ref: campaign.name_any(),
+            title: out.get("title").and_then(Value::as_str).map(str::to_string),
+            sections,
+            seeded_hypotheses: seeded,
+            // Curation is a human act: the controller composes the whole
+            // campaign and leaves pruning, scoping and citations to whoever
+            // edits the spec afterwards.
+            included_experiments: Vec::new(),
+            excluded_experiments: Vec::new(),
+            about: None,
+            references: Vec::new(),
+        },
+        status: None,
+    };
+    api.create(&PostParams::default(), &report).await?;
+    Ok(true)
+}
+
+/// Call the LLM proposer, validate its actions, create the campaigns.
+/// Returns the created branches plus the proposal record for the ring.
+async fn propose_and_create(
+    drive: &ResearchDrive,
+    ctx: &Arc<Context>,
+    ns: &str,
+    name: &str,
+    owned: &[ResearchCampaign],
+    status: &ResearchDriveStatus,
+) -> Result<(Vec<BranchRef>, ProposalRecord), Error> {
+    let spec = &drive.spec;
+    let proposal_id = format!(
+        "proposal-{}",
+        status.proposals.len() + 1 + status.campaigns_completed as usize
+    );
+
+    // ---- Build the context the proposer reasons over. ----
+    let experiments: Api<Experiment> = Api::namespaced(ctx.client.clone(), ns);
+    let mut campaign_summaries: Vec<Value> = Vec::new();
+    let detail_from = owned.len().saturating_sub(PROMPT_DETAIL_CAMPAIGNS);
+    for (i, c) in owned.iter().enumerate() {
+        let cs = c.status.clone().unwrap_or_default();
+        let mut summary = json!({
+            "campaign": c.name_any(),
+            "templateRef": c.spec.template_ref,
+            "phase": cs.phase,
+            "bestObjective": cs.best_objective,
+            "incumbentRemeasured": cs.incumbent_remeasured,
+            "seedNoiseSigma": cs.seed_noise_sigma,
+            "totalExperiments": cs.total_experiments,
+            "succeededExperiments": cs.succeeded_experiments,
+            "failedExperiments": cs.failed_experiments,
+        });
+        // Detail only the most recent campaigns: full experiment-level
+        // hypotheses/decisions. Older ones stay one-line (bounded prompt).
+        if i >= detail_from {
+            let lp = ListParams::default()
+                .labels(&format!("athena.nixlab.io/campaign={}", c.name_any()));
+            if let Ok(exps) = experiments.list(&lp).await {
+                let details: Vec<Value> = exps
+                    .items
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "name": e.name_any(),
+                            "phase": e.status.as_ref().map(|s| format!("{:?}", s.phase)),
+                            "decision": e.status.as_ref().and_then(|s| s.decision.clone()),
+                            "hypothesis": e.spec.hypothesis,
+                            "parameters": e.spec.parameters,
+                        })
+                    })
+                    .collect();
+                summary["experiments"] = json!(details);
+            }
+        }
+        campaign_summaries.push(summary);
+    }
+
+    let context = json!({
+        "domain": spec.domain,
+        "allowedTemplates": allowed_templates(drive),
+        "curriculumStage": status
+            .curriculum
+            .as_ref()
+            .and_then(|c| c.current_stage.clone()),
+        "driveBest": {
+            "objective": status.best_objective,
+            "experiment": status.best_experiment_ref,
+            "templateRef": status.best_template_ref,
+        },
+        "stagnationCounter": status.stagnation_counter,
+        "campaignsCompleted": status.campaigns_completed,
+        "inFlightBranches": status.current_campaigns.iter().map(|b| json!({
+            "branch": b.name, "campaign": b.campaign, "templateRef": b.template_ref,
+        })).collect::<Vec<_>>(),
+        "freeBranchSlots": spec.limits.max_active_branches.saturating_sub(status.current_campaigns.len() as u32),
+        "recentProposals": status.proposals.iter().map(|p| json!({
+            "id": p.id, "summary": p.summary, "decision": format!("{:?}", p.decision),
+        })).collect::<Vec<_>>(),
+        "campaigns": campaign_summaries,
+        // The loop's own memory. Without this the proposer re-derives dead
+        // ends every cycle: past reports name the avenues already refuted and
+        // the footguns that made them look promising.
+        "priorFindings": recent_findings(ctx, ns, PROMPT_MEMORY_REPORTS).await,
+    });
+
+    // ---- Call the proposer (OpenAI-compatible chat completions). ----
+    let system = "You are the research proposer for an autonomous RL platform. \
+        Given campaign results (hypotheses, decisions, objectives, seed-noise sigma), \
+        propose the next experiment campaign(s). Reply with STRICT JSON only: \
+        {\"summary\": string, \"actions\": [ ... ]}. Each action is one of: \
+        {\"type\":\"fork\",\"branch\":string,\"templateRef\":string,\"strategy\":\"pbt\"|\"heuristic\",\
+        \"budget\":{\"maxExperiments\":int,\"maxDuration\":string},\"seedExperimentRef\":string|null,\
+        \"hypothesis\":string} — start a new campaign branch; \
+        {\"type\":\"consolidate\", ...same fields...} — like fork but the branch MERGES prior \
+        branches (set seedExperimentRef to the winning experiment to carry knowledge); \
+        {\"type\":\"structural\",\"title\":string,\"rationale\":string} — a harness/rigging/\
+        sim-design change the controller cannot apply; it is recorded for human review. \
+        Rules: templateRef MUST be one of allowedTemplates. Do NOT duplicate a branch that is \
+        already in flight (see inFlightBranches) — propose only for freeBranchSlots. Prefer \
+        consolidate when a branch's incumbent clearly won; prefer fork when theories diverge. \
+        seedExperimentRef must be an experiment NAME from the context, or null. \
+        priorFindings holds this drive's OWN published reports: treat their footguns as \
+        established, do not re-propose an avenue a report already refuted, and say which \
+        finding you are building on when one applies.";
+    let user =
+        serde_json::to_string_pretty(&context).map_err(|e| Error::ProposerOutput(e.to_string()))?;
+
+    let cleaned = chat_completion(spec, ctx, ns, system, &user).await?;
     let proposal: Value =
-        serde_json::from_str(cleaned).map_err(|e| Error::ProposerOutput(e.to_string()))?;
+        serde_json::from_str(&cleaned).map_err(|e| Error::ProposerOutput(e.to_string()))?;
 
     // ---- Validate + execute actions. ----
     let summary = proposal
