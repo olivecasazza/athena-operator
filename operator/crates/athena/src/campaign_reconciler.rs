@@ -677,7 +677,7 @@ pub async fn reconcile(
                         idx,
                         params,
                         lineage.describe(),
-                        pbt_checkpoint_policy(seed_exp),
+                        warm_start_policy(seed_exp),
                         Some(lineage),
                     );
                     match experiments.create(&PostParams::default(), &exp).await {
@@ -690,10 +690,22 @@ pub async fn reconcile(
                     if is_pbt {
                         let (params, hypothesis) =
                             pbt_experiment(&template, best_ctx, perturb_factor, idx, salt);
-                        (params, hypothesis, pbt_checkpoint_policy(seed_exp))
+                        (params, hypothesis, warm_start_policy(seed_exp))
                     } else {
                         let (params, hypothesis) = next_experiment(&template, best_ctx, idx, salt);
-                        (params, hypothesis, None)
+                        // Heuristic children inherit WEIGHTS as well as parameters.
+                        // They already record `parentExperimentId` and perturb from
+                        // the best run's parameters, but this branch used to return
+                        // None, so the parentage was bookkeeping only and every
+                        // generation silently cold-started. Measured on
+                        // multi-robot-curriculum-drive-spot-stance-cpu-longtrain:
+                        // three experiments, each 2,002,944 steps, all reporting
+                        // warm_started 0 while carrying a parentExperimentId — 4M
+                        // steps of "curriculum" that were independent random
+                        // restarts. Control slots `continue` above and never reach
+                        // here, so cold baselines stay cold and the sigma
+                        // comparison is unaffected.
+                        (params, hypothesis, warm_start_policy(seed_exp))
                     }
                 };
                 // Dedup only applies when there is a best to perturb from — baselines
@@ -1210,10 +1222,14 @@ fn pbt_experiment(
     (params, hypothesis)
 }
 
-/// Warm-start policy for a PBT child: resume weights from the best succeeded
-/// experiment's latest checkpoint. None when there is no best, no checkpoint
-/// yet, or no usable URI — i.e. a cold start.
-fn pbt_checkpoint_policy(best_exp: Option<&Experiment>) -> Option<CheckpointPolicy> {
+/// Warm-start policy for a generated child: resume weights from the best
+/// succeeded experiment's latest checkpoint. None when there is no best, no
+/// checkpoint yet, or no usable URI — i.e. a genuine cold start.
+///
+/// Used by BOTH strategies. It was PBT-only, which made heuristic campaigns
+/// record `parentExperimentId` while transferring nothing, so a "generation"
+/// was a random restart wearing a lineage label.
+fn warm_start_policy(best_exp: Option<&Experiment>) -> Option<CheckpointPolicy> {
     let uri = best_exp?
         .status
         .as_ref()?
@@ -2561,7 +2577,7 @@ mod tests {
         assert_eq!(params.get("lr"), Some(&json!(0.1)));
         assert_eq!(params.get("parentExperimentId"), Some(&Value::Null));
         assert!(hyp.contains("cold start"), "{hyp}");
-        assert!(pbt_checkpoint_policy(None).is_none());
+        assert!(warm_start_policy(None).is_none());
     }
 
     #[test]
@@ -2590,11 +2606,47 @@ mod tests {
             step: Some(100),
             ..Default::default()
         });
-        let cp = pbt_checkpoint_policy(Some(&best)).expect("best has a checkpoint");
+        let cp = warm_start_policy(Some(&best)).expect("best has a checkpoint");
         assert_eq!(cp.resume_from.as_deref(), Some("s3://ckpt/best/step-100"));
         // No checkpoint yet -> cold start (None).
         let no_ckpt = exp_with("warm", ExperimentPhase::Succeeded, "loss", 0.2);
-        assert!(pbt_checkpoint_policy(Some(&no_ckpt)).is_none());
+        assert!(warm_start_policy(Some(&no_ckpt)).is_none());
+    }
+
+    #[test]
+    fn heuristic_child_warm_starts_from_parent_not_only_pbt() {
+        // Regression: the heuristic branch recorded parentExperimentId but passed
+        // None as the checkpoint policy, so every generation cold-started while
+        // claiming a parent. Observed live as three 2,002,944-step experiments
+        // reporting warm_started 0 with a parentExperimentId set.
+        let t = template_with_default_lr(0.1);
+        let mut best_exp = exp_with("c-000", ExperimentPhase::Succeeded, "loss", 0.1);
+        best_exp.spec.parameters = BTreeMap::from([("lr".to_string(), json!(0.5))]);
+        best_exp.status.as_mut().unwrap().latest_checkpoint = Some(CheckpointRef {
+            uri: "/workspace/runs/c/c-000/checkpoints".into(),
+            ..Default::default()
+        });
+        let campaign = campaign_pbt(None, None);
+
+        let (params, hypothesis) =
+            next_experiment(&t, Some(("c-000", &best_exp.spec.parameters)), 1, 0);
+        // Parentage must be recorded AND weights carried; recording one without
+        // the other is what made the lineage a lie.
+        assert_eq!(
+            params.get("parentExperimentId").and_then(Value::as_str),
+            Some("c-000")
+        );
+        let cp = warm_start_policy(Some(&best_exp));
+        let child = build_experiment(&campaign, "c", "default", 1, params, hypothesis, cp, None);
+        assert_eq!(
+            child
+                .spec
+                .checkpoint_policy
+                .as_ref()
+                .and_then(|p| p.resume_from.as_deref()),
+            Some("/workspace/runs/c/c-000/checkpoints"),
+            "heuristic child must inherit the parent's weights"
+        );
     }
 
     #[test]
@@ -2612,7 +2664,7 @@ mod tests {
 
         let (params, hypothesis) =
             pbt_experiment(&t, Some(("c-000", &best_exp.spec.parameters)), 1.2, 2, 0);
-        let cp = pbt_checkpoint_policy(Some(&best_exp));
+        let cp = warm_start_policy(Some(&best_exp));
         let child = build_experiment(&campaign, "c", "default", 2, params, hypothesis, cp, None);
 
         assert_eq!(
@@ -2630,8 +2682,15 @@ mod tests {
     }
 
     #[test]
-    fn heuristic_child_has_no_checkpoint_policy() {
-        // Requirement 4: the heuristic path is unchanged — children cold-start.
+    fn child_with_no_parent_cold_starts() {
+        // A child with no best to inherit from has nothing to resume, so it must
+        // cold-start. Previously named `heuristic_child_has_no_checkpoint_policy`
+        // and documented as "the heuristic path is unchanged — children
+        // cold-start", which asserted an intent that turned out to be a bug:
+        // heuristic children WITH a parent were also cold-starting. This test
+        // never exercised that case (it passes None for both parent and policy),
+        // so it kept passing while the real invariant was violated. See
+        // `heuristic_child_warm_starts_from_parent_not_only_pbt`.
         let t = template_with_default_lr(0.1);
         let campaign = ResearchCampaign {
             metadata: ObjectMeta {

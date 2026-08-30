@@ -42,6 +42,19 @@ spec:
   budget:
     maxExperiments: 2
     maxDuration: 8h
+  # Self-documenting: this campaign is standalone (no drive owns it), so
+  # without a proposer it would terminate leaving only raw metrics and whatever
+  # a human remembered to write. The operator authors the ResearchReport on
+  # terminal phase instead.
+  proposer:
+    endpoint: http://omniroute.apps.svc.cluster.local:20128/v1
+    model: auto/best-fast
+    apiKeySecretRef:
+      name: omniroute-secrets
+      key: API_KEY_PRIMARY
+    maxTokens: 4096
+    temperature: 0.7
+    timeoutSeconds: 120
   # No canary: the recorded heightfield runs already ARE the treatment arm, so
   # a canary would only re-measure what is known and spend the budget on it.
 ---
