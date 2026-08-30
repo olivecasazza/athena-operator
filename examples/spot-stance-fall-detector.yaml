@@ -113,3 +113,58 @@ spec:
     rig_carry: 0.5
     max_time: 8
     total_timesteps: 400000
+---
+# Arm 3 -- the rig. Added after arms 1 and 2 REFUTED the two hypotheses this
+# campaign started with:
+#
+#   terrain:  spot-stance-flat-control ran on flat ground, where absolute and
+#             terrain-relative height coincide by construction, and still
+#             reported eval_fall_rate 1.00 with eval_upright_cos_mean 0.908 and
+#             eval_episode_duration_s 1.40 of a max_time of 8.0. Terrain is
+#             exonerated.
+#   settle:   measured directly in-sim, _stand_height captured after the 10
+#             settle steps is 0.2077 for spot against a converged rest of
+#             0.2056 (snake 0.0052/-0.0000, spider 0.0639/0.0637), giving a
+#             fall threshold of 0.1246 -- far below where the robot rests. The
+#             10-step window is not truncating the capture. Holding the default
+#             pose with zero action, spot never falls at all.
+#
+# So the env stands fine and the trained policy is what collapses. The
+# remaining asymmetry is the sky-rig: training carries rig_carry of body weight
+# while eval force-disarms it (eval_rig_assist_frac 0.0 in every run). If the
+# policy never weaned, it learned to stand against a support that is absent
+# when scored. Note the trained policy rests at eval_body_height_mean 0.285,
+# ABOVE the 0.2056 default-pose rest -- it extends its legs past the height the
+# reward references, which is what leaning on a tether would look like.
+apiVersion: research.nixlab.io/v1alpha1
+kind: Experiment
+metadata:
+  name: spot-stance-untethered-from-start
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: spot
+    research.nixlab.io/purpose: defect
+spec:
+  campaignRef: spot-stance-fall-detector
+  hypothesis: >-
+    Spot's eval_stance_score of 0.000 is rig dependence, not an inability to
+    stand: the policy trains with rig_carry 0.5 of body weight and is scored
+    with the rig disarmed, so it never learns to support itself. Training with
+    rig_carry 0.0 from the start removes the train/eval mismatch entirely, so
+    eval_fall_rate will drop below 1.00 and eval_episode_duration_s will exceed
+    the 1.40 s seen in every tethered run. If it still falls at ~1.4 s
+    untethered, the rig is exonerated too and the fault is in the stance reward
+    or spot's own dynamics, since a zero-action PD hold provably does not fall.
+  lineage:
+    generation: 0
+    relation: Baseline
+    strategy: heuristic
+  parameters:
+    experimentIteration: 2
+    mode: stance
+    robot: spot
+    terrain: flat
+    terrain_difficulty: 0.0
+    rig_carry: 0.0
+    max_time: 8
+    total_timesteps: 400000
