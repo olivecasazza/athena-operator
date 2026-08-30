@@ -1,0 +1,65 @@
+# v5 verification: can each morphology now LEARN stance, where v4 produced
+# eval_stance_score 0.000 for spot and humanoid across 2M steps?
+#
+# Fresh campaigns, deliberately NOT seeded from anything: v5 changed the action
+# contract (targets are now offsets from the default pose), so every pre-v5
+# checkpoint is meaningless and warm-starting one would poison the result.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: v5-spot-stance
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: spot
+    research.nixlab.io/curriculum-stage: stance
+spec:
+  templateRef: curriculum-spot-stance
+  concurrency: 1
+  strategy:
+    type: heuristic
+  budget:
+    maxExperiments: 2
+    maxDuration: 6h
+  canary:
+    parameters:
+      total_timesteps: 400000
+    maxDuration: 3h
+  proposer:
+    endpoint: http://omniroute.apps.svc.cluster.local:20128/v1
+    model: auto/best-fast
+    apiKeySecretRef:
+      name: omniroute-secrets
+      key: API_KEY_PRIMARY
+    maxTokens: 4096
+    temperature: 0.7
+    timeoutSeconds: 120
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ResearchCampaign
+metadata:
+  name: v5-humanoid-stance
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: humanoid
+    research.nixlab.io/curriculum-stage: stance
+spec:
+  templateRef: curriculum-humanoid-stance
+  concurrency: 1
+  strategy:
+    type: heuristic
+  budget:
+    maxExperiments: 2
+    maxDuration: 6h
+  canary:
+    parameters:
+      total_timesteps: 400000
+    maxDuration: 3h
+  proposer:
+    endpoint: http://omniroute.apps.svc.cluster.local:20128/v1
+    model: auto/best-fast
+    apiKeySecretRef:
+      name: omniroute-secrets
+      key: API_KEY_PRIMARY
+    maxTokens: 4096
+    temperature: 0.7
+    timeoutSeconds: 120

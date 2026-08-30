@@ -751,6 +751,63 @@ Controller rules:
   would need one drive per morphology or a per-line stage field, and are not
   modeled.
 
+
+#### Action frame (contract)
+
+Actions are OFFSETS FROM THE DEFAULT POSE, scaled to a fraction of joint range:
+
+```
+target = defaults + action * action_scale * half_range     # clipped to limits
+```
+
+`action_scale` defaults to 0.10. `action = 0` is therefore the robot's own
+default pose, so a fresh policy starts standing and exploration perturbs a
+viable posture. This matches `env.py`, which has always implemented
+`target = DEFAULT + clamp(action)` per `spot/PHYSICS_CONTRACT.md`.
+
+This is written down because `curriculum_env.py` was added later and silently
+violated it, using `target = centre + action * half_range`. That made
+`action = 0` the centre of joint range — a pose no robot stands in — and
+`action = ±1` sweep every joint to its limit. Spot's default stance needs only
+`mean|a| = 0.094`, so ~90% of the action space was destructive and default-scale
+exploration covered all of it. Steps survived of 400 under `N(0,1)` actions:
+
+| morphology | before | after |
+|---|---|---|
+| spot | 18.3 | 400 |
+| humanoid | 1 | 400 |
+| snake / spider | 400 | 400 |
+
+Five spot campaigns and 4M+ steps produced `eval_stance_score` 0.000; the first
+run on the corrected frame scored 1.000. A zero-action policy earns ~1400 per
+episode, so the trained policy's 43.8 was 30x worse than doing nothing — that
+ratio is the cheapest test for an exploration-scale defect and should be checked
+before any reward is blamed.
+
+The stance reference is likewise NOT clamped. `max(root_height, 1e-3)` replaced
+the reference for morphologies whose root link rests at ground level: the
+humanoid recorded `stand_height` 0.0010, a fall threshold of −0.049, and was
+declared fallen at h = −0.0573 while `upright_cos` was exactly 1.000.
+
+Any change to this contract invalidates every existing checkpoint and must ship
+as a new image generation, never as a patch.
+
+#### Visual verification
+
+Each eval writes `figures/eval_filmstrip.png` — a side-view skeleton filmstrip
+of the same greedy policy the score came from, surfaced through the existing
+`status.artifacts.figuresUri`. Frames are chosen at behaviour extremes (start,
+worst orientation, lowest body, largest lateral drift, final state) rather than
+uniformly, and the chosen step indices are emitted as `film_*` metrics so a
+number points at the panel explaining it.
+
+Scalars answer "how well"; frames answer "what is it actually doing". Both
+defects above were unmistakable visually and invisible scalar-side: humanoid
+scored `upright_frac` 1.000 while its legs folded, and pre-fix spot did not
+topple at all — the frames show it flinging itself airborne, root height rising
+0.221 → 0.419 with no foot near the ground, which `eval_fall_rate 1.0` cannot
+distinguish from falling over.
+
 ### 6.6 Gym environment model: (mode × terrain)
 
 The training gym is factored as a mode crossed with a terrain type, so any

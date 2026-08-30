@@ -149,5 +149,15 @@ spec:
   stagnation:
     window: 4
 
-  structuralChangePolicy: requireApproval
+  # auto: structural proposals are RECORDED but never pause the loop.
+  #
+  # requireApproval was the previous setting and it halted the whole drive on
+  # every structural note, which for an unattended loop is a permanent stall.
+  # The opposite failure is the one that actually cost us: this drive ran 8+
+  # experiments across 4 campaigns that could not succeed while the real
+  # blocker -- a destructive action frame -- sat recorded and unread. Auto is
+  # only safe because the operator now publishes StructuralProposalPending,
+  # naming the count and newest proposal, so the backlog is loud instead of
+  # buried in status.proposals.
+  structuralChangePolicy: auto
   paused: false
