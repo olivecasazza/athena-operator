@@ -805,6 +805,33 @@ pub async fn reconcile(
         .patch_status(&name, &PatchParams::apply(MANAGER), &Patch::Merge(&status))
         .await?;
 
+    // Author this campaign's write-up once it is terminal. Drive-owned
+    // campaigns are written up by the drive when it folds them; this covers
+    // STANDALONE campaigns, which otherwise terminate leaving nothing but raw
+    // metrics and whatever a human remembered to type.
+    //
+    // Keyed on terminal phase plus create-if-absent rather than on a
+    // transition edge, so a campaign that went terminal before this controller
+    // existed still gets written up on its next reconcile, and a retry after a
+    // failed generation still lands.
+    if let Some(proposer) = campaign.spec.proposer.as_ref() {
+        if at_budget || canary_dead {
+            // Re-read: the copy in hand predates the status patch above, and the
+            // write-up must see the terminal numbers it just published.
+            let fresh = campaigns
+                .get(&name)
+                .await
+                .unwrap_or_else(|_| (*campaign).clone());
+            match crate::drive_reconciler::author_report(proposer, None, &ctx, &ns, &fresh).await {
+                Ok(true) => info!(campaign = %name, "authored research report"),
+                Ok(false) => {}
+                // Never fail the reconcile over a write-up: the campaign's
+                // result is already durable in status, and the next pass retries.
+                Err(e) => warn!(campaign = %name, error = %e, "report authoring failed"),
+            }
+        }
+    }
+
     // Poll faster while the loop is active so it advances promptly between runs.
     // A CanaryFailed campaign is as terminal as a completed one.
     Ok(Action::requeue(Duration::from_secs(
@@ -2258,6 +2285,7 @@ mod tests {
                 inference_cluster: None,
                 canary: None,
                 seed_experiment_ref: None,
+                proposer: None,
             },
             status: None,
         }
@@ -2623,6 +2651,7 @@ mod tests {
                 inference_cluster: None,
                 canary: None,
                 seed_experiment_ref: None,
+                proposer: None,
             },
             status: None,
         };
@@ -2651,6 +2680,7 @@ mod tests {
             inference_cluster: None,
             canary,
             seed_experiment_ref: None,
+            proposer: None,
         }
     }
 

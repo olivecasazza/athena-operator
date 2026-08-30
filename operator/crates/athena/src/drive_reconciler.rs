@@ -154,7 +154,7 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
         // researching, and a missing write-up is a gap in the record, not a
         // reason to stall the loop. It is logged and left for the next pass —
         // authoring is create-if-absent, so a later retry still lands.
-        match author_report(&drive, &ctx, &ns, c).await {
+        match author_report(&spec.proposer, Some(&name), &ctx, &ns, c).await {
             Ok(true) => info!(drive = %name, campaign = %c.name_any(), "authored research report"),
             Ok(false) => {}
             Err(e) => warn!(
@@ -597,26 +597,26 @@ pub(crate) fn evaluate_promotion(
 /// campaign, and writing up a finished one. They must agree on auth, SSE
 /// folding and fence handling — a second hand-rolled copy is how the write-up
 /// path silently rots while the proposing path is exercised every reconcile.
-async fn chat_completion(
-    spec: &athena_api::research_drive::ResearchDriveSpec,
+pub(crate) async fn chat_completion(
+    proposer: &athena_api::research_drive::ProposerSpec,
     ctx: &Arc<Context>,
     ns: &str,
     system: &str,
     user: &str,
 ) -> Result<String, Error> {
-    let timeout = Duration::from_secs(spec.proposer.timeout_seconds.unwrap_or(120).max(5) as u64);
+    let timeout = Duration::from_secs(proposer.timeout_seconds.unwrap_or(120).max(5) as u64);
     // NOTE: reqwest is built without the `json` feature — the body is
     // serialized manually. rustls-tls IS enabled so the proposer endpoint may
     // be HTTPS (external OpenAI-compatible providers) or plain HTTP
     // (in-cluster mesh-llm / vLLM Service).
     let payload = json!({
-        "model": spec.proposer.model,
+        "model": proposer.model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "max_tokens": spec.proposer.max_tokens.unwrap_or(4096),
-        "temperature": spec.proposer.temperature.unwrap_or(0.7),
+        "max_tokens": proposer.max_tokens.unwrap_or(4096),
+        "temperature": proposer.temperature.unwrap_or(0.7),
         // Explicit non-streaming request; some gateways ignore it (the SSE
         // folding below covers that), but well-behaved ones honor it.
         "stream": false,
@@ -627,11 +627,11 @@ async fn chat_completion(
         .map_err(|e| Error::Proposer(e.to_string()))?
         .post(format!(
             "{}/chat/completions",
-            spec.proposer.endpoint.trim_end_matches('/')
+            proposer.endpoint.trim_end_matches('/')
         ))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(payload.to_string());
-    if let Some(key_ref) = &spec.proposer.api_key_secret_ref {
+    if let Some(key_ref) = &proposer.api_key_secret_ref {
         let secrets: Api<k8s_openapi::api::core::v1::Secret> =
             Api::namespaced(ctx.client.clone(), ns);
         let secret = secrets.get(&key_ref.name).await?;
@@ -751,8 +751,9 @@ async fn recent_findings(ctx: &Arc<Context>, ns: &str, limit: usize) -> Vec<Valu
 /// Create-if-absent, never update: once the object exists, its spec is
 /// scientist-authored curation (see `report_reconciler`) and the controller
 /// must not overwrite a human's edits with a fresh generation.
-async fn author_report(
-    drive: &ResearchDrive,
+pub(crate) async fn author_report(
+    proposer: &athena_api::research_drive::ProposerSpec,
+    drive_name: Option<&str>,
     ctx: &Arc<Context>,
     ns: &str,
     campaign: &ResearchCampaign,
@@ -814,7 +815,7 @@ async fn author_report(
         are testable claims, not tasks.";
     let user =
         serde_json::to_string_pretty(&context).map_err(|e| Error::ProposerOutput(e.to_string()))?;
-    let cleaned = chat_completion(&drive.spec, ctx, ns, system, &user).await?;
+    let cleaned = chat_completion(proposer, ctx, ns, system, &user).await?;
     let out: Value =
         serde_json::from_str(&cleaned).map_err(|e| Error::ProposerOutput(e.to_string()))?;
 
@@ -848,10 +849,15 @@ async fn author_report(
         metadata: ObjectMeta {
             name: Some(name),
             namespace: Some(ns.to_string()),
-            labels: Some(std::collections::BTreeMap::from([
-                (DRIVE_LABEL.to_string(), drive.name_any()),
-                ("athena.nixlab.io/campaign".to_string(), campaign.name_any()),
-            ])),
+            labels: Some(
+                [
+                    drive_name.map(|d| (DRIVE_LABEL.to_string(), d.to_string())),
+                    Some(("athena.nixlab.io/campaign".to_string(), campaign.name_any())),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+            ),
             // Owned by the campaign it describes: the report cannot assemble
             // without resolving `campaignRef`, so outliving its subject would
             // leave a permanently broken record rather than durable memory.
@@ -992,7 +998,7 @@ async fn propose_and_create(
     let user =
         serde_json::to_string_pretty(&context).map_err(|e| Error::ProposerOutput(e.to_string()))?;
 
-    let cleaned = chat_completion(spec, ctx, ns, system, &user).await?;
+    let cleaned = chat_completion(&spec.proposer, ctx, ns, system, &user).await?;
     let proposal: Value =
         serde_json::from_str(&cleaned).map_err(|e| Error::ProposerOutput(e.to_string()))?;
 
@@ -1246,6 +1252,9 @@ async fn build_campaign(
             inference_cluster: None,
             canary: None,
             seed_experiment_ref: seed,
+            // Deliberately None: the DRIVE writes up the campaigns it owns,
+            // when it folds them. Setting it here would author twice.
+            proposer: None,
         },
         status: None,
     };
@@ -1350,6 +1359,7 @@ mod tests {
                 inference_cluster: None,
                 canary: None,
                 seed_experiment_ref: None,
+                proposer: None,
             },
             status: Some(ResearchCampaignStatus {
                 best_experiment: Some("c-003".into()),

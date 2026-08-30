@@ -28,6 +28,20 @@ pub struct ResearchCampaignSpec {
     #[serde(default)]
     pub strategy: StrategySpec,
 
+    /// LLM endpoint used to AUTHOR this campaign's `ResearchReport` when it
+    /// reaches a terminal phase.
+    ///
+    /// A drive-owned campaign inherits its drive's proposer, so this is for
+    /// STANDALONE campaigns — a one-off investigation, a capacity probe, a bug
+    /// hunt. Without it those campaigns terminate with no write-up at all, and
+    /// their findings survive only if a human remembers to hand-write one,
+    /// which is exactly the failure mode the report system exists to remove.
+    ///
+    /// Absent means no auto-authoring: reports remain creatable by hand, and
+    /// no campaign silently starts calling an LLM because a default appeared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposer: Option<crate::research_drive::ProposerSpec>,
+
     /// Optional BenchmarkSuite to evaluate each succeeded experiment against.
     /// When set, the campaign creates a BenchmarkRun per succeeded experiment
     /// (targetRef = the Experiment) and DEFERS the Keep/Discard decision to the

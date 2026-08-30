@@ -894,6 +894,62 @@
                     "nullable": true,
                     "type": "integer"
                   },
+                  "proposer": {
+                    "description": "LLM endpoint used to AUTHOR this campaign's `ResearchReport` when it reaches a terminal phase.\n\nA drive-owned campaign inherits its drive's proposer, so this is for STANDALONE campaigns — a one-off investigation, a capacity probe, a bug hunt. Without it those campaigns terminate with no write-up at all, and their findings survive only if a human remembers to hand-write one, which is exactly the failure mode the report system exists to remove.\n\nAbsent means no auto-authoring: reports remain creatable by hand, and no campaign silently starts calling an LLM because a default appeared.",
+                    "nullable": true,
+                    "properties": {
+                      "apiKeySecretRef": {
+                        "description": "Optional Secret holding the API key. The key's value is sent as a Bearer token. Omit for unauthenticated in-cluster endpoints.",
+                        "nullable": true,
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "name"
+                        ],
+                        "type": "object"
+                      },
+                      "endpoint": {
+                        "description": "Base URL of an OpenAI-compatible API (e.g. an in-cluster mesh-llm/vLLM Service or an external provider). The controller POSTs to `{endpoint}/chat/completions`.",
+                        "type": "string"
+                      },
+                      "maxTokens": {
+                        "description": "Max completion tokens per proposal call.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "model": {
+                        "description": "Model identifier passed in the request body.",
+                        "type": "string"
+                      },
+                      "temperature": {
+                        "description": "Sampling temperature.",
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
+                      "timeoutSeconds": {
+                        "description": "HTTP timeout for one proposal call.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "endpoint",
+                      "model"
+                    ],
+                    "type": "object"
+                  },
                   "seedExperimentRef": {
                     "description": "Optional namespace-local Experiment to seed the search from. When set and no in-campaign best exists yet, the strategy perturbs from THAT experiment's spec.parameters instead of the template defaults, and (for PBT) warm-starts from its status.latestCheckpoint. This is how cross-campaign knowledge carries: a ResearchDrive consolidation campaign points here at the winning experiment of a prior branch so the new campaign continues from the incumbent rather than cold-starting.",
                     "nullable": true,
