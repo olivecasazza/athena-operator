@@ -790,6 +790,51 @@ pub async fn reconcile(
     } else {
         "Running"
     };
+    // The campaign already watched every experiment this pass, so it — not an
+    // external rule inferring from pod metrics — is what knows whether they are
+    // healthy. Publish the verdict where `kubectl` and the console can read it.
+    //
+    // Minimum finished runs before judging: one early failure in a fresh
+    // campaign is normal (image pull, a bad seed), and a monitor that cries at
+    // the first red pod gets muted, which is worse than no monitor.
+    const MIN_TERMINAL_FOR_HEALTH: u32 = 3;
+    let terminal = succeeded + failed;
+    let health = |reason: &str, ok: bool, message: String| {
+        json!({
+            "type": "ExperimentsHealthy",
+            "status": if ok { "True" } else { "False" },
+            "reason": reason,
+            "message": message,
+            "lastTransitionTime": chrono::Utc::now().to_rfc3339(),
+        })
+    };
+    let experiments_healthy = if canary_dead {
+        health(
+            "CanaryFailed",
+            false,
+            "canary failed; the recipe is vetoed and nothing more is generated".to_string(),
+        )
+    } else if failed > 0 && succeeded == 0 && terminal >= MIN_TERMINAL_FOR_HEALTH {
+        // Every finished run failed. Distinct from a high failure RATE: there is
+        // no evidence the recipe can produce anything, so more budget is waste.
+        health(
+            "AllFailed",
+            false,
+            format!("{failed} experiment(s) finished, none succeeded"),
+        )
+    } else if terminal >= MIN_TERMINAL_FOR_HEALTH && failed * 2 > terminal {
+        health(
+            "HighFailureRate",
+            false,
+            format!("{failed} of {terminal} finished experiment(s) failed"),
+        )
+    } else {
+        health(
+            "Healthy",
+            true,
+            format!("{succeeded} succeeded, {failed} failed, {running} running"),
+        )
+    };
     let mut status = json!({ "status": {
         "runningExperiments": running + new,
         "succeededExperiments": succeeded,
@@ -805,6 +850,7 @@ pub async fn reconcile(
         "phase": phase,
         "observedGeneration": campaign.metadata.generation,
         "controllerVersion": env!("CARGO_PKG_VERSION"),
+        "conditions": [experiments_healthy],
     }});
     // Canary status is only ever written for canary campaigns, so existing CRs
     // are untouched (merge-patch: keys we don't send are left alone).

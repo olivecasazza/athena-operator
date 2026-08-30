@@ -123,8 +123,80 @@ pub static DRIVE_CURRICULUM_TEMPLATE_OBJECTIVE: Lazy<GaugeVec> = Lazy::new(|| {
     gauge
 });
 
+/// 1 for the drive's current lifecycle phase, 0 for the others.
+///
+/// The autopilot's most important failure is not crashing — it is PARKING.
+/// A drive in `awaitingApproval` or `needsHuman` looks healthy by every
+/// liveness measure while doing no research at all, and nothing else in this
+/// system surfaces that. `phase` is a bounded enum, safe as a label.
+pub static DRIVE_PHASE: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "drive_phase",
+        "1 for the ResearchDrive's current phase, 0 for the others",
+    )
+    .namespace("athena");
+    let gauge = GaugeVec::new(opts, &["namespace", "domain", "phase"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
+/// Proposer LLM calls by outcome (`ok` / `error`).
+///
+/// A drive whose proposer endpoint is unreachable cannot start new work, but
+/// keeps reconciling and reports no error anywhere a human looks. Without this
+/// the loop can be dead for hours and still appear nominal.
+pub static DRIVE_PROPOSER_CALLS: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "drive_proposer_calls_total",
+        "Proposer LLM calls by outcome",
+    )
+    .namespace("athena");
+    let gauge = GaugeVec::new(opts, &["namespace", "domain", "outcome"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
+/// ResearchReport authoring attempts by outcome (`created` / `error`).
+///
+/// The platform's memory is written by the loop itself; when authoring fails
+/// the campaign still folds and the research continues, so the ONLY visible
+/// symptom is findings quietly never appearing. That is exactly the kind of
+/// silent degradation a monitor exists for.
+pub static DRIVE_REPORTS_AUTHORED: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "drive_reports_authored_total",
+        "Research report authoring attempts by outcome",
+    )
+    .namespace("athena");
+    let gauge = GaugeVec::new(opts, &["namespace", "outcome"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
+/// Experiments created carrying a parent but NO resume path.
+///
+/// Regression sentinel for a defect that ran undetected across whole
+/// campaigns: children recorded `parentExperimentId` while the checkpoint
+/// policy was left empty, so a "curriculum" was independent cold restarts and
+/// every metric still looked plausible. A nonzero value here means GPU-hours
+/// are being spent on lineage that transfers nothing.
+pub static EXPERIMENT_WARM_START_MISSING: Lazy<GaugeVec> = Lazy::new(|| {
+    let opts = Opts::new(
+        "experiment_warm_start_missing_total",
+        "Experiments created with a parent but no resumeFrom checkpoint",
+    )
+    .namespace("athena");
+    let gauge = GaugeVec::new(opts, &["namespace", "campaign"]).unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
 pub fn init() {
     Lazy::force(&DRIVE_CURRICULUM_STAGE);
+    Lazy::force(&DRIVE_PHASE);
+    Lazy::force(&DRIVE_PROPOSER_CALLS);
+    Lazy::force(&DRIVE_REPORTS_AUTHORED);
+    Lazy::force(&EXPERIMENT_WARM_START_MISSING);
     Lazy::force(&DRIVE_CURRICULUM_TEMPLATE_PASSED);
     Lazy::force(&DRIVE_CURRICULUM_TEMPLATE_OBJECTIVE);
     Lazy::force(&DRIVE_CURRICULUM_STAGE_EXPERIMENTS);

@@ -1001,6 +1001,36 @@
                     "nullable": true,
                     "type": "string"
                   },
+                  "conditions": {
+                    "description": "Controller-observed health of the campaign's experiments.\n\nWatching a campaign's experiments IS the reconciliation loop's job, so the verdict belongs on the campaign rather than being re-derived outside it by an alert rule guessing from pod state. A condition here is queryable with `kubectl`, visible to the console, and carries its reason inline.\n\nBounded: one entry per condition `type`, replaced in place.",
+                    "items": {
+                      "properties": {
+                        "lastTransitionTime": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "message": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "reason": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "status": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "type": {
+                          "nullable": true,
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "nullable": true,
+                    "type": "array"
+                  },
                   "controlRuns": {
                     "default": 0,
                     "description": "Control-slot runs completed so far (the sample behind `seed_noise_sigma`).",

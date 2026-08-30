@@ -155,14 +155,24 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
         // reason to stall the loop. It is logged and left for the next pass —
         // authoring is create-if-absent, so a later retry still lands.
         match author_report(&spec.proposer, Some(&name), &ctx, &ns, c).await {
-            Ok(true) => info!(drive = %name, campaign = %c.name_any(), "authored research report"),
+            Ok(true) => {
+                crate::metrics::DRIVE_REPORTS_AUTHORED
+                    .with_label_values(&[&ns, "created"])
+                    .inc();
+                info!(drive = %name, campaign = %c.name_any(), "authored research report")
+            }
             Ok(false) => {}
-            Err(e) => warn!(
-                drive = %name,
-                campaign = %c.name_any(),
-                error = %e,
-                "research report authoring failed; campaign still folded"
-            ),
+            Err(e) => {
+                crate::metrics::DRIVE_REPORTS_AUTHORED
+                    .with_label_values(&[&ns, "error"])
+                    .inc();
+                warn!(
+                    drive = %name,
+                    campaign = %c.name_any(),
+                    error = %e,
+                    "research report authoring failed; campaign still folded"
+                )
+            }
         }
         info!(
             drive = %name,
@@ -285,6 +295,9 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
     if phase == DrivePhase::Proposing && has_free_slot {
         match propose_and_create(&drive, &ctx, &ns, &name, &owned.items, &status).await {
             Ok((branches, record)) => {
+                crate::metrics::DRIVE_PROPOSER_CALLS
+                    .with_label_values(&[&ns, &spec.domain, "ok"])
+                    .inc();
                 created_this_pass = branches.iter().map(|b| b.campaign.clone()).collect();
                 status.current_campaigns.extend(branches);
                 push_proposal(&mut status, record);
@@ -295,13 +308,26 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
                 // retry with backoff. Only spec/validation bugs (deterministic)
                 // deserve the error surface, and those show up as Rejected
                 // proposals instead.
+                crate::metrics::DRIVE_PROPOSER_CALLS
+                    .with_label_values(&[&ns, &spec.domain, "error"])
+                    .inc();
                 warn!(drive = %name, %e, "proposer call failed; will retry");
-                status.conditions = vec![cond(
-                    "Ready",
-                    ConditionStatus::False,
-                    "ProposerError",
-                    &e.to_string(),
-                )];
+                status.conditions = vec![
+                    cond(
+                        "Ready",
+                        ConditionStatus::False,
+                        "ProposerError",
+                        &e.to_string(),
+                    ),
+                    // The loop cannot start new work without the proposer, so
+                    // this is not "researching" however healthy the pod looks.
+                    cond(
+                        "Progressing",
+                        ConditionStatus::False,
+                        "ProposerUnreachable",
+                        &e.to_string(),
+                    ),
+                ];
                 write_status(&ctx, &ns, &name, &drive, status, DrivePhase::Proposing).await?;
                 return Ok(Action::requeue(Duration::from_secs(120)));
             }
@@ -314,16 +340,99 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
     } else {
         phase.clone()
     };
-    let conditions = match condition {
-        Some(c) => vec![c],
-        None => vec![cond(
+    // The drive's own health, recomputed every pass. A drive that has stopped
+    // doing research is the failure this system is most likely to suffer and
+    // least likely to notice: it keeps reconciling, its pod is Ready, and
+    // nothing is red. These conditions are what make that visible to `kubectl`
+    // and the console without a human reading operator logs.
+    let mut conditions = vec![match &condition {
+        Some(c) => c.clone(),
+        None => cond(
             "Ready",
             ConditionStatus::True,
             "LoopActive",
             "perpetual loop running",
-        )],
-    };
+        ),
+    }];
+
+    // Progressing: is the loop actually researching RIGHT NOW? Parked phases
+    // are legitimate states, not errors — but they must not read as healthy,
+    // because a drive can sit in one indefinitely while GPUs idle.
+    conditions.push(match final_phase {
+        DrivePhase::AwaitingApproval => cond(
+            "Progressing",
+            ConditionStatus::False,
+            "AwaitingApproval",
+            "parked on a structural proposal; no new campaigns until a human decides",
+        ),
+        DrivePhase::NeedsHuman => cond(
+            "Progressing",
+            ConditionStatus::False,
+            "NeedsHuman",
+            "stagnation window exhausted; the drive stopped proposing on purpose",
+        ),
+        DrivePhase::Paused => cond(
+            "Progressing",
+            ConditionStatus::False,
+            "Paused",
+            "spec.paused is set",
+        ),
+        _ if status.current_campaigns.is_empty() => cond(
+            "Progressing",
+            ConditionStatus::False,
+            "NoActiveBranches",
+            "no campaigns in flight",
+        ),
+        _ => cond(
+            "Progressing",
+            ConditionStatus::True,
+            "Researching",
+            &format!("{} branch(es) in flight", status.current_campaigns.len()),
+        ),
+    });
+
+    // MemoryHealthy: derived from OBSERVED state rather than a remembered
+    // flag — a folded campaign with no ResearchReport means a finding was lost,
+    // whatever the reason. Authoring failures are deliberately non-fatal to the
+    // fold, so without this check they are invisible.
+    let reports: Api<athena_api::research_report::ResearchReport> =
+        Api::namespaced(ctx.client.clone(), &ns);
+    if let Ok(existing) = reports.list(&ListParams::default()).await {
+        let have: std::collections::HashSet<String> = existing
+            .items
+            .iter()
+            .map(|r| r.spec.campaign_ref.clone())
+            .collect();
+        let missing: Vec<&String> = status
+            .folded_campaigns
+            .iter()
+            .filter(|c| !have.contains(*c))
+            .collect();
+        conditions.push(if missing.is_empty() {
+            cond(
+                "MemoryHealthy",
+                ConditionStatus::True,
+                "AllCampaignsWritten",
+                "every folded campaign has a research report",
+            )
+        } else {
+            cond(
+                "MemoryHealthy",
+                ConditionStatus::False,
+                "ReportsMissing",
+                &format!(
+                    "{} folded campaign(s) have no research report, e.g. {}",
+                    missing.len(),
+                    missing[0]
+                ),
+            )
+        });
+    }
+
     status.conditions = conditions;
+    crate::metrics::DRIVE_PHASE
+        .with_label_values(&[&ns, &spec.domain, &phase_label(&final_phase)])
+        .set(1.0);
     crate::metrics::DRIVE_CAMPAIGNS_TOTAL
         .with_label_values(&[&ns, &spec.domain, &phase_label(&final_phase)])
         .set(status.campaigns_completed as f64);

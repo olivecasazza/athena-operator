@@ -332,4 +332,15 @@ pub struct ResearchCampaignStatus {
     /// Canary gate state: "pending" | "running" | "passed" | "failed".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canary_state: Option<String>,
+    /// Controller-observed health of the campaign's experiments.
+    ///
+    /// Watching a campaign's experiments IS the reconciliation loop's job, so
+    /// the verdict belongs on the campaign rather than being re-derived
+    /// outside it by an alert rule guessing from pod state. A condition here
+    /// is queryable with `kubectl`, visible to the console, and carries its
+    /// reason inline.
+    ///
+    /// Bounded: one entry per condition `type`, replaced in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Vec<crate::experiment::ExperimentCondition>>,
 }
