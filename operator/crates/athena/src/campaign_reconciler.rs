@@ -199,9 +199,47 @@ pub async fn reconcile(
     let objective = &template.spec.objective;
 
     // 2. List this campaign's experiments and partition by phase.
+    //
+    // Membership is declared by `spec.campaignRef`; the label is only a fast
+    // selector the controller stamps on what it creates. An Experiment written
+    // by a human or another tool carries the ref but not the label, so a
+    // label-only query silently under-counts: observed live as a campaign
+    // reporting "0 succeeded, 1 failed" while three hand-authored arms were
+    // running, succeeding and failing beside it — and the health condition
+    // derived from those counts was therefore reporting on a subset.
+    //
+    // ADOPT rather than merely tolerate: stamp the label on anything that
+    // declares this campaign, so every downstream selector, the console, and
+    // GC all agree with the API-declared relationship.
     let experiments: Api<Experiment> = Api::namespaced(ctx.client.clone(), &ns);
-    let lp = ListParams::default().labels(&format!("{CAMPAIGN_LABEL}={name}"));
-    let exps = experiments.list(&lp).await?;
+    let mut exps = experiments
+        .list(&ListParams::default().labels(&format!("{CAMPAIGN_LABEL}={name}")))
+        .await?;
+    {
+        let known: std::collections::HashSet<String> =
+            exps.items.iter().map(|e| e.name_any()).collect();
+        let orphans: Vec<Experiment> = experiments
+            .list(&ListParams::default())
+            .await?
+            .items
+            .into_iter()
+            .filter(|e| e.spec.campaign_ref == name && !known.contains(&e.name_any()))
+            .collect();
+        for o in orphans {
+            let on = o.name_any();
+            let patch = json!({ "metadata": { "labels": { CAMPAIGN_LABEL: name } } });
+            match experiments
+                .patch(&on, &PatchParams::apply(MANAGER), &Patch::Merge(&patch))
+                .await
+            {
+                Ok(_) => info!(campaign = %name, experiment = %on, "adopted experiment"),
+                // Adoption is best-effort: counting it this pass is what matters,
+                // and a failed label write must not stall the campaign loop.
+                Err(e) => warn!(campaign = %name, experiment = %on, %e, "adoption failed"),
+            }
+            exps.items.push(o);
+        }
+    }
 
     let mut running = 0u32;
     let mut succeeded = 0u32;
