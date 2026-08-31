@@ -4,6 +4,7 @@ mod crd;
 mod dossier;
 mod drive_reconciler;
 pub mod metrics;
+mod panathenaia;
 mod reconciler;
 mod report_reconciler;
 mod telemetry;
@@ -88,6 +89,10 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(2);
                 }
             }
+            return Ok(());
+        }
+        if arg == "panathenaia" {
+            panathenaia::serve().await?;
             return Ok(());
         }
     }

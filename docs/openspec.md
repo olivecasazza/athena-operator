@@ -1255,6 +1255,85 @@ UI conventions:
 - Preserve dark/Nord/pink visual direction already present.
 - SSE updates should update tables/charts without manual refresh.
 
+### Panathenaia — the public campaign viewer
+
+Panathenaia (the games held in honor of Athena) is the public viewer of Athena's
+campaigns. Today it lives inside the robot gym at spot.casazza.io; its long-run home
+is gym.casazza.io as its own repo and deployment in the athena-console family.
+
+Architecture:
+
+- Read-only BFF served by the `athena panathenaia` subcommand on port 8090, backed by
+  the cluster API — no writable path exists.
+- Deployment `panathenaia` in nixlab with its own ServiceAccount and a namespaced
+  read-only Role over `researchcampaigns`, `experiments`, `researchreports`, and
+  `experimenttemplates`. It must explicitly NOT use the operator ServiceAccount,
+  which holds `secrets:get`.
+- Everything it serves is public by design. DTO structs are an explicit allowlist;
+  `spec.proposer` (which holds `apiKeySecretRef`), secret mounts, and any
+  `*SecretRef` never appear in any response type.
+
+DTO contract (serde camelCase):
+
+```json
+GET /api/v1/campaigns
+{
+  "campaigns": [{
+    "name": "…",
+    "robot": "spot|curriculum label|null",
+    "stage": "…|null",
+    "templateRef": "…",
+    "objectiveMetric": "…|null",
+    "objectiveGoal": "…|null",
+    "phase": "…|null",
+    "bestExperiment": "…|null",
+    "bestObjective": "…|null",
+    "incumbentRemeasured": "…|null",
+    "succeeded": 0, "failed": 0, "running": 0, "total": 0,
+    "canaryState": "…|null",
+    "createdAt": "RFC3339|null",
+    "experiments": [{
+      "name": "…",
+      "phase": "…|null",
+      "hypothesis": "…",
+      "createdAt": "RFC3339|null",
+      "objective": "f64|null",
+      "metrics": {"string": "f64"},
+      "onnxUrl": "…|null",
+      "filmstripUrl": "/api/v1/experiments/{name}/figures/eval_filmstrip.png|null",
+      "image": "short tag after last '/'|null"
+    }]
+  }]
+}
+GET /api/v1/experiments/{name}    // single full ExperimentDto, plus:
+{ "parameters": {"string": "any"}, "conditions": [{"type": "…", "status": "…", "reason": "…", "message": "…"}] }
+GET /api/v1/experiments/{name}/figures/{file}   // PNG bytes from the workspace PVC (read-only mount,
+                                                // single-segment filename + canonicalization guard)
+GET /api/v1/reports
+{ "reports": [{ "name": "…", "campaignRef": "…", "title": "…|null", "sections": {"string": "string"}, "seededHypotheses": ["…"], "createdAt": "RFC3339|null" }] }
+```
+
+The mapping is deliberately 1:1 with CRD status: the viewer must reflect campaigns as
+they truly are and never recompute them. The gym used to derive "campaigns" by
+stripping `-<digits>` off GCS object names, so its picker showed a fiction unrelated
+to the actual ResearchCampaign objects; Panathenaia exists to end that.
+
+`onnxUrl` rule: only experiments whose `status.metrics` carries `policies_exported >= 1`
+get a policy URL, laid out as `policies/{experiment}/walk_policy.onnx` in the reruns
+bucket. The gym filters that list to runnable leaves.
+
+Serving:
+
+- spot.casazza.io: nginx `^~ /api/` proxies to the `panathenaia` Service — same-origin,
+  no CORS.
+- gym.casazza.io: tunnel path-rule for `/api` routes to the BFF; the catch-all routes
+  to the gym nginx. Managed in tofu; applied with a manual `just deploy-access`.
+- Deliberately public: no Access app in front of it, mirroring spot.
+
+Long-run extraction: Panathenaia becomes its own repo — a generic multi-robot viewer
+with filmstrip/rerun-style timelines fed by the same DTOs. The BFF contract above is
+the stable boundary the extraction keeps.
+
 ## 13. Observability requirements
 
 Prometheus:
