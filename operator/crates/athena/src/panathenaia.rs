@@ -74,6 +74,10 @@ struct CampaignDto {
     running: u32,
     total: u32,
     canary_state: Option<String>,
+    // Stance this campaign's template declares (forage/arena/etc.); the gym
+    // derives its view from it, so the listing must carry it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
     created_at: Option<String>,
     experiments: Vec<ExperimentDto>,
 }
@@ -90,6 +94,9 @@ struct ExperimentDto {
     onnx_url: Option<String>,
     filmstrip_url: Option<String>,
     image: Option<String>,
+    // What THIS experiment declares; see experiment_dto for why no fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -207,15 +214,15 @@ async fn list_campaigns(State(state): State<Arc<AppState>>) -> Response {
             .or_default()
             .push(exp);
     }
-
     let mut items = campaign_list.items;
     items.sort_by(|a, b| a.name_any().cmp(&b.name_any()));
 
     let mut dtos = Vec::with_capacity(items.len());
     for campaign in &items {
         let name = campaign.name_any();
-        let (objective_metric, objective_goal) =
-            campaign_objective(&state.client, &state.namespace, &campaign.spec.template_ref).await;
+        let (objective_metric, objective_goal, mode) =
+            campaign_template_fields(&state.client, &state.namespace, &campaign.spec.template_ref)
+                .await;
 
         let mut exps = by_campaign.remove(name.as_str()).unwrap_or_default();
         sort_experiments(&mut exps);
@@ -244,6 +251,7 @@ async fn list_campaigns(State(state): State<Arc<AppState>>) -> Response {
             running: status.map(|s| s.running_experiments).unwrap_or(0),
             total: status.map(|s| s.total_experiments).unwrap_or(0),
             canary_state: status.and_then(|s| s.canary_state.clone()),
+            mode,
             created_at: created_rfc3339(campaign),
             experiments,
         });
@@ -271,7 +279,7 @@ async fn get_experiment(State(state): State<Arc<AppState>>, Path(name): Path<Str
     let campaigns: Api<ResearchCampaign> = Api::namespaced(state.client.clone(), &state.namespace);
     let objective_metric = match campaigns.get(&exp.spec.campaign_ref).await {
         Ok(c) => {
-            campaign_objective(&state.client, &state.namespace, &c.spec.template_ref)
+            campaign_template_fields(&state.client, &state.namespace, &c.spec.template_ref)
                 .await
                 .0
         }
@@ -393,28 +401,42 @@ async fn list_reports(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
-/// objectiveMetric/objectiveGoal live on the campaign's ExperimentTemplate,
-/// not the campaign; one GET per campaign. A deleted template must degrade to
-/// nulls, not break the listing.
-async fn campaign_objective(
+/// objectiveMetric/objectiveGoal/mode live on the campaign's ExperimentTemplate,
+/// not the campaign; one GET per campaign fetches all three. A deleted template
+/// must degrade to nulls, not break the listing. `mode` comes from
+/// `spec.defaults["mode"]` — the template's declared stance, which the gym
+/// maps onto its pilot/gather/arena views.
+async fn campaign_template_fields(
     client: &Client,
     namespace: &str,
     template_ref: &str,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, Option<String>) {
     let templates: Api<ExperimentTemplate> = Api::namespaced(client.clone(), namespace);
     match templates.get(template_ref).await {
         Ok(t) => (
             Some(t.spec.objective.metric.clone()),
             enum_name(&t.spec.objective.goal),
+            t.spec.defaults.get("mode").and_then(|v| v.as_str()).map(String::from),
         ),
         Err(e) => {
             warn!(%e, template = %template_ref, "template fetch failed");
-            (None, None)
+            (None, None, None)
         }
     }
 }
 
 fn experiment_dto(exp: &Experiment, objective_metric: Option<&str>) -> ExperimentDto {
+    // Mode is what THIS experiment declares in spec.parameters — no fallback
+    // to the campaign's template default. The BFF reports what each object
+    // declared; blending defaults into observations is how a viewer starts
+    // lying, and the frontend can layer defaults knowingly.
+    let mode = exp
+        .spec
+        .parameters
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     let name = exp.name_any();
     let status = exp.status.as_ref();
 
@@ -454,6 +476,7 @@ fn experiment_dto(exp: &Experiment, objective_metric: Option<&str>) -> Experimen
         created_at: created_rfc3339(exp),
         objective: objective_metric.and_then(|m| metrics.get(m).copied()),
         metrics,
+        mode,
         onnx_url,
         filmstrip_url,
         image: status
