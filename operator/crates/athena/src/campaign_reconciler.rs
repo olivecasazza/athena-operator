@@ -198,6 +198,20 @@ pub async fn reconcile(
         .ok_or_else(|| Error::MissingTemplate(name.clone(), campaign.spec.template_ref.clone()))?;
     let objective = &template.spec.objective;
 
+    // Image the NEXT experiment will run, resolved once. This is the env
+    // contract a warm-start must match: transferring weights across a change of
+    // image is only sound when the action/observation semantics are unchanged,
+    // and the controller has no finer-grained handle on that than the digest.
+    let current_image = {
+        let profiles: Api<athena_api::runtime_profile::RuntimeProfile> =
+            Api::namespaced(ctx.client.clone(), &ns);
+        profiles
+            .get_opt(&template.spec.runtime_profile_ref)
+            .await?
+            .map(|p| p.spec.image.clone())
+            .unwrap_or_default()
+    };
+
     // 2. List this campaign's experiments and partition by phase.
     //
     // Membership is declared by `spec.campaignRef`; the label is only a fast
@@ -715,7 +729,7 @@ pub async fn reconcile(
                         idx,
                         params,
                         lineage.describe(),
-                        warm_start_policy(seed_exp),
+                        warm_start_policy(seed_exp, &current_image),
                         Some(lineage),
                     );
                     match experiments.create(&PostParams::default(), &exp).await {
@@ -728,7 +742,11 @@ pub async fn reconcile(
                     if is_pbt {
                         let (params, hypothesis) =
                             pbt_experiment(&template, best_ctx, perturb_factor, idx, salt);
-                        (params, hypothesis, warm_start_policy(seed_exp))
+                        (
+                            params,
+                            hypothesis,
+                            warm_start_policy(seed_exp, &current_image),
+                        )
                     } else {
                         let (params, hypothesis) = next_experiment(&template, best_ctx, idx, salt);
                         // Heuristic children inherit WEIGHTS as well as parameters.
@@ -743,7 +761,11 @@ pub async fn reconcile(
                         // restarts. Control slots `continue` above and never reach
                         // here, so cold baselines stay cold and the sigma
                         // comparison is unaffected.
-                        (params, hypothesis, warm_start_policy(seed_exp))
+                        (
+                            params,
+                            hypothesis,
+                            warm_start_policy(seed_exp, &current_image),
+                        )
                     }
                 };
                 // Dedup only applies when there is a best to perturb from — baselines
@@ -1313,14 +1335,30 @@ fn pbt_experiment(
 /// Used by BOTH strategies. It was PBT-only, which made heuristic campaigns
 /// record `parentExperimentId` while transferring nothing, so a "generation"
 /// was a random restart wearing a lineage label.
-fn warm_start_policy(best_exp: Option<&Experiment>) -> Option<CheckpointPolicy> {
-    let uri = best_exp?
-        .status
-        .as_ref()?
-        .latest_checkpoint
-        .as_ref()?
-        .uri
-        .clone();
+fn warm_start_policy(
+    best_exp: Option<&Experiment>,
+    current_image: &str,
+) -> Option<CheckpointPolicy> {
+    let best = best_exp?;
+    let st = best.status.as_ref()?;
+
+    // PROVENANCE GATE, fail-closed. Weights are only transferable across runs
+    // that share an env contract, and the image IS that contract here. At the
+    // curriculum v4->v5 cutover the action mapping changed from
+    // `centre + a * half` to `defaults + a * 0.10 * half`, so identical weights
+    // command entirely different poses; three runs were about to resume across
+    // that boundary and would have produced plausible, meaningless results.
+    //
+    // A parent with NO recorded image is treated as incompatible rather than
+    // assumed fine: every experiment predating this field is exactly the
+    // population most likely to be stale, so silence must not read as consent.
+    let parent_image = st.environment.as_ref().and_then(|e| e.image.as_deref());
+    match parent_image {
+        Some(img) if img == current_image => {}
+        _ => return None,
+    }
+
+    let uri = st.latest_checkpoint.as_ref()?.uri.clone();
     Some(CheckpointPolicy {
         resume_from: Some(uri),
         ..Default::default()
@@ -2230,6 +2268,13 @@ mod tests {
             status: Some(ExperimentStatus {
                 phase,
                 metrics,
+                // Fixtures record the same image the warm-start tests pass as
+                // "current", because provenance is now part of the contract:
+                // an unstamped parent is deliberately NOT warm-startable.
+                environment: Some(athena_api::experiment::ExperimentEnvironment {
+                    image: Some("img".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
         }
@@ -2661,7 +2706,7 @@ mod tests {
         assert_eq!(params.get("lr"), Some(&json!(0.1)));
         assert_eq!(params.get("parentExperimentId"), Some(&Value::Null));
         assert!(hyp.contains("cold start"), "{hyp}");
-        assert!(warm_start_policy(None).is_none());
+        assert!(warm_start_policy(None, "img").is_none());
     }
 
     #[test]
@@ -2690,11 +2735,51 @@ mod tests {
             step: Some(100),
             ..Default::default()
         });
-        let cp = warm_start_policy(Some(&best)).expect("best has a checkpoint");
+        let cp = warm_start_policy(Some(&best), "img").expect("best has a checkpoint");
         assert_eq!(cp.resume_from.as_deref(), Some("s3://ckpt/best/step-100"));
         // No checkpoint yet -> cold start (None).
         let no_ckpt = exp_with("warm", ExperimentPhase::Succeeded, "loss", 0.2);
-        assert!(warm_start_policy(Some(&no_ckpt)).is_none());
+        assert!(warm_start_policy(Some(&no_ckpt), "img").is_none());
+    }
+
+    #[test]
+    fn warm_start_refuses_a_parent_from_a_different_image() {
+        // The v4->v5 cutover in production: same weights, different action
+        // semantics (centre + a*half vs defaults + a*0.10*half). Transfer here
+        // is corruption dressed as curriculum, so it must be refused.
+        let mut best = exp_with("best", ExperimentPhase::Succeeded, "loss", 0.1);
+        best.status.as_mut().unwrap().latest_checkpoint = Some(CheckpointRef {
+            uri: "/workspace/runs/c/best/checkpoints".into(),
+            ..Default::default()
+        });
+        assert!(
+            warm_start_policy(Some(&best), "img").is_some(),
+            "same image must still warm-start"
+        );
+        assert!(
+            warm_start_policy(Some(&best), "img-v5").is_none(),
+            "a parent trained under a different image must not seed weights"
+        );
+    }
+
+    #[test]
+    fn warm_start_refuses_a_parent_with_no_recorded_image() {
+        // Fail closed. Every experiment predating the provenance field is the
+        // population most likely to be stale, so silence must not read as
+        // consent -- 267 such experiments existed when this shipped.
+        let mut best = exp_with("best", ExperimentPhase::Succeeded, "loss", 0.1);
+        {
+            let st = best.status.as_mut().unwrap();
+            st.latest_checkpoint = Some(CheckpointRef {
+                uri: "/workspace/runs/c/best/checkpoints".into(),
+                ..Default::default()
+            });
+            st.environment = None;
+        }
+        assert!(
+            warm_start_policy(Some(&best), "img").is_none(),
+            "unstamped provenance must not be assumed compatible"
+        );
     }
 
     #[test]
@@ -2720,7 +2805,7 @@ mod tests {
             params.get("parentExperimentId").and_then(Value::as_str),
             Some("c-000")
         );
-        let cp = warm_start_policy(Some(&best_exp));
+        let cp = warm_start_policy(Some(&best_exp), "img");
         let child = build_experiment(&campaign, "c", "default", 1, params, hypothesis, cp, None);
         assert_eq!(
             child
@@ -2748,7 +2833,7 @@ mod tests {
 
         let (params, hypothesis) =
             pbt_experiment(&t, Some(("c-000", &best_exp.spec.parameters)), 1.2, 2, 0);
-        let cp = warm_start_policy(Some(&best_exp));
+        let cp = warm_start_policy(Some(&best_exp), "img");
         let child = build_experiment(&campaign, "c", "default", 2, params, hypothesis, cp, None);
 
         assert_eq!(

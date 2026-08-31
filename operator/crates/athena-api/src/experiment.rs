@@ -261,6 +261,20 @@ pub struct ExperimentEnvironment {
     pub pod_names: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_names: Option<Vec<String>>,
+
+    /// Container image the run actually executed, as rendered from the
+    /// RuntimeProfile at Job creation.
+    ///
+    /// Provenance, not decoration: warm-starting a child from a parent trained
+    /// under a DIFFERENT image can be silent corruption rather than transfer.
+    /// Observed live at the curriculum v4->v5 cutover: v4 mapped joint targets
+    /// as `centre + a * half` and v5 as `defaults + a * 0.10 * half`, so the
+    /// same weights command entirely different poses. Three runs were about to
+    /// resume across that boundary and would have produced plausible,
+    /// meaningless numbers. Without this field the controller could not tell
+    /// the two apart, so it could not refuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]

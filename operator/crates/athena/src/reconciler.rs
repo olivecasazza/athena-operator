@@ -270,6 +270,9 @@ async fn ensure_experiment_job(
         environment: Some(ExperimentEnvironment {
             namespace: Some(ns.to_string()),
             job_name: Some(job_name),
+            // Stamped at creation so a later warm-start decision can compare
+            // provenance instead of assuming compatibility.
+            image: Some(profile.spec.image.clone()),
             ..Default::default()
         }),
         message: Some(workspace_claim.message.clone()),
