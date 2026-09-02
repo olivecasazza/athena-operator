@@ -198,7 +198,16 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
     if let Some(cur) = spec.curriculum.as_ref() {
         let now = chrono::Utc::now().to_rfc3339();
         if let Some(next) = evaluate_promotion(cur, &mut status, &owned.items, &now) {
-            info!(drive = %name, stage = %next, "curriculum stage promoted");
+            // A promotion is a CHANGE OF OBJECTIVE. Stagnation measured against
+            // the previous stage's metric says nothing about the new one, and
+            // carrying it forward parks the drive in needsHuman the moment the
+            // wound-down old-stage campaigns fold without "improvement" -- they
+            // were re-verifying a solved task, which is exactly what promotion
+            // certifies. Observed live: stance -> locomotion promoted, four
+            // wind-down folds, Stagnated/needsHuman before locomotion's first
+            // result existed.
+            status.stagnation_counter = 0;
+            info!(drive = %name, stage = %next, "curriculum stage promoted; stagnation reset");
         }
 
         // Wind down branches left over from a PREVIOUS stage. Promotion only
