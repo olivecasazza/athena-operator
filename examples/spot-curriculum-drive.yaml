@@ -89,7 +89,15 @@ spec:
           - curriculum-spider-stance
           - curriculum-snake-stance
           - curriculum-humanoid-stance
-          - curriculum-spot-stance
+          # ONE spot template in the gate, not two. The CPU twin was added as
+          # tyan01 capacity and both ended up declared here, which under
+          # `quantifier: All` meant spot had to pass the same stance task
+          # TWICE -- and once the drive settled on the CPU template for its
+          # spot campaigns, the GPU template's only evidence stayed the
+          # v4-era zeros forever. The gate wedged on a template nothing
+          # proposes onto. The GPU template remains in the drive's outer
+          # allowlist (locomotion uses its sibling); the STAGE gates on the
+          # line that actually carries spot's evidence.
           - curriculum-spot-stance-cpu
         promotion:
           metric: eval_stance_score
