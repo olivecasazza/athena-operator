@@ -930,6 +930,11 @@ async fn recent_findings(ctx: &Arc<Context>, ns: &str, limit: usize) -> Vec<Valu
                 "campaign": r.spec.campaign_ref,
                 "title": r.spec.title,
                 "footguns": r.spec.sections.get("Footguns"),
+                // The loop's own future-work channel. Report authoring demands
+                // testable seededHypotheses; feeding them back is what turns
+                // memory into self-direction -- without this the hypotheses
+                // were written and never read by anything.
+                "seededHypotheses": r.spec.seeded_hypotheses,
             })
         })
         .collect()
@@ -1190,7 +1195,14 @@ async fn propose_and_create(
         seedExperimentRef must be an experiment NAME from the context, or null. \
         priorFindings holds this drive's OWN published reports: treat their footguns as \
         established, do not re-propose an avenue a report already refuted, and say which \
-        finding you are building on when one applies.";
+        finding you are building on when one applies. Their seededHypotheses are candidate \
+        directions -- prefer testing a seeded hypothesis over re-running a solved task at a \
+        new difficulty. CAPABILITY GAPS: when the current stage's lines are passing, spend \
+        one action per cycle asking what a DEPLOYABLE robot needs that NO stage trains -- \
+        righting itself after a fall, recovering from pushes, traversing steps, carrying \
+        load, hunting and evading -- and emit a structural action titled 'newBehavior: \
+        <name>' with a falsifiable hypothesis, env requirements, and the held-out promotion \
+        metric it would gate on. Tuning a solved task is not research; a new behavior is.";
     let user =
         serde_json::to_string_pretty(&context).map_err(|e| Error::ProposerOutput(e.to_string()))?;
 
