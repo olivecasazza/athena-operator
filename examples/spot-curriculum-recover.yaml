@@ -1,0 +1,144 @@
+# Recover stage: self-righting, per morphology.
+#
+# Recovery is stance with a hostile initial condition -- spawn_fallen drives a
+# scripted knockdown before the episode clock starts, then the policy earns the
+# unchanged stance reward by getting up. Deliberately NOT a fifth env mode:
+# MODE_ORDER feeds the one-hot in the shared 110-dim obs, so a new mode would
+# invalidate every checkpoint. As a spawn condition, recover campaigns
+# warm-start from stance winners via seedFrom -- the curriculum doing its job.
+#
+# Promotion gates on eval_righted_frac: fraction of eval episodes ending
+# upright AND at stance height under the same criterion the fall detector uses.
+# For statically-stable low-slung morphologies (snake, spider) the knockdown
+# barely displaces them and righted reads ~1 by construction -- their recovery
+# task is trivial and the gate is honest about that. The stage exists for the
+# morphologies that CAN end up on their backs: spot and humanoid.
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: curriculum-spot-recover
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: spot
+    research.nixlab.io/curriculum-stage: recover
+spec:
+  runtimeProfileRef: spot-curriculum-trainer
+  researchObjective: >-
+    Curriculum stage 2 (recover) for spot: knocked down before the clock
+    starts, can the policy right itself? Warm-started from the stance winner.
+  objective:
+    metric: eval_righted_frac
+    goal: maximize
+  defaults:
+    mode: stance
+    spawn_fallen: true
+    robot: spot
+    terrain: flat
+    terrain_difficulty: 0.0
+    rig_carry: 0.0
+  metrics:
+    parser:
+      type: file
+      path: metrics.json
+  source:
+    git:
+      url: https://github.com/olivecasazza/skypilot-env
+      ref: feat/spot-ground-speed-reward
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: curriculum-humanoid-recover
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: humanoid
+    research.nixlab.io/curriculum-stage: recover
+spec:
+  runtimeProfileRef: spot-curriculum-trainer
+  researchObjective: >-
+    Curriculum stage 2 (recover) for humanoid -- the hardest morphology to
+    right and the reason this stage exists. Warm-started from its stance
+    winner.
+  objective:
+    metric: eval_righted_frac
+    goal: maximize
+  defaults:
+    mode: stance
+    spawn_fallen: true
+    robot: humanoid
+    terrain: flat
+    terrain_difficulty: 0.0
+    rig_carry: 0.0
+  metrics:
+    parser:
+      type: file
+      path: metrics.json
+  source:
+    git:
+      url: https://github.com/olivecasazza/skypilot-env
+      ref: feat/spot-ground-speed-reward
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: curriculum-spider-recover
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: spider
+    research.nixlab.io/curriculum-stage: recover
+spec:
+  runtimeProfileRef: spot-curriculum-trainer
+  researchObjective: >-
+    Curriculum stage 2 (recover) for spider. Statically stable, so likely
+    trivial -- kept in the stage because a trivial pass is evidence too, and a
+    surprise failure here would be a real finding.
+  objective:
+    metric: eval_righted_frac
+    goal: maximize
+  defaults:
+    mode: stance
+    spawn_fallen: true
+    robot: spider
+    terrain: flat
+    terrain_difficulty: 0.0
+    rig_carry: 0.0
+  metrics:
+    parser:
+      type: file
+      path: metrics.json
+  source:
+    git:
+      url: https://github.com/olivecasazza/skypilot-env
+      ref: feat/spot-ground-speed-reward
+---
+apiVersion: research.nixlab.io/v1alpha1
+kind: ExperimentTemplate
+metadata:
+  name: curriculum-snake-recover
+  namespace: apps
+  labels:
+    research.nixlab.io/curriculum-robot: snake
+    research.nixlab.io/curriculum-stage: recover
+spec:
+  runtimeProfileRef: spot-curriculum-trainer
+  researchObjective: >-
+    Curriculum stage 2 (recover) for snake. No meaningful fallen state at its
+    ground-level stand height; expected trivial, kept for uniform evidence.
+  objective:
+    metric: eval_righted_frac
+    goal: maximize
+  defaults:
+    mode: stance
+    spawn_fallen: true
+    robot: snake
+    terrain: flat
+    terrain_difficulty: 0.0
+    rig_carry: 0.0
+  metrics:
+    parser:
+      type: file
+      path: metrics.json
+  source:
+    git:
+      url: https://github.com/olivecasazza/skypilot-env
+      ref: feat/spot-ground-speed-reward

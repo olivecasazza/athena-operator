@@ -45,6 +45,10 @@ spec:
     # 12.1 image; its cores can, at 0.86x an RTX 4000. One slot only -- two
     # concurrent experiments on that node collapse to 3.7x worse aggregate.
     - curriculum-spot-stance-cpu
+    - curriculum-spider-recover
+    - curriculum-snake-recover
+    - curriculum-humanoid-recover
+    - curriculum-spot-recover
     - curriculum-spider-locomotion
     - curriculum-snake-locomotion
     - curriculum-humanoid-locomotion
@@ -53,6 +57,8 @@ spec:
     - curriculum-snake-forage
     - curriculum-humanoid-forage
     - curriculum-spot-forage
+    # Hunter/evader capstone: one template, morphologies compose INSIDE it.
+    - curriculum-arena
 
   # The hierarchy, now an API invariant rather than prose: only the current
   # stage is proposable, and each stage seeds the next from its winner (which
@@ -104,8 +110,25 @@ spec:
           threshold: 0.6
           minExperiments: 3
           quantifier: All
-      - name: locomotion
+      # Self-righting: knocked down before the clock, judged on ending
+      # upright. Warm-starts from stance winners (same obs/action contract, so
+      # the seed transfers legitimately). Trivial for the statically-stable
+      # morphologies -- honest; the stage exists for spot and humanoid, which
+      # can end up on their backs in every later stage.
+      - name: recover
         seedFrom: stance
+        templateRefs:
+          - curriculum-spider-recover
+          - curriculum-snake-recover
+          - curriculum-humanoid-recover
+          - curriculum-spot-recover
+        promotion:
+          metric: eval_righted_frac
+          threshold: 0.7
+          minExperiments: 3
+          quantifier: All
+      - name: locomotion
+        seedFrom: recover
         templateRefs:
           - curriculum-spider-locomotion
           - curriculum-snake-locomotion
@@ -128,6 +151,13 @@ spec:
           threshold: 2.0
           minExperiments: 3
           quantifier: All
+      # Capstone: multi-agent hunt/evade. No promotion block -- the API treats
+      # that as a deliberate human gate; there is no later stage anyway. One
+      # research line: the morphologies compose inside the arena.
+      - name: arena
+        seedFrom: forage
+        templateRefs:
+          - curriculum-arena
 
   proposer:
     endpoint: http://omniroute.apps.svc.cluster.local:20128/v1
