@@ -200,6 +200,66 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
         if let Some(next) = evaluate_promotion(cur, &mut status, &owned.items, &now) {
             info!(drive = %name, stage = %next, "curriculum stage promoted");
         }
+
+        // Wind down branches left over from a PREVIOUS stage. Promotion only
+        // changes what is PROPOSABLE; without this, in-flight campaigns from
+        // the passed stage hold every branch slot until their budgets run out,
+        // the proposer is never called (no free slot), and the promoted stage
+        // sits unstarted while GPUs re-verify a solved task. Observed live:
+        // stance promoted at 03:10, four stance campaigns mid-budget held all
+        // four slots, lastProposalAt aged 13 hours, zero locomotion campaigns.
+        //
+        // Pinching spec.budget.maxExperiments to the campaign's current total
+        // is the gentlest stop: nothing is deleted, running experiments finish
+        // and keep their measurements, and the campaign completes at its next
+        // reconcile — which folds it, writes its report, and frees the slot.
+        if let Some(stage) = status
+            .curriculum
+            .as_ref()
+            .and_then(|c| c.current_stage.as_deref())
+        {
+            let in_stage: std::collections::HashSet<&str> = cur
+                .stages
+                .iter()
+                .find(|s| s.name == stage)
+                .map(|s| s.template_refs.iter().map(String::as_str).collect())
+                .unwrap_or_default();
+            for c in &owned.items {
+                let cs = c.status.clone().unwrap_or_default();
+                let terminal = cs
+                    .phase
+                    .as_deref()
+                    .is_some_and(|p| TERMINAL_PHASES.contains(&p));
+                if terminal || in_stage.contains(c.spec.template_ref.as_str()) {
+                    continue;
+                }
+                let total = cs.total_experiments;
+                if c.spec.budget.max_experiments <= total {
+                    continue; // already winding down
+                }
+                let api: Api<ResearchCampaign> = Api::namespaced(ctx.client.clone(), &ns);
+                let patch = json!({
+                    "metadata": { "annotations": { "research.nixlab.io/wound-down":
+                        format!("out-of-stage after promotion to {stage}; budget pinched to {total} so the slot frees without discarding running work") } },
+                    "spec": { "budget": { "maxExperiments": total } }
+                });
+                match api
+                    .patch(
+                        &c.name_any(),
+                        &PatchParams::apply(MANAGER),
+                        &Patch::Merge(&patch),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        info!(drive = %name, campaign = %c.name_any(), stage = %stage, "wound down out-of-stage campaign")
+                    }
+                    Err(e) => {
+                        warn!(drive = %name, campaign = %c.name_any(), %e, "wind-down patch failed")
+                    }
+                }
+            }
+        }
     }
 
     // 3. Structural approval gate. AwaitingApproval proposals block the loop

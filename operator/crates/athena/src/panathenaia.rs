@@ -416,7 +416,11 @@ async fn campaign_template_fields(
         Ok(t) => (
             Some(t.spec.objective.metric.clone()),
             enum_name(&t.spec.objective.goal),
-            t.spec.defaults.get("mode").and_then(|v| v.as_str()).map(String::from),
+            t.spec
+                .defaults
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         ),
         Err(e) => {
             warn!(%e, template = %template_ref, "template fetch failed");
