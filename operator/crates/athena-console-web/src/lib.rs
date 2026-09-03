@@ -19,8 +19,8 @@ pub mod models;
 
 use dioxus::prelude::*;
 use models::{
-    ClusterSnapshot, ReportSpecDto, ReportSummary, ResourceSummary, SchedulingSnapshot,
-    TemplateSummary,
+    ClusterSnapshot, ConditionDto, ReportSpecDto, ReportSummary, ResourceSummary,
+    SchedulingSnapshot, TemplateSummary,
 };
 use panel_kit::{GrafanaDashboard, IdePanel, LayoutBuilder, PanelKind, PanelWin, use_workspace};
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,12 @@ pub enum Panel {
     ReportCurator,
     /// Published ResearchReport list.
     Reports,
+    /// Drill-down research surface: global fleet → campaign → experiment or
+    /// report. The hierarchy mirrors the CRD ownership chain (ResearchDrive →
+    /// ResearchCampaign → Experiment/ResearchReport); the breadcrumb bar is
+    /// the navigation record. Like every other panel it carries no data —
+    /// the current level lives in `research_nav` (see [`App`]).
+    Research,
 }
 
 impl PanelKind for Panel {
@@ -74,6 +80,7 @@ impl PanelKind for Panel {
             Panel::Benchmarks => "Benchmarks",
             Panel::ReportCurator => "Report Curator",
             Panel::Reports => "Reports",
+            Panel::Research => "Research",
         }
     }
 }
@@ -131,6 +138,9 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
             (Panel::ExperimentMetrics, 560.0),
             (Panel::ExperimentManifest, 360.0),
             (Panel::Benchmarks, 320.0),
+            // The drill-down surface is tall: the global level stacks drive
+            // cards (with per-stage template tables) above the campaign table.
+            (Panel::Research, 640.0),
         ],
     ));
     wins
@@ -226,7 +236,39 @@ const APP_CSS: &str = "
 .rc-textarea { background:var(--bg); color:var(--fg); border:1px solid var(--line2);
   font-family:var(--mono); font-size:.72rem; padding:.2rem .3rem; width:100%;
   box-sizing:border-box; height:4rem; resize:vertical; }
+/* Research drill-down: breadcrumbs are the navigation record; chips mark
+   leaf kinds (experiment vs report); condition badges colour by status. */
+.crumbs { display:flex; align-items:baseline; gap:.3rem; font-size:.74rem;
+  font-family:var(--mono); margin:.1rem 0 .6rem; }
+.crumbs .sep { color:var(--dim); }
+.chip { display:inline-block; border:1px solid var(--blue); color:var(--blue);
+  border-radius:3px; padding:0 .25rem; font-size:.66rem; margin-left:.3rem; }
+.cond { display:inline-block; border-radius:3px; padding:0 .25rem;
+  font-size:.66rem; margin:0 .15rem .15rem 0; border:1px solid var(--line2);
+  color:var(--dim); }
+.cond.True, .cond.ok, .cond.ready { border-color:var(--green); color:var(--green); }
+.cond.warn { border-color:var(--yellow); color:var(--yellow); }
+.cond.bad, .cond.err { border-color:var(--red); color:var(--red); }
+.filmstrip { width:100%; margin:.2rem 0; border:1px solid var(--line); }
+.crumb-current { color:var(--fg); }
 ";
+
+/// Research drill-down depth. The hierarchy mirrors CRD ownership
+/// (ResearchDrive -> ResearchCampaign -> Experiment / ResearchReport); one
+/// level is visible at a time and the breadcrumb bar renders the path back.
+#[derive(Clone, PartialEq)]
+enum ResearchNav {
+    Global,
+    Campaign(String),
+    Experiment {
+        campaign: String,
+        exp: ResourceSummary,
+    },
+    Report {
+        campaign: String,
+        report: ReportSummary,
+    },
+}
 
 /// App root.
 #[component]
@@ -236,7 +278,8 @@ pub fn App() -> Element {
     // bump the suffix whenever default_layout/admin_layout change materially
     // and the stale entry is simply ignored. v2: taller metrics panel + the
     // tile_min_h that stops it collapsing to 150px when tiled.
-    let ws = use_workspace("athena_console_web_v2", default_layout);
+    // v3: the Research drill-down panel joins the default right column.
+    let ws = use_workspace("athena_console_web_v3", default_layout);
     let admin_ws = use_workspace("athena_console_web_admin_v2", admin_layout);
     // Admin page toggle — a separate panel set (GPU/Kueue/inference). Researchers
     // stay on the default page; access itself is gated at the ingress (Zero Trust).
@@ -265,6 +308,12 @@ pub fn App() -> Element {
     let seeds_text = use_signal(|| String::new());
     let preview_doc = use_signal(|| String::new());
     let save_status = use_signal(|| String::new());
+
+    // Research drill-down navigation. `Panel` variants carry no data (PanelKind
+    // is Copy), so the current depth — global fleet, one campaign, one
+    // experiment, one report — lives out here exactly like `selected` does for
+    // ExperimentDetail. The breadcrumb bar is the rendered form of this signal.
+    let research_nav = use_signal(|| ResearchNav::Global);
 
     let body = move |kind: Panel, _maximized: bool| -> Element {
         let snap = snapshot.read();
@@ -302,6 +351,7 @@ pub fn App() -> Element {
                 save_status,
             ),
             Panel::Reports => reports_view(snap, ws, selected_campaign, report_name, report_title),
+            Panel::Research => research_view(snap, research_nav, selected, manifest_doc, ws),
         }
     };
 
@@ -703,6 +753,331 @@ fn resource_table(rows: Vec<ResourceSummary>, name_col: &str, detail_col: &str) 
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Research drill-down: global fleet -> campaign -> experiment | report.
+// ---------------------------------------------------------------------------
+
+/// Condition badges. Class picks the colour: True reads green, anything else
+/// red; the reason rides in the title tooltip.
+fn cond_badges(conds: &[ConditionDto]) -> Element {
+    let rows: Vec<(String, String, String)> = conds
+        .iter()
+        .map(|c| {
+            let class = if c.status == "True" {
+                "cond ok"
+            } else {
+                "cond bad"
+            };
+            (
+                class.to_string(),
+                format!("{} {}", c.ctype, c.status),
+                c.reason.clone(),
+            )
+        })
+        .collect();
+    rsx! {
+        for (class, label, reason) in rows {
+            span { class: "{class}", title: "{reason}", "{label}" }
+        }
+    }
+}
+
+fn research_view(
+    snap: ClusterSnapshot,
+    mut nav: Signal<ResearchNav>,
+    mut selected: Signal<Option<ResourceSummary>>,
+    mut manifest_doc: Signal<String>,
+    ws: panel_kit::Workspace<Panel>,
+) -> Element {
+    let level = nav.read().clone();
+
+    // Breadcrumbs: every ancestor is a button back to that depth.
+    let campaign_crumb = match &level {
+        ResearchNav::Global => None,
+        ResearchNav::Campaign(c) => Some(c.clone()),
+        ResearchNav::Experiment { campaign, .. } | ResearchNav::Report { campaign, .. } => {
+            Some(campaign.clone())
+        }
+    };
+    let leaf_crumb = match &level {
+        ResearchNav::Experiment { exp, .. } => Some(exp.name.clone()),
+        ResearchNav::Report { report, .. } => Some(report.name.clone()),
+        _ => None,
+    };
+    let crumbs = {
+        let campaign_for_leafless = campaign_crumb.clone();
+        rsx! {
+            div { class: "crumbs",
+                button { class: "row-link", onclick: move |_| nav.set(ResearchNav::Global), "research" }
+                if let Some(c) = campaign_crumb.clone() {
+                    span { class: "sep", "\u{203a}" }
+                    if leaf_crumb.is_some() {
+                        button {
+                            class: "row-link",
+                            onclick: move |_| {
+                                if let Some(c) = campaign_for_leafless.clone() {
+                                    nav.set(ResearchNav::Campaign(c));
+                                }
+                            },
+                            "{c}"
+                        }
+                    } else {
+                        span { class: "crumb-current", "{c}" }
+                    }
+                }
+                if let Some(l) = leaf_crumb.clone() {
+                    span { class: "sep", "\u{203a}" }
+                    span { class: "crumb-current", "{l}" }
+                }
+            }
+        }
+    };
+
+    let body = match level {
+        ResearchNav::Global => {
+            let drives = snap.drives.clone();
+            let campaigns = snap.campaigns.clone();
+            rsx! {
+                div { class: "view-head",
+                    h2 { "Research" }
+                    p { "The autonomous loops, their curriculum evidence, and every campaign. Click through: campaign \u{203a} experiment or report." }
+                }
+                for d in drives {
+                    div { class: "detail-card",
+                        h3 { "{d.name}" }
+                        p {
+                            span { class: "phase", "{d.phase}" }
+                            if let Some(stage) = d.stage.clone() {
+                                span { class: "chip", "stage: {stage}" }
+                            }
+                            span { class: "muted", " stagnation {d.stagnation}" }
+                        }
+                        p { {cond_badges(&d.conditions)} }
+                        for st in d.stages.clone() {
+                            div {
+                                p { class: "muted",
+                                    "{st.name}"
+                                    if let Some(at) = st.promoted_at.clone() {
+                                        " \u{2014} promoted {at}"
+                                    }
+                                }
+                                table { class: "tbl",
+                                    thead { tr { th { "Template" } th { "Best" } th { "Succeeded" } th { "Gate" } } }
+                                    tbody {
+                                        for t in st.templates.clone() {
+                                            tr {
+                                                td { "{t.template_ref}" }
+                                                td { {t.best_objective.map(|b| format!("{b:.3}")).unwrap_or_else(|| "\u{2014}".into())} }
+                                                td { "{t.succeeded}" }
+                                                td {
+                                                    if t.passed {
+                                                        span { class: "cond ok", "passed" }
+                                                    } else {
+                                                        span { class: "cond", "pending" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                h3 { "Campaigns" }
+                div { class: "scroll-tbl",
+                table { class: "tbl",
+                    thead { tr { th { "Campaign" } th { "Phase" } th { "Detail" } } }
+                    tbody {
+                        if campaigns.is_empty() {
+                            tr { td { colspan: "3", class: "muted", "No campaigns found." } }
+                        }
+                        for c in campaigns {
+                            {
+                                let name = c.name.clone();
+                                rsx! {
+                                    tr {
+                                        td {
+                                            button {
+                                                class: "row-link",
+                                                onclick: move |_| nav.set(ResearchNav::Campaign(name.clone())),
+                                                "{c.name}"
+                                            }
+                                        }
+                                        td { class: "phase", "{c.phase}" }
+                                        td { class: "muted", "{c.detail}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                }
+            }
+        }
+        ResearchNav::Campaign(campaign) => {
+            let camp = snap.campaigns.iter().find(|c| c.name == campaign).cloned();
+            let exps: Vec<ResourceSummary> = snap
+                .experiments
+                .iter()
+                .filter(|e| e.campaign.as_deref() == Some(campaign.as_str()))
+                .cloned()
+                .collect();
+            let reports: Vec<ReportSummary> = snap
+                .reports
+                .iter()
+                .filter(|r| r.campaign_ref == campaign)
+                .cloned()
+                .collect();
+            let campaign_for_exp = campaign.clone();
+            let campaign_for_rep = campaign.clone();
+            rsx! {
+                div { class: "view-head",
+                    h2 { "{campaign}" }
+                    if let Some(c) = camp.clone() {
+                        p {
+                            span { class: "phase", "{c.phase}" }
+                            span { class: "muted", " {c.detail}" }
+                        }
+                        p { {cond_badges(&c.conditions)} }
+                    }
+                }
+                h3 { "Experiments" }
+                div { class: "scroll-tbl",
+                table { class: "tbl",
+                    thead { tr { th { "Experiment" } th { "Phase" } th { "Mode" } th { "Hypothesis" } } }
+                    tbody {
+                        if exps.is_empty() {
+                            tr { td { colspan: "4", class: "muted", "No experiments in this campaign." } }
+                        }
+                        for e in exps {
+                            {
+                                let e2 = e.clone();
+                                let camp2 = campaign_for_exp.clone();
+                                rsx! {
+                                    tr {
+                                        td {
+                                            button {
+                                                class: "row-link",
+                                                onclick: move |_| nav.set(ResearchNav::Experiment {
+                                                    campaign: camp2.clone(),
+                                                    exp: e2.clone(),
+                                                }),
+                                                "{e.name}"
+                                            }
+                                        }
+                                        td { class: "phase", "{e.phase}" }
+                                        td { {e.mode.clone().unwrap_or_else(|| "\u{2014}".into())} }
+                                        td { class: "muted", {e.hypothesis.clone().unwrap_or_default()} }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                }
+                if !reports.is_empty() {
+                    h3 { "Reports" }
+                    table { class: "tbl",
+                        thead { tr { th { "Report" } th { "Title" } th { "Phase" } } }
+                        tbody {
+                            for r in reports {
+                                {
+                                    let r2 = r.clone();
+                                    let camp2 = campaign_for_rep.clone();
+                                    rsx! {
+                                        tr {
+                                            td {
+                                                button {
+                                                    class: "row-link",
+                                                    onclick: move |_| nav.set(ResearchNav::Report {
+                                                        campaign: camp2.clone(),
+                                                        report: r2.clone(),
+                                                    }),
+                                                    "{r.name}"
+                                                }
+                                            }
+                                            td { "{r.title}" }
+                                            td { class: "phase", "{r.phase}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ResearchNav::Experiment { exp, .. } => {
+            // Filmstrip via the public Panathenaia BFF; a 404 renders as a
+            // broken image, which honestly means "predates filmstrips".
+            let film = format!(
+                "https://spot.casazza.io/api/v1/experiments/{}/figures/eval_filmstrip.png",
+                exp.name
+            );
+            let exp_open = exp.clone();
+            rsx! {
+                div { class: "view-head",
+                    h2 { "{exp.name}" }
+                    p { span { class: "phase", "{exp.phase}" }
+                        if let Some(m) = exp.mode.clone() { span { class: "chip", "{m}" } }
+                    }
+                }
+                if let Some(h) = exp.hypothesis.clone() {
+                    p { "{h}" }
+                }
+                img { class: "filmstrip", src: "{film}", alt: "eval filmstrip" }
+                p {
+                    button {
+                        class: "btn",
+                        onclick: move |_| {
+                            let e = exp_open.clone();
+                            selected.set(Some(e.clone()));
+                            ws.restore(Panel::ExperimentDetail);
+                            ws.restore(Panel::ExperimentMetrics);
+                            ws.restore(Panel::ExperimentManifest);
+                            spawn(async move {
+                                match fetch_manifest(&e.namespace, &e.kind, &e.name).await {
+                                    Ok(yaml) => manifest_doc.set(yaml),
+                                    Err(err) => manifest_doc.set(format!("# failed to load manifest: {err}\n")),
+                                }
+                            });
+                        },
+                        "Open detail panels"
+                    }
+                }
+            }
+        }
+        ResearchNav::Report { report, .. } => {
+            let sections: Vec<(String, String)> = report.sections.clone().into_iter().collect();
+            rsx! {
+                div { class: "view-head",
+                    h2 { {if report.title.is_empty() { report.name.clone() } else { report.title.clone() }} }
+                    p { span { class: "phase", "{report.phase}" }
+                        span { class: "muted", " {report.name}" } }
+                }
+                for (heading, text) in sections {
+                    h3 { "{heading}" }
+                    p { "{text}" }
+                }
+                if !report.seeded_hypotheses.is_empty() {
+                    h3 { "Seeded hypotheses" }
+                    ul {
+                        for h in report.seeded_hypotheses.clone() {
+                            li { "{h}" }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    rsx! {
+        {crumbs}
+        {body}
     }
 }
 

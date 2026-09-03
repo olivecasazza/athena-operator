@@ -23,6 +23,64 @@ pub struct ClusterSnapshot {
     /// Scientist-authored paper-dataset curations (ResearchReport).
     #[serde(default)]
     pub reports: Vec<ReportSummary>,
+    /// The autonomous loops themselves — phase, curriculum stage, health
+    /// conditions, per-template gate evidence. The drill-down's global level
+    /// leads with these because the drive is the root of the ownership chain
+    /// the navigation mirrors (drive > campaign > experiment/report).
+    #[serde(default)]
+    pub drives: Vec<DriveSummary>,
+}
+
+/// One status condition, flattened for the wire. `type` is a Rust keyword, so
+/// the field is `ctype` renamed on the wire.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ConditionDto {
+    #[serde(rename = "type")]
+    pub ctype: String,
+    pub status: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// A ResearchDrive, collapsed for the console's global view.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveSummary {
+    pub namespace: String,
+    pub name: String,
+    pub phase: String,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub stagnation: u32,
+    #[serde(default)]
+    pub conditions: Vec<ConditionDto>,
+    #[serde(default)]
+    pub stages: Vec<StageProgressDto>,
+}
+
+/// One curriculum stage's record, with the per-template gate evidence that
+/// answers "which line is holding promotion back".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StageProgressDto {
+    pub name: String,
+    #[serde(default)]
+    pub promoted_at: Option<String>,
+    #[serde(default)]
+    pub templates: Vec<TemplateProgressDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateProgressDto {
+    pub template_ref: String,
+    #[serde(default)]
+    pub best_objective: Option<f64>,
+    #[serde(default)]
+    pub succeeded: u32,
+    #[serde(default)]
+    pub passed: bool,
 }
 
 /// A generic Kubernetes resource row (experiment, campaign, suite, run,
@@ -52,6 +110,17 @@ pub struct ResourceSummary {
     /// curator can filter experiments by campaign. None for other kinds.
     #[serde(default)]
     pub campaign: Option<String>,
+    /// Trained behavior (stance/locomotion/forage/arena) — experiments declare
+    /// it in parameters; campaigns get stage context from the drive instead.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Experiment hypothesis (truncated server-side); the drill-down's
+    /// experiment view shows it, because a run without its question is noise.
+    #[serde(default)]
+    pub hypothesis: Option<String>,
+    /// Status conditions (campaigns: ExperimentsHealthy et al).
+    #[serde(default)]
+    pub conditions: Vec<ConditionDto>,
 }
 
 impl ResourceSummary {
@@ -81,6 +150,12 @@ pub struct ReportSummary {
     pub phase: String,
     #[serde(default)]
     pub excluded_count: usize,
+    /// Full narrative sections — the report IS the research record, so the
+    /// console renders it whole rather than linking away from it.
+    #[serde(default)]
+    pub sections: BTreeMap<String, String>,
+    #[serde(default)]
+    pub seeded_hypotheses: Vec<String>,
 }
 
 /// Payload for creating/updating a ResearchReport and for previewing its dossier.

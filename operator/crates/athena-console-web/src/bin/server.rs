@@ -18,10 +18,12 @@ use athena_api::dossier::{self, Curation};
 use athena_api::experiment::Experiment;
 use athena_api::experiment_template::ExperimentTemplate;
 use athena_api::research_campaign::ResearchCampaign;
+use athena_api::research_drive::ResearchDrive;
 use athena_api::research_report::{ResearchReport, ResearchReportSpec};
 use athena_api::runtime_profile::RuntimeProfile;
 use athena_console_web::models::{
-    ClusterSnapshot, ReportSpecDto, ReportSummary, ResourceSummary, TemplateSummary,
+    ClusterSnapshot, ConditionDto, DriveSummary, ReportSpecDto, ReportSummary, ResourceSummary,
+    StageProgressDto, TemplateProgressDto, TemplateSummary,
 };
 use axum::{
     Json, Router,
@@ -126,6 +128,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
     let runs_api = Api::<BenchmarkRun>::all(client.clone());
     let jobs_api = Api::<Job>::all(client.clone());
     let profiles_api = Api::<RuntimeProfile>::all(client.clone());
+    let drives_api = Api::<ResearchDrive>::all(client.clone());
     let reports_api = Api::<ResearchReport>::all(client);
 
     let (
@@ -137,6 +140,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         profile_list,
         job_list,
         report_list,
+        drive_list,
     ) = tokio::try_join!(
         experiments_api.list(&lp),
         campaigns_api.list(&lp),
@@ -146,6 +150,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         profiles_api.list(&lp),
         jobs_api.list(&lp),
         reports_api.list(&lp),
+        drives_api.list(&lp),
     )?;
 
     // Run windows from the experiment Jobs (exp-<name>) so the embed can scope its
@@ -188,6 +193,16 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 started_at: jt.as_ref().and_then(|(s, _)| s.clone()),
                 ended_at: jt.as_ref().and_then(|(_, en)| en.clone()),
                 campaign: Some(e.spec.campaign_ref.clone()),
+                mode: e
+                    .spec
+                    .parameters
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                // Truncated: the drill-down shows it inline; a 2 KB hypothesis
+                // in every row would bloat the snapshot for no reader.
+                hypothesis: Some(e.spec.hypothesis.chars().take(240).collect()),
+                conditions: Vec::new(),
             }
         })
         .collect();
@@ -222,6 +237,20 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 started_at: to_ms(&c.metadata.creation_timestamp),
                 ended_at: None,
                 campaign: None,
+                // Campaign mode needs a template fetch per campaign; the drive
+                // summary carries stage context instead, so None is honest here.
+                mode: None,
+                hypothesis: None,
+                conditions: status
+                    .and_then(|s| s.conditions.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|c| ConditionDto {
+                        ctype: c.condition_type.unwrap_or_default(),
+                        status: c.status.unwrap_or_default(),
+                        reason: c.reason.unwrap_or_default(),
+                    })
+                    .collect(),
             }
         })
         .collect();
@@ -259,6 +288,9 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             started_at: None,
             ended_at: None,
             campaign: None,
+            mode: None,
+            hypothesis: None,
+            conditions: Vec::new(),
         })
         .collect();
 
@@ -290,6 +322,9 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 started_at: None,
                 ended_at: None,
                 campaign: None,
+                mode: None,
+                hypothesis: None,
+                conditions: Vec::new(),
             }
         })
         .collect();
@@ -316,6 +351,9 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             started_at: None,
             ended_at: None,
             campaign: None,
+            mode: None,
+            hypothesis: None,
+            conditions: Vec::new(),
         })
         .collect();
 
@@ -333,6 +371,54 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                     .and_then(|s| s.phase.clone())
                     .unwrap_or_else(|| "Draft".to_string()),
                 excluded_count: r.spec.excluded_experiments.len(),
+                sections: r.spec.sections.clone(),
+                seeded_hypotheses: r.spec.seeded_hypotheses.clone(),
+            }
+        })
+        .collect();
+
+    let drives = drive_list
+        .items
+        .into_iter()
+        .map(|d| {
+            let st = d.status.clone().unwrap_or_default();
+            let cur = st.curriculum.unwrap_or_default();
+            DriveSummary {
+                namespace: d.namespace().unwrap_or_else(|| "default".to_string()),
+                name: d.name_any(),
+                phase: st
+                    .phase
+                    .map(|p| format!("{p:?}"))
+                    .unwrap_or_else(|| "Pending".to_string()),
+                stage: cur.current_stage.clone(),
+                stagnation: st.stagnation_counter,
+                conditions: st
+                    .conditions
+                    .into_iter()
+                    .map(|c| ConditionDto {
+                        ctype: c.condition_type,
+                        status: format!("{:?}", c.status),
+                        reason: c.reason.unwrap_or_default(),
+                    })
+                    .collect(),
+                stages: cur
+                    .stage_history
+                    .into_iter()
+                    .map(|h| StageProgressDto {
+                        name: h.name,
+                        promoted_at: h.promoted_at,
+                        templates: h
+                            .template_progress
+                            .into_iter()
+                            .map(|t| TemplateProgressDto {
+                                template_ref: t.template_ref,
+                                best_objective: t.best_objective,
+                                succeeded: t.succeeded_experiments,
+                                passed: t.passed,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
             }
         })
         .collect();
@@ -345,6 +431,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         benchmark_runs,
         runtime_profiles,
         reports,
+        drives,
     })
 }
 
@@ -362,6 +449,7 @@ fn spec_from_dto(dto: &ReportSpecDto) -> ResearchReportSpec {
         sections: dto.sections.clone(),
         seeded_hypotheses: dto.seeded_hypotheses.clone(),
         references: vec![],
+        about: None,
     }
 }
 
@@ -425,6 +513,8 @@ async fn create_report(
         title: dto.title.clone().unwrap_or_default(),
         phase: "Draft".to_string(),
         excluded_count: dto.excluded_experiments.len(),
+        sections: dto.sections.clone(),
+        seeded_hypotheses: dto.seeded_hypotheses.clone(),
     }))
 }
 
