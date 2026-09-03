@@ -1778,6 +1778,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "gloo-utils"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3372,10 +3384,11 @@ dependencies = [
 [[package]]
 name = "panel-kit"
 version = "0.2.0"
-source = "git+https://github.com/olivecasazza/panel-kit?branch=main#b3ceb75e6479276f6ce7d3270859a26558b86854"
+source = "git+https://github.com/olivecasazza/panel-kit?branch=main#d9cab3760fe9b584c2f23c21a32d06091c28d435"
 dependencies = [
  "dioxus",
  "gloo-storage",
+ "gloo-timers",
  "panel-kit-core",
  "serde",
  "wasm-bindgen",
@@ -3385,7 +3398,7 @@ dependencies = [
 [[package]]
 name = "panel-kit-core"
 version = "0.2.0"
-source = "git+https://github.com/olivecasazza/panel-kit?branch=main#b3ceb75e6479276f6ce7d3270859a26558b86854"
+source = "git+https://github.com/olivecasazza/panel-kit?branch=main#d9cab3760fe9b584c2f23c21a32d06091c28d435"
 dependencies = [
  "serde",
 ]
