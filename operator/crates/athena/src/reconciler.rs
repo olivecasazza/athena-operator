@@ -956,6 +956,22 @@ fn effective_profile(profile: &RuntimeProfile) -> RuntimeProfile {
     }
 }
 
+/// Clamp a string to a valid Kubernetes label VALUE (63 chars, no trailing
+/// dash/dot). Names are minted with headroom upstream, but a label over the
+/// cap makes the whole Job invalid at the API server -- observed live as 40
+/// hours of silent create-reject retries that idled every GPU. Truncation
+/// loses query precision on the tail; an invalid Job loses the experiment.
+fn label_value(raw: &str) -> String {
+    if raw.len() <= 63 {
+        return raw.to_string();
+    }
+    raw.chars()
+        .take(63)
+        .collect::<String>()
+        .trim_end_matches(['-', '.', '_'])
+        .to_string()
+}
+
 /// Common labels for both the direct experiment Job and the sky launcher Job,
 /// including the Kueue queue label when the profile opts in.
 fn experiment_labels(
@@ -970,11 +986,11 @@ fn experiment_labels(
         ),
         (
             "athena.nixlab.io/campaign".to_string(),
-            experiment.spec.campaign_ref.clone(),
+            label_value(&experiment.spec.campaign_ref),
         ),
         (
             "athena.nixlab.io/experiment".to_string(),
-            experiment_name.to_string(),
+            label_value(experiment_name),
         ),
         (
             "athena.nixlab.io/runtime-profile".to_string(),

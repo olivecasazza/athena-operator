@@ -129,9 +129,16 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
         }
     }
 
-    // 2. Fold terminal campaigns into drive state.
+    // 2. Fold terminal campaigns into drive state. Only campaigns whose
+    // template belongs to the CURRENT stage may move the stagnation counter:
+    // out-of-stage folds (wind-down after promotion, manual stage repoints)
+    // are bookkeeping, not evidence about the current objective. Observed
+    // live: a stage repoint to `recover` was instantly re-parked needsHuman
+    // by four folds of the previous stage's campaigns.
+    let stage_templates = allowed_templates(&drive);
     for c in &terminal_unfolded {
-        fold_campaign(&mut status, c);
+        let in_stage = stage_templates.iter().any(|t| t == &c.spec.template_ref);
+        fold_campaign(&mut status, c, in_stage);
         status
             .current_campaigns
             .retain(|b| b.campaign != c.name_any());
@@ -584,11 +591,16 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
 /// best by more than one sigma to reset the stagnation counter. Cross-template
 /// campaigns never displace the incumbent (incomparable units); the proposer
 /// sees both and may synthesize.
-fn fold_campaign(status: &mut ResearchDriveStatus, campaign: &ResearchCampaign) {
+fn fold_campaign(status: &mut ResearchDriveStatus, campaign: &ResearchCampaign, in_stage: bool) {
     let cs = campaign.status.clone().unwrap_or_default();
     let score = cs.incumbent_remeasured.or(cs.best_objective);
     let template = campaign.spec.template_ref.clone();
     let best_exp = cs.best_experiment.clone();
+
+    // A campaign that never ran a single experiment (Job-create failures,
+    // pinched-at-zero wind-downs) is an infrastructure outcome, not evidence
+    // about the objective: it must not move the stagnation counter either way.
+    let ran_any = cs.succeeded_experiments + cs.failed_experiments > 0;
 
     let improved = match (score, &status.best_objective, &status.best_template_ref) {
         (Some(s), Some(best), Some(bt)) if bt == &template => {
@@ -608,8 +620,10 @@ fn fold_campaign(status: &mut ResearchDriveStatus, campaign: &ResearchCampaign) 
             status.best_experiment_ref = Some(exp);
             status.best_template_ref = Some(template);
         }
-        status.stagnation_counter = 0;
-    } else {
+        if in_stage && ran_any {
+            status.stagnation_counter = 0;
+        }
+    } else if in_stage && ran_any {
         status.stagnation_counter = status.stagnation_counter.saturating_add(1);
     }
 }
@@ -645,25 +659,45 @@ pub(crate) fn allowed_templates(drive: &ResearchDrive) -> Vec<String> {
         .collect()
 }
 
-/// The experiment that seeds a stage's campaigns: the winner recorded for the
-/// stage named by `seedFrom`. None when the stage has no `seedFrom` or the
-/// referenced stage has not produced a winner yet.
-pub(crate) fn stage_seed(drive: &ResearchDrive, template_ref: &str) -> Option<String> {
-    let cur = drive.spec.curriculum.as_ref()?;
-    let stage = cur
+/// Seed candidates for a stage's campaigns, best-first: the `seedFrom`
+/// stage's per-template winners (which preserve morphology lines), then the
+/// stage-level winner. Empty when the stage has no `seedFrom` or the
+/// referenced stage has produced nothing. The caller filters by robot
+/// identity -- this list is *candidates*, not a decision.
+pub(crate) fn stage_seed_candidates(drive: &ResearchDrive, template_ref: &str) -> Vec<String> {
+    let Some(cur) = drive.spec.curriculum.as_ref() else {
+        return Vec::new();
+    };
+    let Some(stage) = cur
         .stages
         .iter()
-        .find(|s| s.template_refs.iter().any(|t| t == template_ref))?;
-    let from = stage.seed_from.as_ref()?;
-    drive
+        .find(|s| s.template_refs.iter().any(|t| t == template_ref))
+    else {
+        return Vec::new();
+    };
+    let Some(from) = stage.seed_from.as_ref() else {
+        return Vec::new();
+    };
+    let Some(record) = drive
         .status
-        .as_ref()?
-        .curriculum
-        .as_ref()?
-        .stage_history
+        .as_ref()
+        .and_then(|s| s.curriculum.as_ref())
+        .map(|c| &c.stage_history)
+        .and_then(|h| h.iter().find(|r| &r.name == from))
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = record
+        .template_progress
         .iter()
-        .find(|r| &r.name == from)
-        .and_then(|r| r.best_experiment.clone())
+        .filter_map(|t| t.best_experiment.clone())
+        .collect();
+    if let Some(best) = record.best_experiment.clone() {
+        if !out.contains(&best) {
+            out.push(best);
+        }
+    }
+    out
 }
 
 /// Advance the curriculum when the current stage's promotion criteria are met.
@@ -1350,18 +1384,38 @@ async fn build_campaign(
             "templateRef {template_ref} not proposable now (allowed: {allowed:?})"
         ));
     }
-    templates
+    let template = templates
         .get_opt(template_ref)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("template {template_ref} does not exist in {ns}"))?;
+    // The morphology this campaign will train. Every seed candidate must
+    // match it: observed live, `seedFrom: stance` handed the stage-level
+    // winner (a spider run) to ALL FOUR morphology branches, and parameter
+    // inheritance then trained spider under spot/humanoid campaign names --
+    // 18 GPU runs of mislabeled science.
+    let target_robot = template
+        .spec
+        .defaults
+        .get("robot")
+        .and_then(Value::as_str)
+        .map(str::to_string);
 
     let branch_name = action
         .get("branch")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .unwrap_or("branch");
-    let campaign_name = dns_name(&format!("{drive_name}-{branch_name}"));
+    // The proposer sometimes echoes the drive name back in its branch label;
+    // blindly prefixing would double it ("<drive>-<drive>-...") and push the
+    // DERIVED names over Kubernetes limits. Campaign names feed
+    // `exp-<campaign>-NNN` experiment names, which travel as LABEL VALUES on
+    // Jobs/pods (63-char cap) -- observed live as 40h of Job-create rejections
+    // that idled every GPU. Budget: 63 - "exp-" - "-NNN" - margin = 54.
+    let deduped = branch_name
+        .strip_prefix(&format!("{drive_name}-"))
+        .unwrap_or(branch_name);
+    let campaign_name = dns_name_capped(&format!("{drive_name}-{deduped}"), 54);
 
     let strategy = action
         .get("strategy")
@@ -1388,32 +1442,69 @@ async fn build_campaign(
     // Seed: fork may reference any prior experiment; consolidate SHOULD.
     // Validate the referenced experiment exists; consolidate with no seed
     // falls back to the drive best, fork with none cold-starts (allowed).
+    // A seed's robot param must match the target template's. `robot_matches`
+    // is permissive only when identity is undeclared on either side.
+    let robot_of = |e: &Experiment| {
+        e.spec
+            .parameters
+            .get("robot")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
     let seed = match action.get("seedExperimentRef").and_then(Value::as_str) {
         Some(seed) if !seed.is_empty() => {
-            if experiments
+            let seed_obj = experiments
                 .get_opt(seed)
                 .await
                 .map_err(|e| e.to_string())?
-                .is_none()
-            {
-                return Err(format!("seedExperimentRef {seed} does not exist in {ns}"));
+                .ok_or_else(|| format!("seedExperimentRef {seed} does not exist in {ns}"))?;
+            let seed_robot = robot_of(&seed_obj);
+            if let (Some(t), Some(s)) = (&target_robot, &seed_robot) {
+                if t != s {
+                    return Err(format!(
+                        "seedExperimentRef {seed} trains robot {s} but template {template_ref} declares robot {t}; cross-morphology seeding is not a warm start, it is a mislabeled experiment"
+                    ));
+                }
             }
             Some(seed.to_string())
         }
         // A curriculum stage with `seedFrom` always seeds from the named
         // stage's winner: that reference carries WEIGHTS across the stage
         // boundary (seedExperimentRef -> ATHENA_RESUME_FROM), which is the
-        // entire reason for training in an order.
-        _ => stage_seed(drive, template_ref).or_else(|| {
-            if action_type == "consolidate" {
-                drive
+        // entire reason for training in an order. Candidates are checked in
+        // order (same-template row first, then stage best) and the first
+        // whose robot matches the target wins; none matching = cold start,
+        // which is honest where a wrong-morphology warm start is not.
+        _ => {
+            let mut resolved = None;
+            for cand in stage_seed_candidates(drive, template_ref) {
+                let Ok(Some(e)) = experiments.get_opt(&cand).await else {
+                    continue;
+                };
+                match (&target_robot, robot_of(&e)) {
+                    (Some(t), Some(s)) if t != &s => continue,
+                    _ => {
+                        resolved = Some(cand);
+                        break;
+                    }
+                }
+            }
+            if resolved.is_none() && action_type == "consolidate" {
+                if let Some(best) = drive
                     .status
                     .as_ref()
                     .and_then(|s| s.best_experiment_ref.clone())
-            } else {
-                None
+                {
+                    if let Ok(Some(e)) = experiments.get_opt(&best).await {
+                        match (&target_robot, robot_of(&e)) {
+                            (Some(t), Some(s)) if t != &s => {}
+                            _ => resolved = Some(best),
+                        }
+                    }
+                }
             }
-        }),
+            resolved
+        }
     };
 
     let hypothesis = action
@@ -1482,6 +1573,17 @@ async fn build_campaign(
         forked_from,
     };
     Ok((campaign, branch))
+}
+
+/// `dns_name` with a caller-chosen cap, for names that feed longer derived
+/// forms (experiment names, Job label values) and must leave them headroom.
+fn dns_name_capped(raw: &str, cap: usize) -> String {
+    let full = dns_name(raw);
+    full.chars()
+        .take(cap)
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
 
 /// Kubernetes DNS-1123 name: lowercase alnum + '-', max 63 chars, no leading/
@@ -1583,6 +1685,9 @@ mod tests {
                 best_objective: best,
                 incumbent_remeasured: remeasured,
                 seed_noise_sigma: sigma,
+                // Fixture campaigns "ran": zero-run folds are exercised by
+                // fold_zero_run_campaign_never_moves_stagnation.
+                succeeded_experiments: 1,
                 ..Default::default()
             }),
         }
@@ -1834,9 +1939,14 @@ mod tests {
         assert_eq!(allowed_templates(&drive), vec!["t-loco".to_string()]);
 
         // The later stage seeds from the earlier stage's winner: this is what
-        // carries weights across the boundary.
-        assert_eq!(stage_seed(&drive, "t-loco").as_deref(), Some("c1-000"));
-        assert_eq!(stage_seed(&drive, "t-stance"), None);
+        // carries weights across the boundary. Candidates are best-first
+        // (per-template rows, then the stage winner); the caller filters by
+        // robot identity.
+        assert_eq!(
+            stage_seed_candidates(&drive, "t-loco"),
+            vec!["c1-000".to_string()]
+        );
+        assert!(stage_seed_candidates(&drive, "t-stance").is_empty());
     }
 
     #[test]
@@ -1856,6 +1966,7 @@ mod tests {
         fold_campaign(
             &mut status,
             &campaign_with("t", Some(10.0), Some(12.0), None),
+            true,
         );
         assert_eq!(status.best_objective, Some(10.0)); // remeasured, not biased best
         assert_eq!(status.best_experiment_ref.as_deref(), Some("c-003"));
@@ -1874,6 +1985,7 @@ mod tests {
         fold_campaign(
             &mut status,
             &campaign_with("t", Some(10.5), None, Some(1.0)),
+            true,
         );
         assert_eq!(status.best_objective, Some(10.0));
         assert_eq!(status.stagnation_counter, 1);
@@ -1881,6 +1993,7 @@ mod tests {
         fold_campaign(
             &mut status,
             &campaign_with("t", Some(11.5), None, Some(1.0)),
+            true,
         );
         assert_eq!(status.best_objective, Some(11.5));
         assert_eq!(status.stagnation_counter, 0);
@@ -1898,6 +2011,7 @@ mod tests {
         fold_campaign(
             &mut status,
             &campaign_with("other", Some(999.0), None, None),
+            true,
         );
         assert_eq!(status.best_objective, Some(10.0));
         assert_eq!(status.best_template_ref.as_deref(), Some("t"));
@@ -1919,6 +2033,60 @@ mod tests {
         assert_eq!(status.proposals.len(), MAX_PROPOSAL_RECORDS);
         assert_eq!(status.proposals[0].id, "proposal-5"); // oldest dropped
         assert_eq!(status.proposals[9].id, "proposal-14");
+    }
+
+    #[test]
+    fn fold_out_of_stage_never_moves_stagnation() {
+        let mut status = ResearchDriveStatus {
+            best_objective: Some(10.0),
+            best_template_ref: Some("t".into()),
+            stagnation_counter: 2,
+            ..Default::default()
+        };
+        // Wind-down fold of a previous stage's campaign: no evidence about the
+        // current objective in either direction.
+        fold_campaign(
+            &mut status,
+            &campaign_with("old-stage-t", Some(1.0), None, None),
+            false,
+        );
+        assert_eq!(status.stagnation_counter, 2);
+        // Even an "improving" out-of-stage fold must not reset the counter.
+        fold_campaign(
+            &mut status,
+            &campaign_with("t", Some(99.0), None, None),
+            false,
+        );
+        assert_eq!(status.stagnation_counter, 2);
+    }
+
+    #[test]
+    fn fold_zero_run_campaign_never_moves_stagnation() {
+        let mut status = ResearchDriveStatus {
+            stagnation_counter: 2,
+            ..Default::default()
+        };
+        let mut c = campaign_with("t", None, None, None);
+        c.status.as_mut().unwrap().succeeded_experiments = 0;
+        c.status.as_mut().unwrap().best_experiment = None;
+        // Never ran anything: infrastructure outcome, counter untouched.
+        fold_campaign(&mut status, &c, true);
+        assert_eq!(status.stagnation_counter, 2);
+    }
+
+    #[test]
+    fn campaign_name_budget_dedupes_drive_echo() {
+        // The proposer echoing the drive name must not double the prefix.
+        let n = dns_name_capped("multi-robot-curriculum-drive-snake-recover", 54);
+        assert_eq!(n, "multi-robot-curriculum-drive-snake-recover");
+        let n = dns_name_capped(
+            "multi-robot-curriculum-drive-multi-robot-curriculum-drive-snake-recover-explore",
+            54,
+        );
+        assert!(n.len() <= 54, "{n}");
+        assert!(!n.ends_with('-'));
+        // exp-<name>-NNN stays a valid 63-char label value.
+        assert!(format!("exp-{n}-000").len() <= 63);
     }
 
     #[test]

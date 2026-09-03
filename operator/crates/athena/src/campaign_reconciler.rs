@@ -651,10 +651,24 @@ pub async fn reconcile(
             // defaults. Caught live: spot-recover-v70-001 ran at the canary's
             // 2M budget instead of the template's 15M.
             let seed_params: Option<BTreeMap<String, Value>> = seed_exp.map(|e| {
-                canary_seed_params(
+                let p = canary_seed_params(
                     &e.spec.parameters,
                     campaign.spec.canary.as_ref().map(|c| &c.parameters),
-                )
+                );
+                if best_exp.is_some() {
+                    // In-campaign best: same template, full inheritance.
+                    p
+                } else {
+                    // CROSS-CAMPAIGN seed: only schema-declared tunables may
+                    // travel. Identity params (robot, mode, spawn_fallen,
+                    // terrain) belong to THIS campaign's template; inheriting
+                    // them wholesale trained the seed's morphology under this
+                    // campaign's name -- observed live as 18 spider runs
+                    // filed as spot/humanoid recover evidence.
+                    p.into_iter()
+                        .filter(|(k, _)| template.spec.parameter_schema.contains_key(k))
+                        .collect()
+                }
             });
             // The seed's identity for lineage/parent bookkeeping: the in-campaign
             // best's name, or the external seed experiment's name when seeding
