@@ -10,21 +10,33 @@
 //!   `athena-api` + `kube` to serve the [`models`] DTOs as JSON.
 //!
 //! The headline view, [`Panel::ExperimentDetail`], embeds the learning-metric
-//! Grafana dashboard via [`panel_kit::GrafanaDashboard`] and the manifest editor
-//! via [`panel_kit::IdePanel`]. (Its sibling [`panel_kit::GrafanaPanel`] embeds
-//! one `/d-solo/` chart — unusable here until the dashboard's panel ids are
-//! pinned in nixlab, since provisioning reassigns them.)
+//! Grafana dashboard via [`panel_kit::grafana::GrafanaDashboard`] and the
+//! manifest editor via [`panel_kit::ide::IdePanel`]. (Its sibling
+//! [`panel_kit::grafana::GrafanaPanel`] embeds one `/d-solo/` chart — unusable
+//! here until the dashboard's panel ids are pinned in nixlab, since
+//! provisioning reassigns them.)
 
 pub mod models;
+mod workspace;
 
+use dioxus::events::PointerEvent as DioxusPointerEvent;
 use dioxus::prelude::*;
 use models::{
     ClusterSnapshot, ConditionDto, ReportSpecDto, ReportSummary, ResourceSummary,
     SchedulingSnapshot, TemplateSummary,
 };
-use panel_kit::{GrafanaDashboard, IdePanel, LayoutBuilder, PanelKind, PanelWin, use_workspace};
+use panel_kit::grafana::GrafanaDashboard;
+use panel_kit::ide::IdePanel;
+use panel_kit::{LayoutBuilder, PanelKind, PanelWin};
+use panel_kit_core::reducer::WorkspaceEvent;
+use panel_kit_core::PanelCommand;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use workspace::{
+    handle_key, handle_pointer_move, handle_pointer_up, handle_wheel, mount_viewport_observer,
+    project_workspace, use_panel_workspace, workspace_area_class, workspace_contents,
+    workspace_event_handler,
+};
 
 /// Grafana base URL for the embedded learning-metric dashboards.
 const GRAFANA_BASE: &str = "https://grafana.casazza.io";
@@ -89,21 +101,22 @@ impl PanelKind for Panel {
 const GUTTER: f64 = 16.0;
 
 /// Stack `panels` (kind + height) down a column of width `w` starting at `x`,
-/// deriving every `y`. Height is then the only number a panel owns — growing
-/// one pushes the rest down instead of silently overlapping them, which is
-/// what a hand-summed coordinate table gets wrong the moment you edit it.
-fn column<K: Copy>(b: &mut LayoutBuilder, x: f64, w: f64, panels: &[(K, f64)]) -> Vec<PanelWin<K>> {
+/// deriving every `y`. The same authored height becomes an explicit tile-row
+/// span; the host preserves that span as a floor, replacing the removed
+/// per-panel `tile_min_h` without inventing a second height.
+fn column<K: Copy>(
+    b: &mut LayoutBuilder,
+    x: f64,
+    w: f64,
+    tile_w: u8,
+    panels: &[(K, f64)],
+) -> Vec<PanelWin<K>> {
     let mut y = GUTTER;
     panels
         .iter()
         .map(|&(kind, h)| {
-            let mut win = b.at(kind, x, y, w, h);
-            // Tiling mode sizes a panel to its content, and an iframe has no
-            // intrinsic height — the Grafana embed collapses to panel-kit's
-            // 150px tile default however tall the dashboard is. Reuse the
-            // height declared right here, so a panel is never shorter tiled
-            // than floating and no second number gets invented.
-            win.tile_min_h = Some(h);
+            let tile_h = (h / panel_kit::TILE_ROW_PX).ceil() as u8;
+            let win = b.at(kind, x, y, w, h).with_tile(tile_w, tile_h);
             y += h + GUTTER;
             win
         })
@@ -119,6 +132,7 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
         &mut b,
         GUTTER,
         BROWSE_W,
+        2,
         &[
             (Panel::Experiments, 460.0),
             (Panel::Templates, 320.0),
@@ -132,6 +146,7 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
         &mut b,
         GUTTER + BROWSE_W + GUTTER,
         DETAIL_W,
+        2,
         &[
             (Panel::ExperimentDetail, 200.0),
             // Tall by default: this hosts a whole Grafana dashboard, not one chart.
@@ -170,11 +185,12 @@ fn admin_layout() -> Vec<PanelWin<AdminPanel>> {
     const POOLS_W: f64 = 900.0;
     const SIDE_W: f64 = 440.0;
     let mut b = LayoutBuilder::new();
-    let mut wins = column(&mut b, GUTTER, POOLS_W, &[(AdminPanel::GpuPools, 560.0)]);
+    let mut wins = column(&mut b, GUTTER, POOLS_W, 3, &[(AdminPanel::GpuPools, 560.0)]);
     wins.extend(column(
         &mut b,
         GUTTER + POOLS_W + GUTTER,
         SIDE_W,
+        1,
         &[
             (AdminPanel::NodePower, 260.0),
             (AdminPanel::Inference, 284.0),
@@ -273,14 +289,16 @@ enum ResearchNav {
 /// App root.
 #[component]
 pub fn App() -> Element {
-    // Versioned localStorage keys. `merge_defaults` only appends panels that
-    // don't exist yet, so a saved layout pins its old geometry forever —
-    // bump the suffix whenever default_layout/admin_layout change materially
-    // and the stale entry is simply ignored. v2: taller metrics panel + the
-    // tile_min_h that stops it collapsing to 150px when tiled.
-    // v3: the Research drill-down panel joins the default right column.
-    let ws = use_workspace("athena_console_web_v3", default_layout);
-    let admin_ws = use_workspace("athena_console_web_admin_v2", admin_layout);
+    // Preserve the existing versioned localStorage keys. The core V1/V2 reader
+    // accepts the controller-era records; authored tile spans are reapplied as
+    // floors so old saved layouts cannot collapse iframe-backed panels.
+    let ws = use_panel_workspace("athena_console_web_v3", default_layout);
+    let admin_ws = use_panel_workspace("athena_console_web_admin_v2", admin_layout);
+    mount_viewport_observer(&ws);
+    mount_viewport_observer(&admin_ws);
+    let ws_emit = workspace_event_handler(&ws);
+    let admin_emit = workspace_event_handler(&admin_ws);
+
     // Admin page toggle — a separate panel set (GPU/Kueue/inference). Researchers
     // stay on the default page; access itself is gated at the ingress (Zero Trust).
     let mut admin = use_signal(|| false);
@@ -298,16 +316,16 @@ pub fn App() -> Element {
 
     // Report Curator state.
     let selected_campaign = use_signal(|| Option::<ResourceSummary>::None);
-    let report_name = use_signal(|| String::new());
-    let report_title = use_signal(|| String::new());
-    let excluded: Signal<HashSet<String>> = use_signal(|| HashSet::new());
-    let sec_abstract = use_signal(|| String::new());
-    let sec_related_work = use_signal(|| String::new());
-    let sec_discussion = use_signal(|| String::new());
-    let sec_limitations = use_signal(|| String::new());
-    let seeds_text = use_signal(|| String::new());
-    let preview_doc = use_signal(|| String::new());
-    let save_status = use_signal(|| String::new());
+    let report_name = use_signal(String::new);
+    let report_title = use_signal(String::new);
+    let excluded: Signal<HashSet<String>> = use_signal(HashSet::new);
+    let sec_abstract = use_signal(String::new);
+    let sec_related_work = use_signal(String::new);
+    let sec_discussion = use_signal(String::new);
+    let sec_limitations = use_signal(String::new);
+    let seeds_text = use_signal(String::new);
+    let preview_doc = use_signal(String::new);
+    let save_status = use_signal(String::new);
 
     // Research drill-down navigation. `Panel` variants carry no data (PanelKind
     // is Copy), so the current depth — global fleet, one campaign, one
@@ -328,11 +346,11 @@ pub fn App() -> Element {
         };
 
         match kind {
-            Panel::Experiments => experiments_view(snap, ws, selected, manifest_doc),
+            Panel::Experiments => experiments_view(snap, ws_emit, selected, manifest_doc),
             Panel::ExperimentDetail => experiment_detail_view(selected),
             Panel::ExperimentMetrics => experiment_metrics_view(selected),
             Panel::ExperimentManifest => experiment_manifest_view(selected, manifest_doc),
-            Panel::Campaigns => campaigns_view(snap, ws, selected, manifest_doc),
+            Panel::Campaigns => campaigns_view(snap, ws_emit, selected, manifest_doc),
             Panel::Templates => templates_view(snap, template_doc),
             Panel::RuntimeProfiles => runtime_view(snap),
             Panel::Benchmarks => benchmarks_view(snap),
@@ -350,8 +368,10 @@ pub fn App() -> Element {
                 preview_doc,
                 save_status,
             ),
-            Panel::Reports => reports_view(snap, ws, selected_campaign, report_name, report_title),
-            Panel::Research => research_view(snap, research_nav, selected, manifest_doc, ws),
+            Panel::Reports => {
+                reports_view(snap, ws_emit, selected_campaign, report_name, report_title)
+            }
+            Panel::Research => research_view(snap, research_nav, selected, manifest_doc, ws_emit),
         }
     };
 
@@ -371,37 +391,119 @@ pub fn App() -> Element {
         }
     };
 
+    let workspace_snapshot = ws.snapshot.read();
+    let mut workspace_scratch = ws.scratch.borrow_mut();
+    let workspace_frame = project_workspace(&workspace_snapshot, &mut workspace_scratch);
+    let workspace_root_class = panel_kit::widgets::root::root_class(&workspace_frame);
+    let workspace_class = workspace_area_class(&workspace_frame);
+    let workspace_style = workspace_frame
+        .tile_grid
+        .map(panel_kit::widgets::root::tile_grid_style)
+        .unwrap_or_default();
+
+    let admin_snapshot = admin_ws.snapshot.read();
+    let mut admin_scratch = admin_ws.scratch.borrow_mut();
+    let admin_frame = project_workspace(&admin_snapshot, &mut admin_scratch);
+    let admin_root_class = panel_kit::widgets::root::root_class(&admin_frame);
+    let admin_class = workspace_area_class(&admin_frame);
+    let admin_style = admin_frame
+        .tile_grid
+        .map(panel_kit::widgets::root::tile_grid_style)
+        .unwrap_or_default();
+
+    let pointer_move_workspace = ws.clone();
+    let pointer_up_workspace = ws.clone();
+    let pointer_cancel_workspace = ws.clone();
+    let key_workspace = ws.clone();
+    let wheel_workspace = ws.clone();
+    let admin_pointer_move_workspace = admin_ws.clone();
+    let admin_pointer_up_workspace = admin_ws.clone();
+    let admin_pointer_cancel_workspace = admin_ws.clone();
+    let admin_key_workspace = admin_ws.clone();
+    let admin_wheel_workspace = admin_ws.clone();
+
     rsx! {
         style { {panel_kit::CSS} }
         style { {APP_CSS} }
         if admin() {
             div {
-                class: admin_ws.root_class(),
-                onmousemove: move |e| admin_ws.handle_mouse_move(&e),
-                onmouseup: move |_| admin_ws.handle_mouse_up(),
+                class: "{admin_root_class}",
+                tabindex: "0",
+                onpointermove: move |event: DioxusPointerEvent| {
+                    handle_pointer_move(&admin_pointer_move_workspace, &event)
+                },
+                onpointerup: move |event: DioxusPointerEvent| {
+                    handle_pointer_up(&admin_pointer_up_workspace, &event)
+                },
+                onpointercancel: move |event: DioxusPointerEvent| {
+                    handle_pointer_up(&admin_pointer_cancel_workspace, &event)
+                },
+                onkeydown: move |event| handle_key(&admin_key_workspace, &event),
                 header { class: "topbar",
                     h1 { "Athena Console · Admin" }
                     span { class: "hint", "GPU scheduling · Kueue · inference · Hephaestus — read-only" }
                     button { class: "btn admin-toggle", onclick: move |_| admin.set(false), "← Research" }
                 }
-                {admin_ws.render(admin_body)}
-                {admin_ws.dock()}
+                div {
+                    class: "{admin_class}",
+                    style: "{admin_style}",
+                    onwheel: move |event| handle_wheel(&admin_wheel_workspace, &event),
+                    {workspace_contents(&admin_frame, &admin_ws.catalog, admin_emit, admin_body)}
+                }
+                {panel_kit::widgets::dock::dock(
+                    admin_frame.dock,
+                    &admin_ws.catalog,
+                    admin_emit,
+                    None,
+                )}
             }
         } else {
             div {
-                class: ws.root_class(),
-                onmousemove: move |e| ws.handle_mouse_move(&e),
-                onmouseup: move |_| ws.handle_mouse_up(),
+                class: "{workspace_root_class}",
+                tabindex: "0",
+                onpointermove: move |event: DioxusPointerEvent| {
+                    handle_pointer_move(&pointer_move_workspace, &event)
+                },
+                onpointerup: move |event: DioxusPointerEvent| {
+                    handle_pointer_up(&pointer_up_workspace, &event)
+                },
+                onpointercancel: move |event: DioxusPointerEvent| {
+                    handle_pointer_up(&pointer_cancel_workspace, &event)
+                },
+                onkeydown: move |event| handle_key(&key_workspace, &event),
                 header { class: "topbar",
                     h1 { "Athena Console" }
                     span { class: "hint", "Kubernetes research operator dashboard · drag, resize, tile panels" }
                     button { class: "btn admin-toggle", onclick: move |_| admin.set(true), "⚙ Admin" }
                 }
-                {ws.render(body)}
-                {ws.dock()}
+                div {
+                    class: "{workspace_class}",
+                    style: "{workspace_style}",
+                    onwheel: move |event| handle_wheel(&wheel_workspace, &event),
+                    {workspace_contents(&workspace_frame, &ws.catalog, ws_emit, body)}
+                }
+                {panel_kit::widgets::dock::dock(
+                    workspace_frame.dock,
+                    &ws.catalog,
+                    ws_emit,
+                    None,
+                )}
             }
         }
     }
+}
+
+fn restore_panel(emit: EventHandler<WorkspaceEvent<Panel>>, panel: Panel) {
+    emit.call(WorkspaceEvent::Command {
+        target: Some(panel),
+        command: PanelCommand::Restore,
+    });
+}
+
+fn restore_detail_panels(emit: EventHandler<WorkspaceEvent<Panel>>) {
+    restore_panel(emit, Panel::ExperimentDetail);
+    restore_panel(emit, Panel::ExperimentMetrics);
+    restore_panel(emit, Panel::ExperimentManifest);
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +512,7 @@ pub fn App() -> Element {
 
 fn experiments_view(
     snap: ClusterSnapshot,
-    ws: panel_kit::Workspace<Panel>,
+    emit: EventHandler<WorkspaceEvent<Panel>>,
     mut selected: Signal<Option<ResourceSummary>>,
     mut manifest_doc: Signal<String>,
 ) -> Element {
@@ -444,10 +546,8 @@ fn experiments_view(
                                         onclick: move |_| {
                                             let e = exp_select.clone();
                                             selected.set(Some(e.clone()));
-                                            // Surface all three per-experiment panels.
-                                            ws.restore(Panel::ExperimentDetail);
-                                            ws.restore(Panel::ExperimentMetrics);
-                                            ws.restore(Panel::ExperimentManifest);
+                                            // Surface all three per-experiment panels through the host reducer.
+                                            restore_detail_panels(emit);
                                             // Load the manifest YAML into the IDE panel.
                                             spawn(async move {
                                                 match fetch_manifest(&e.namespace, &e.kind, &e.name).await {
@@ -536,13 +636,11 @@ fn time_range(sel: &ResourceSummary) -> (String, String) {
 fn select_resource(
     mut selected: Signal<Option<ResourceSummary>>,
     mut manifest_doc: Signal<String>,
-    ws: panel_kit::Workspace<Panel>,
+    emit: EventHandler<WorkspaceEvent<Panel>>,
     r: ResourceSummary,
 ) {
     selected.set(Some(r.clone()));
-    ws.restore(Panel::ExperimentDetail);
-    ws.restore(Panel::ExperimentMetrics);
-    ws.restore(Panel::ExperimentManifest);
+    restore_detail_panels(emit);
     spawn(async move {
         match fetch_manifest(&r.namespace, &r.kind, &r.name).await {
             Ok(yaml) => manifest_doc.set(yaml),
@@ -605,7 +703,7 @@ fn experiment_manifest_view(
 
 fn campaigns_view(
     snap: ClusterSnapshot,
-    ws: panel_kit::Workspace<Panel>,
+    emit: EventHandler<WorkspaceEvent<Panel>>,
     selected: Signal<Option<ResourceSummary>>,
     manifest_doc: Signal<String>,
 ) -> Element {
@@ -631,7 +729,7 @@ fn campaigns_view(
                                 td {
                                     button {
                                         class: "row-link",
-                                        onclick: move |_| select_resource(selected, manifest_doc, ws, cs.clone()),
+                                        onclick: move |_| select_resource(selected, manifest_doc, emit, cs.clone()),
                                         "{c.name}"
                                     }
                                     div { class: "muted", "{c.namespace}" }
@@ -790,7 +888,7 @@ fn research_view(
     mut nav: Signal<ResearchNav>,
     mut selected: Signal<Option<ResourceSummary>>,
     mut manifest_doc: Signal<String>,
-    ws: panel_kit::Workspace<Panel>,
+    emit: EventHandler<WorkspaceEvent<Panel>>,
 ) -> Element {
     let level = nav.read().clone();
 
@@ -1036,9 +1134,7 @@ fn research_view(
                         onclick: move |_| {
                             let e = exp_open.clone();
                             selected.set(Some(e.clone()));
-                            ws.restore(Panel::ExperimentDetail);
-                            ws.restore(Panel::ExperimentMetrics);
-                            ws.restore(Panel::ExperimentManifest);
+                            restore_detail_panels(emit);
                             spawn(async move {
                                 match fetch_manifest(&e.namespace, &e.kind, &e.name).await {
                                     Ok(yaml) => manifest_doc.set(yaml),
@@ -1083,7 +1179,7 @@ fn research_view(
 
 fn reports_view(
     snap: ClusterSnapshot,
-    ws: panel_kit::Workspace<Panel>,
+    emit: EventHandler<WorkspaceEvent<Panel>>,
     mut selected_campaign: Signal<Option<ResourceSummary>>,
     mut report_name: Signal<String>,
     mut report_title: Signal<String>,
@@ -1133,7 +1229,7 @@ fn reports_view(
                                             }
                                             report_name.set(r2.name.clone());
                                             report_title.set(r2.title.clone());
-                                            ws.restore(Panel::ReportCurator);
+                                            restore_panel(emit, Panel::ReportCurator);
                                         },
                                         "Load"
                                     }
