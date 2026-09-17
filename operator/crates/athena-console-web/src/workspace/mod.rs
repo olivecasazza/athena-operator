@@ -40,7 +40,7 @@ where
                     let panel_class = format!("panel-{}", meta.slug);
                     let maximized = matches!(panel.placement, Placement::Maximized);
                     let panel_body = body(panel.key, maximized);
-                    panel_kit::widgets::panel::panel_shell(panel, Some(&panel_class), rsx! {
+                    panel_kit::widgets::panel::panel_shell_with_events(panel, Some(&panel_class), rsx! {
                         {panel_kit::widgets::panel::panel_chrome_with_events(
                             panel,
                             meta,
@@ -50,7 +50,7 @@ where
                         )}
                         {panel_kit::widgets::panel::panel_body(panel_body)}
                         {panel_kit::widgets::panel::resize_grip(panel, emit)}
-                    })
+                    }, emit)
                 }
             }
         }
