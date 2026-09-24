@@ -28,8 +28,8 @@ use models::{
 use panel_kit::grafana::GrafanaDashboard;
 use panel_kit::ide::IdePanel;
 use panel_kit::{LayoutBuilder, PanelKind, PanelWin};
-use panel_kit_core::reducer::WorkspaceEvent;
 use panel_kit_core::PanelCommand;
+use panel_kit_core::reducer::WorkspaceEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use workspace::{
@@ -1110,8 +1110,9 @@ fn research_view(
             }
         }
         ResearchNav::Experiment { exp, .. } => {
-            // Filmstrip via the public Panathenaia BFF; a 404 renders as a
-            // broken image, which honestly means "predates filmstrips".
+            // Filmstrip via the public Panathenaia BFF. Only robot eval runs
+            // produce one; non-robot experiments (audits, probes) 404, so the
+            // image removes itself instead of rendering a broken icon.
             let film = format!(
                 "https://spot.casazza.io/api/v1/experiments/{}/figures/eval_filmstrip.png",
                 exp.name
@@ -1127,7 +1128,12 @@ fn research_view(
                 if let Some(h) = exp.hypothesis.clone() {
                     p { "{h}" }
                 }
-                img { class: "filmstrip", src: "{film}", alt: "eval filmstrip" }
+                img {
+                    class: "filmstrip",
+                    src: "{film}",
+                    alt: "",
+                    "onerror": "this.remove()",
+                }
                 p {
                     button {
                         class: "btn",
