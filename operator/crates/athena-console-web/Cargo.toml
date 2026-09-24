@@ -40,8 +40,8 @@ required-features = ["server"]
 # Frontend — unconditional. These all host-compile for `cargo check`; reqwest
 # auto-selects the browser fetch backend on wasm32 and a native backend on host.
 dioxus = { version = "0.6", features = ["web"] }
-panel-kit = { git = "https://github.com/olivecasazza/panel-kit", rev = "4aad83c86285c83706e380c054a2b317ff8c6f69" }
-panel-kit-core = { git = "https://github.com/olivecasazza/panel-kit", rev = "4aad83c86285c83706e380c054a2b317ff8c6f69" }
+panel-kit = { git = "https://github.com/olivecasazza/panel-kit", rev = "d1b6d4c2d3a7120549151c9aa7b7b3018617b45e" }
+panel-kit-core = { git = "https://github.com/olivecasazza/panel-kit", rev = "d1b6d4c2d3a7120549151c9aa7b7b3018617b45e" }
 # Match the wasm-bindgen CLI shipped by the panel-kit development shell.
 wasm-bindgen = "=0.2.121"
 serde = { workspace = true }
