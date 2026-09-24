@@ -1415,7 +1415,13 @@ async fn build_campaign(
     let deduped = branch_name
         .strip_prefix(&format!("{drive_name}-"))
         .unwrap_or(branch_name);
-    let campaign_name = dns_name_capped(&format!("{drive_name}-{deduped}"), 54);
+    // Campaign names describe the research branch, not the owning drive.
+    // The drive is already queryable through ownerReferences and labels;
+    // repeating it here produced names such as
+    // `multi-robot-curriculum-drive-multi-robot-...` and consumed the DNS
+    // budget needed by derived Experiment/Job labels. Keep the concise
+    // proposer branch after removing an echoed drive prefix.
+    let campaign_name = dns_name_capped(deduped, 54);
 
     let strategy = action
         .get("strategy")
