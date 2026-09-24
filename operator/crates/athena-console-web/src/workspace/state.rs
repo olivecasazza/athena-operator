@@ -8,10 +8,10 @@ use panel_kit::store::LocalStorageLayoutStore;
 use panel_kit::surface::{observe_viewport, surface_profile, viewport_size};
 use panel_kit::{PanelKind, PanelWin};
 use panel_kit_core::frame::{
-    project_into, ChromeProjectionInput, Placement, ProjectedFrame, ProjectionBuffer,
-    ProjectionInput, TileFillOrder, TileLayoutMetrics,
+    ChromeProjectionInput, Placement, ProjectedFrame, ProjectionBuffer, ProjectionInput,
+    TileFillOrder, TileLayoutMetrics, project_into,
 };
-use panel_kit_core::persist::{restore_snapshot, LayoutError, RestoreContext, SavePolicy};
+use panel_kit_core::persist::{LayoutError, RestoreContext, SavePolicy, restore_snapshot};
 use panel_kit_core::reducer::{ResizePolicy, Snapshot, Viewport, WorkspaceEvent};
 use panel_kit_core::{ChromeMetrics, Clamp, Mode, PanelCatalog, TileMetrics, Units};
 
@@ -113,7 +113,7 @@ pub(crate) fn project_workspace<'frame, K: PanelKind>(
     let surface = surface_profile(snapshot.viewport.width);
     let chrome = ChromeProjectionInput::full(ChromeMetrics::WEB);
     let tile = TileLayoutMetrics::from_tile_metrics(TileMetrics::WEB, surface)
-        .with_fill_order(TileFillOrder::ColumnMajor);
+        .with_fill_order(TileFillOrder::RowMajor);
 
     project_into(
         ProjectionInput {
