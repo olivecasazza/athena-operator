@@ -16,11 +16,10 @@
 //! here until the dashboard's panel ids are pinned in nixlab, since
 //! provisioning reassigns them.)
 
-mod datatable;
 pub mod models;
+mod tables;
 mod workspace;
 
-use datatable::{Col, DataTable, Key, Row, fmt_ms};
 use dioxus::events::PointerEvent as DioxusPointerEvent;
 use dioxus::prelude::*;
 use models::{
@@ -29,11 +28,14 @@ use models::{
 };
 use panel_kit::grafana::GrafanaDashboard;
 use panel_kit::ide::IdePanel;
+use panel_kit::widgets::{DataColumnSpec, DataRow as Row, DataTable, SortKey as Key};
 use panel_kit::{LayoutBuilder, PanelKind, PanelWin};
 use panel_kit_core::PanelCommand;
 use panel_kit_core::reducer::WorkspaceEvent;
+use panel_kit_core::widgets::data_table::{SortDir, TableQuery};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use tables::{RowExt, campaign_columns, campaign_row, experiment_columns, experiment_row, fmt_ms};
 use workspace::{
     handle_key, handle_pointer_move, handle_pointer_up, handle_wheel, mount_viewport_observer,
     project_workspace, use_panel_workspace, workspace_area_class, workspace_contents,
@@ -267,16 +269,8 @@ const APP_CSS: &str = "
 .cond.True, .cond.ok, .cond.ready { border-color:var(--green); color:var(--green); }
 .cond.warn { border-color:var(--yellow); color:var(--yellow); }
 .cond.bad, .cond.err { border-color:var(--red); color:var(--red); }
-.dt-bar { display:flex; align-items:center; gap:.5rem; margin:.2rem 0 .3rem; }
-.dt-filter { flex:1; width:auto; }
-.dt-count { font-size:.7rem; white-space:nowrap; }
-.tbl th.sortable { cursor:pointer; user-select:none; }
-.tbl th.sortable:hover { color:var(--fg); }
-.tbl tr.selected td { background:color-mix(in srgb, var(--accent) 12%, transparent); }
-.tbl td.date { white-space:nowrap; color:var(--dim); }
-/* One line per row: long CR names and hypotheses clip, full text in title. */
-.dt .tbl td { max-width:34ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.dt .tbl td .row-link { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:bottom; }
+.pk-dt td.date { white-space:nowrap; color:var(--dim); }
+.pk-dt td .row-link { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:bottom; }
 .filmstrip { width:100%; margin:.2rem 0; border:1px solid var(--line); }
 .crumb-current { color:var(--fg); }
 ";
@@ -535,24 +529,19 @@ fn experiments_view(
         .map(|exp| {
             let pick = exp.clone();
             let is_sel = sel.as_deref() == Some(exp.name.as_str());
-            Row::new(exp.name.clone())
-                .cell(
-                    rsx! { td {
-                        button {
-                            class: "row-link",
-                            onclick: move |_| select_resource(selected, manifest_doc, emit, pick.clone()),
-                            "{exp.name}"
-                        }
-                    } },
-                    Key::text(exp.name.clone()),
-                    &exp.name,
-                )
-                .text(exp.campaign.clone().unwrap_or_default())
-                .phase(exp.phase.clone())
-                .text(exp.mode.clone().unwrap_or_default())
-                .date(&exp.created_at)
-                .muted(exp.workspace_path.clone().unwrap_or_else(|| exp.detail.clone()))
-                .selected(is_sel)
+            let name = exp.name.clone();
+            experiment_row(
+                &exp,
+                rsx! { td {
+                    button {
+                        class: "row-link",
+                        onclick: move |_| select_resource(selected, manifest_doc, emit, pick.clone()),
+                        "{name}"
+                    }
+                } },
+                true,
+            )
+            .selected(is_sel)
         })
         .collect();
     rsx! {
@@ -561,16 +550,10 @@ fn experiments_view(
             p { "Kubernetes-native experiment resources, phases, and workspace refs." }
         }
         DataTable {
-            cols: vec![
-                Col::new("Experiment"),
-                Col::new("Campaign"),
-                Col::new("Phase"),
-                Col::new("Mode"),
-                Col::new("Created"),
-                Col::new("Workspace / detail"),
-            ],
+            columns: experiment_columns(true),
             rows,
-            sort: Some((4, true)),
+            initial: TableQuery::sorted("created", SortDir::Desc),
+            storage_key: Some("athena.table.experiments".to_string()),
             empty: "No experiments found.",
             placeholder: "filter experiments…",
         }
@@ -717,23 +700,20 @@ fn campaigns_view(
             let pick = c.clone();
             let shown = campaign_label(&c);
             let is_sel = sel.as_deref() == Some(c.name.as_str());
-            Row::new(c.name.clone())
-                .cell(
-                    rsx! { td { title: "{c.name}",
-                        button {
-                            class: "row-link",
-                            onclick: move |_| select_resource(selected, manifest_doc, emit, pick.clone()),
-                            "{shown}"
-                        }
-                    } },
-                    Key::text(shown.clone()),
-                    &c.name,
-                )
-                .text(c.drive.clone().unwrap_or_default())
-                .phase(c.phase.clone())
-                .date(&c.created_at)
-                .muted(c.detail.clone())
-                .selected(is_sel)
+            let full = c.name.clone();
+            let label = shown.clone();
+            campaign_row(
+                &c,
+                rsx! { td { title: "{full}",
+                    button {
+                        class: "row-link",
+                        onclick: move |_| select_resource(selected, manifest_doc, emit, pick.clone()),
+                        "{label}"
+                    }
+                } },
+                &shown,
+            )
+            .selected(is_sel)
         })
         .collect();
     rsx! {
@@ -742,15 +722,10 @@ fn campaigns_view(
             p { "Click a campaign to load its metrics (all member experiments, over the campaign window) into the Metrics panel." }
         }
         DataTable {
-            cols: vec![
-                Col::new("Campaign"),
-                Col::new("Drive"),
-                Col::new("Phase"),
-                Col::new("Created"),
-                Col::new("Progress"),
-            ],
+            columns: campaign_columns(),
             rows,
-            sort: Some((3, true)),
+            initial: TableQuery::sorted("created", SortDir::Desc),
+            storage_key: Some("athena.table.campaigns".to_string()),
             empty: "No campaigns found.",
             placeholder: "filter campaigns…",
         }
@@ -793,7 +768,7 @@ fn templates_view(snap: ClusterSnapshot, mut template_doc: Signal<String>) -> El
                 .text(tpl.name.clone())
                 .text(tpl.objective.clone())
                 .date(&tpl.created_at)
-                .muted(tpl.detail.clone())
+                .text_class(tpl.detail.clone(), "muted")
                 .cell(
                     rsx! { td {
                         button {
@@ -810,7 +785,7 @@ fn templates_view(snap: ClusterSnapshot, mut template_doc: Signal<String>) -> El
                             "Load YAML"
                         }
                     } },
-                    Key::None,
+                    Key::Missing,
                     "",
                 )
         })
@@ -821,15 +796,16 @@ fn templates_view(snap: ClusterSnapshot, mut template_doc: Signal<String>) -> El
             p { "Load Kubernetes-owned template YAML and inspect objectives + sources." }
         }
         DataTable {
-            cols: vec![
-                Col::new("Template"),
-                Col::new("Objective"),
-                Col::new("Created"),
-                Col::new("Source"),
-                Col::action(""),
+            columns: vec![
+                DataColumnSpec::new("name", "Template").pinned(),
+                DataColumnSpec::new("objective", "Objective"),
+                DataColumnSpec::new("created", "Created"),
+                DataColumnSpec::new("source", "Source"),
+                DataColumnSpec::new("load", "").pinned().unsorted(),
             ],
             rows,
-            sort: Some((0, false)),
+            initial: TableQuery::sorted("name", SortDir::Asc),
+            storage_key: Some("athena.table.templates".to_string()),
             empty: "No templates found.",
             placeholder: "filter templates…",
         }
@@ -880,16 +856,22 @@ fn resource_table(
         .map(|r| {
             Row::new(r.name.clone())
                 .text(r.name.clone())
-                .phase(r.phase.clone())
+                .text_class(r.phase.clone(), "phase")
                 .date(&r.created_at)
-                .muted(r.detail.clone())
+                .text_class(r.detail.clone(), "muted")
         })
         .collect();
     rsx! {
         DataTable {
-            cols: vec![Col::new(name_col), Col::new("Phase"), Col::new("Created"), Col::new(detail_col)],
+            columns: vec![
+                DataColumnSpec::new("name", name_col).pinned(),
+                DataColumnSpec::new("phase", "Phase"),
+                DataColumnSpec::new("created", "Created"),
+                DataColumnSpec::new("detail", detail_col),
+            ],
             rows,
-            sort: Some((2, true)),
+            initial: TableQuery::sorted("created", SortDir::Desc),
+            storage_key: Some(format!("athena.table.{}", name_col.to_lowercase())),
         }
     }
 }
@@ -983,22 +965,19 @@ fn research_view(
                 .map(|c| {
                     let name = c.name.clone();
                     let shown = campaign_label(c);
-                    Row::new(c.name.clone())
-                        .cell(
-                            rsx! { td { title: "{c.name}",
-                                button {
-                                    class: "row-link",
-                                    onclick: move |_| nav.set(ResearchNav::Campaign(name.clone())),
-                                    "{shown}"
-                                }
-                            } },
-                            Key::text(shown.clone()),
-                            &c.name,
-                        )
-                        .text(c.drive.clone().unwrap_or_default())
-                        .phase(c.phase.clone())
-                        .date(&c.created_at)
-                        .muted(c.detail.clone())
+                    let full = c.name.clone();
+                    let label = shown.clone();
+                    campaign_row(
+                        c,
+                        rsx! { td { title: "{full}",
+                            button {
+                                class: "row-link",
+                                onclick: move |_| nav.set(ResearchNav::Campaign(name.clone())),
+                                "{label}"
+                            }
+                        } },
+                        &shown,
+                    )
                 })
                 .collect();
             rsx! {
@@ -1051,15 +1030,10 @@ fn research_view(
                 }
                 h3 { "Campaigns" }
                 DataTable {
-                    cols: vec![
-                        Col::new("Campaign"),
-                        Col::new("Drive"),
-                        Col::new("Phase"),
-                        Col::new("Created"),
-                        Col::new("Detail"),
-                    ],
+                    columns: campaign_columns(),
                     rows: campaign_rows,
-                    sort: Some((3, true)),
+                    initial: TableQuery::sorted("created", SortDir::Desc),
+                    storage_key: Some("athena.table.research.campaigns".to_string()),
                     empty: "No campaigns found.",
                     placeholder: "filter campaigns…",
                 }
@@ -1084,25 +1058,21 @@ fn research_view(
                 .map(|e| {
                     let camp = campaign.clone();
                     let pick = e.clone();
-                    Row::new(e.name.clone())
-                        .cell(
-                            rsx! { td {
-                                button {
-                                    class: "row-link",
-                                    onclick: move |_| nav.set(ResearchNav::Experiment {
-                                        campaign: camp.clone(),
-                                        exp: pick.clone(),
-                                    }),
-                                    "{e.name}"
-                                }
-                            } },
-                            Key::text(e.name.clone()),
-                            &e.name,
-                        )
-                        .phase(e.phase.clone())
-                        .text(e.mode.clone().unwrap_or_default())
-                        .date(&e.created_at)
-                        .muted(e.hypothesis.clone().unwrap_or_default())
+                    let name = e.name.clone();
+                    experiment_row(
+                        &e,
+                        rsx! { td {
+                            button {
+                                class: "row-link",
+                                onclick: move |_| nav.set(ResearchNav::Experiment {
+                                    campaign: camp.clone(),
+                                    exp: pick.clone(),
+                                }),
+                                "{name}"
+                            }
+                        } },
+                        false,
+                    )
                 })
                 .collect();
             let report_rows: Vec<Row> = reports
@@ -1126,7 +1096,7 @@ fn research_view(
                             &r.name,
                         )
                         .text(r.title.clone())
-                        .phase(r.phase.clone())
+                        .text_class(r.phase.clone(), "phase")
                         .date(&r.created_at)
                 })
                 .collect();
@@ -1137,6 +1107,8 @@ fn research_view(
                         p {
                             span { class: "phase", "{c.phase}" }
                             span { class: "muted", " created {fmt_ms(&c.created_at)}" }
+                            if let Some(t) = c.template.clone() { span { class: "chip", "template: {t}" } }
+                            if let Some(st) = c.strategy.clone() { span { class: "chip", "strategy: {st}" } }
                             span { class: "muted", " {c.detail}" }
                         }
                         p { {cond_badges(&c.conditions)} }
@@ -1144,24 +1116,24 @@ fn research_view(
                 }
                 h3 { "Experiments" }
                 DataTable {
-                    cols: vec![
-                        Col::new("Experiment"),
-                        Col::new("Phase"),
-                        Col::new("Mode"),
-                        Col::new("Created"),
-                        Col::new("Hypothesis"),
-                    ],
+                    columns: experiment_columns(false),
                     rows: exp_rows,
-                    sort: Some((3, true)),
+                    initial: TableQuery::sorted("created", SortDir::Desc),
+                    storage_key: Some("athena.table.research.experiments".to_string()),
                     empty: "No experiments in this campaign.",
                     placeholder: "filter experiments…",
                 }
                 if !report_rows.is_empty() {
                     h3 { "Reports" }
                     DataTable {
-                        cols: vec![Col::new("Report"), Col::new("Title"), Col::new("Phase"), Col::new("Created")],
+                        columns: vec![
+                            DataColumnSpec::new("name", "Report").pinned(),
+                            DataColumnSpec::new("title", "Title"),
+                            DataColumnSpec::new("phase", "Phase"),
+                            DataColumnSpec::new("created", "Created"),
+                        ],
                         rows: report_rows,
-                        sort: Some((3, true)),
+                        initial: TableQuery::sorted("created", SortDir::Desc),
                     }
                 }
             }
@@ -1179,7 +1151,9 @@ fn research_view(
                 div { class: "view-head",
                     h2 { "{exp.name}" }
                     p { span { class: "phase", "{exp.phase}" }
-                        if let Some(m) = exp.mode.clone() { span { class: "chip", "{m}" } }
+                        if let Some(d) = exp.decision.clone() { span { class: "chip", "{d}" } }
+                        if let Some(t) = exp.template.clone() { span { class: "chip", "template: {t}" } }
+                        if let Some(p) = exp.parent.clone() { span { class: "chip", "parent: {p}" } }
                         span { class: "muted", " created {fmt_ms(&exp.created_at)} \u{b7} started {fmt_ms(&exp.started_at)} \u{b7} ended {fmt_ms(&exp.ended_at)}" }
                     }
                 }
@@ -1259,11 +1233,11 @@ fn reports_view(
                 .text(r.name.clone())
                 .text(r.campaign_ref.clone())
                 .text(r.title.clone())
-                .phase(r.phase.clone())
+                .text_class(r.phase.clone(), "phase")
                 .date(&r.created_at)
                 .cell(
                     rsx! { td { "{r.excluded_count}" } },
-                    Key::Num(r.excluded_count as f64),
+                    Key::num(r.excluded_count as f64),
                     "",
                 )
                 .cell(
@@ -1281,7 +1255,7 @@ fn reports_view(
                             "Load"
                         }
                     } },
-                    Key::None,
+                    Key::Missing,
                     "",
                 )
         })
@@ -1292,17 +1266,18 @@ fn reports_view(
             p { "Published ResearchReport resources. Click Load to open one in the Report Curator." }
         }
         DataTable {
-            cols: vec![
-                Col::new("Report"),
-                Col::new("Campaign"),
-                Col::new("Title"),
-                Col::new("Phase"),
-                Col::new("Created"),
-                Col::new("Excluded"),
-                Col::action(""),
+            columns: vec![
+                DataColumnSpec::new("name", "Report").pinned(),
+                DataColumnSpec::new("campaign", "Campaign"),
+                DataColumnSpec::new("title", "Title"),
+                DataColumnSpec::new("phase", "Phase"),
+                DataColumnSpec::new("created", "Created"),
+                DataColumnSpec::new("excluded", "Excluded"),
+                DataColumnSpec::new("load", "").pinned().unsorted(),
             ],
             rows,
-            sort: Some((4, true)),
+            initial: TableQuery::sorted("created", SortDir::Desc),
+            storage_key: Some("athena.table.reports".to_string()),
             empty: "No reports found.",
             placeholder: "filter reports…",
         }
@@ -1454,13 +1429,14 @@ fn report_curator_view(
                             }
                         }
                     } },
-                    Key::None,
+                    Key::Missing,
                     "",
                 )
                 .text(exp.name.clone())
-                .phase(exp.phase.clone())
+                .text_class(exp.phase.clone(), "phase")
+                .opt_text(exp.decision.clone())
                 .date(&exp.created_at)
-                .muted(exp.detail.clone())
+                .text_class(exp.detail.clone(), "muted")
         })
         .collect();
 
@@ -1502,15 +1478,17 @@ fn report_curator_view(
             p { class: "muted", "Select a campaign." }
         } else {
             DataTable {
-                cols: vec![
-                    Col::action("Include"),
-                    Col::new("Experiment"),
-                    Col::new("Phase"),
-                    Col::new("Created"),
-                    Col::new("Detail"),
+                columns: vec![
+                    DataColumnSpec::new("include", "Include").pinned().unsorted(),
+                    DataColumnSpec::new("name", "Experiment").pinned(),
+                    DataColumnSpec::new("phase", "Phase"),
+                    DataColumnSpec::new("decision", "Decision"),
+                    DataColumnSpec::new("created", "Created"),
+                    DataColumnSpec::new("detail", "Detail"),
                 ],
                 rows: exp_table,
-                sort: Some((3, true)),
+                initial: TableQuery::sorted("created", SortDir::Desc),
+                storage_key: Some("athena.table.curator".to_string()),
                 empty: "No experiments in this campaign.",
                 placeholder: "filter experiments…",
             }
@@ -1644,14 +1622,15 @@ fn gpu_pools_view(snap: SchedulingSnapshot) -> Element {
             }
         }
         DataTable {
-            cols: vec![
-                Col::new("Workload"),
-                Col::new("NS"),
-                Col::new("Queue"),
-                Col::new("Priority"),
-                Col::new("State"),
-                Col::new("GPU"),
+            columns: vec![
+                DataColumnSpec::new("name", "Workload").pinned(),
+                DataColumnSpec::new("ns", "NS"),
+                DataColumnSpec::new("queue", "Queue"),
+                DataColumnSpec::new("priority", "Priority"),
+                DataColumnSpec::new("state", "State"),
+                DataColumnSpec::new("gpu", "GPU"),
             ],
+            storage_key: Some("athena.table.workloads".to_string()),
             rows: snap
                 .workloads
                 .iter()
@@ -1662,9 +1641,9 @@ fn gpu_pools_view(snap: SchedulingSnapshot) -> Element {
                         .text(w.name.clone())
                         .text(w.namespace.clone())
                         .text(w.queue.clone())
-                        .phase(prio)
+                        .text_class(prio, "phase")
                         .text(w.state.clone())
-                        .cell(rsx! { td { "{w.gpus}" } }, Key::Num(w.gpus as f64), "")
+                        .cell(rsx! { td { "{w.gpus}" } }, Key::num(w.gpus as f64), "")
                 })
                 .collect::<Vec<Row>>(),
             empty: "No active workloads.",

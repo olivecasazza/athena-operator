@@ -130,6 +130,42 @@ pub struct ResourceSummary {
     /// Campaigns: the owning ResearchDrive, if any.
     #[serde(default)]
     pub drive: Option<String>,
+    /// ExperimentTemplate (experiments: via their campaign).
+    #[serde(default)]
+    pub template: Option<String>,
+    /// Campaigns: search strategy type.
+    #[serde(default)]
+    pub strategy: Option<String>,
+    /// Objective metric name and goal (`maximize` / `minimize`).
+    #[serde(default)]
+    pub objective: Option<String>,
+    #[serde(default)]
+    pub objective_goal: Option<String>,
+    /// Experiments: best value of the objective; campaigns: best objective.
+    #[serde(default)]
+    pub objective_value: Option<f64>,
+    /// Experiments: Keep / Discard / NeedsReview.
+    #[serde(default)]
+    pub decision: Option<String>,
+    /// Experiments: lineage parent and generation.
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub generation: Option<u32>,
+    /// Experiments: wall-clock runtime (controller-observed Job window).
+    #[serde(default)]
+    pub runtime_seconds: Option<i64>,
+    #[serde(default)]
+    pub gpu_hours: Option<f64>,
+    /// Campaigns: best experiment and experiment counts.
+    #[serde(default)]
+    pub best_experiment: Option<String>,
+    #[serde(default)]
+    pub succeeded: Option<u32>,
+    #[serde(default)]
+    pub failed: Option<u32>,
+    #[serde(default)]
+    pub running: Option<u32>,
 }
 
 impl ResourceSummary {

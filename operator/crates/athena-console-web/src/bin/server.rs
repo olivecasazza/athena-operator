@@ -171,12 +171,49 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         })
         .collect();
 
+    // Experiments carry no template ref; it lives on the owning campaign.
+    let campaign_template: HashMap<String, String> = campaign_list
+        .items
+        .iter()
+        .map(|c| (c.name_any(), c.spec.template_ref.clone()))
+        .collect();
+    // Campaigns get their objective metric/goal from their template.
+    let template_objective: HashMap<String, (String, String)> = tpl_list
+        .items
+        .iter()
+        .map(|t| {
+            (
+                t.name_any(),
+                (
+                    t.spec.objective.metric.clone(),
+                    format!("{:?}", t.spec.objective.goal).to_lowercase(),
+                ),
+            )
+        })
+        .collect();
+
     let experiments = exp_list
         .items
         .into_iter()
         .map(|e| {
             let status = e.status.as_ref();
             let jt = job_times.get(&format!("exp-{}", e.name_any())).cloned();
+            let detail = status.and_then(|s| s.metrics_detail.as_ref());
+            let objective = detail.and_then(|d| d.objective_name.clone());
+            let objective_value = detail
+                .and_then(|d| d.best.as_ref())
+                .zip(objective.as_deref())
+                .and_then(|(best, name)| best.get(name))
+                .and_then(|v| v.as_f64());
+            let lineage = e.spec.lineage.as_ref();
+            let cost = status.and_then(|s| s.cost.as_ref());
+            // Controller-observed Job window; status.cost is not populated yet.
+            let runtime_seconds = cost.and_then(|c| c.runtime_seconds).or_else(|| {
+                let (s, en) = jt.as_ref()?;
+                let s: i64 = s.as_ref()?.parse().ok()?;
+                let en: i64 = en.as_ref()?.parse().ok()?;
+                Some((en - s) / 1000)
+            });
             ResourceSummary {
                 namespace: e.namespace().unwrap_or_else(|| "default".to_string()),
                 name: e.name_any(),
@@ -194,6 +231,17 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 ended_at: jt.as_ref().and_then(|(_, en)| en.clone()),
                 created_at: to_ms(&e.metadata.creation_timestamp),
                 drive: None,
+                template: campaign_template.get(&e.spec.campaign_ref).cloned(),
+                objective_goal: detail.and_then(|d| d.objective_goal.clone()),
+                objective,
+                objective_value,
+                decision: status
+                    .and_then(|s| s.decision.as_ref())
+                    .map(|d| format!("{d:?}")),
+                parent: lineage.and_then(|l| l.parent.clone()),
+                generation: lineage.and_then(|l| l.generation),
+                runtime_seconds,
+                gpu_hours: cost.and_then(|c| c.gpu_hours),
                 campaign: Some(e.spec.campaign_ref.clone()),
                 mode: e
                     .spec
@@ -205,6 +253,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 // in every row would bloat the snapshot for no reader.
                 hypothesis: Some(e.spec.hypothesis.chars().take(240).collect()),
                 conditions: Vec::new(),
+                ..Default::default()
             }
         })
         .collect();
@@ -247,6 +296,19 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                     .as_ref()
                     .and_then(|o| o.iter().find(|r| r.kind == "ResearchDrive"))
                     .map(|r| r.name.clone()),
+                template: Some(c.spec.template_ref.clone()),
+                strategy: Some(c.spec.strategy.strategy_type.clone()),
+                objective: template_objective
+                    .get(&c.spec.template_ref)
+                    .map(|o| o.0.clone()),
+                objective_goal: template_objective
+                    .get(&c.spec.template_ref)
+                    .map(|o| o.1.clone()),
+                objective_value: status.and_then(|s| s.best_objective),
+                best_experiment: status.and_then(|s| s.best_experiment.clone()),
+                succeeded: status.map(|s| s.succeeded_experiments),
+                failed: status.map(|s| s.failed_experiments),
+                running: status.map(|s| s.running_experiments),
                 campaign: None,
                 // Campaign mode needs a template fetch per campaign; the drive
                 // summary carries stage context instead, so None is honest here.
@@ -262,6 +324,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                         reason: c.reason.unwrap_or_default(),
                     })
                     .collect(),
+                ..Default::default()
             }
         })
         .collect();
@@ -305,6 +368,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             mode: None,
             hypothesis: None,
             conditions: Vec::new(),
+            ..Default::default()
         })
         .collect();
 
@@ -341,6 +405,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 mode: None,
                 hypothesis: None,
                 conditions: Vec::new(),
+                ..Default::default()
             }
         })
         .collect();
@@ -372,6 +437,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             mode: None,
             hypothesis: None,
             conditions: Vec::new(),
+            ..Default::default()
         })
         .collect();
 
