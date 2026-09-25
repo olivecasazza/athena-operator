@@ -544,12 +544,23 @@ pub async fn reconcile(
     // Two backends: multi-node vLLM cluster (RayJob) wins if set, else single-node
     // mesh-llm (Deployment). Same lifecycle: ensure while active, tear down when
     // all experiments are terminal.
+    // A FAILED vLLM RayJob never self-heals (ensure won't recreate an object
+    // it can see), so without surfacing it the campaign sits in Running with
+    // zero experiments and a green health condition forever.
+    let mut inference_failure: Option<String> = None;
     let mesh_ready = if let Some(cluster) = &campaign.spec.inference_cluster {
         if all_done {
             teardown_vllm_cluster(&ctx, &ns, &name).await?;
             true
         } else {
-            ensure_vllm_cluster(&ctx, &ns, &campaign, &name, cluster).await?
+            match ensure_vllm_cluster(&ctx, &ns, &campaign, &name, cluster).await? {
+                InferenceState::Ready => true,
+                InferenceState::Starting => false,
+                InferenceState::Failed(msg) => {
+                    inference_failure = Some(msg);
+                    false
+                }
+            }
         }
     } else {
         match &campaign.spec.inference_mesh {
@@ -861,6 +872,10 @@ pub async fn reconcile(
         "CanaryFailed"
     } else if at_budget {
         "Completed"
+    } else if inference_failure.is_some() && running + new == 0 {
+        // Not terminal: deleting the failed RayJob makes the next reconcile
+        // recreate it and the campaign resumes.
+        "InferenceFailed"
     } else {
         "Running"
     };
@@ -909,6 +924,25 @@ pub async fn reconcile(
             format!("{succeeded} succeeded, {failed} failed, {running} running"),
         )
     };
+    let mut conditions = vec![experiments_healthy];
+    if campaign.spec.inference_cluster.is_some() && !all_done {
+        let (ok, reason, message) = match (&inference_failure, mesh_ready) {
+            (Some(msg), _) => (false, "RayJobFailed", msg.clone()),
+            (None, true) => (true, "Serving", "vLLM /health is up".to_string()),
+            (None, false) => (
+                false,
+                "Starting",
+                "waiting for the vLLM RayJob to serve".to_string(),
+            ),
+        };
+        conditions.push(json!({
+            "type": "InferenceReady",
+            "status": if ok { "True" } else { "False" },
+            "reason": reason,
+            "message": message,
+            "lastTransitionTime": chrono::Utc::now().to_rfc3339(),
+        }));
+    }
     let mut status = json!({ "status": {
         "runningExperiments": running + new,
         "succeededExperiments": succeeded,
@@ -924,7 +958,7 @@ pub async fn reconcile(
         "phase": phase,
         "observedGeneration": campaign.metadata.generation,
         "controllerVersion": env!("CARGO_PKG_VERSION"),
-        "conditions": [experiments_healthy],
+        "conditions": conditions,
     }});
     // Canary status is only ever written for canary campaigns, so existing CRs
     // are untouched (merge-patch: keys we don't send are left alone).
@@ -1941,7 +1975,7 @@ async fn ensure_vllm_cluster(
     campaign: &ResearchCampaign,
     campaign_name: &str,
     cluster: &VllmClusterSpec,
-) -> Result<bool, Error> {
+) -> Result<InferenceState, Error> {
     let name = format!("vllm-{campaign_name}");
     let owner = OwnerReference {
         api_version: "research.nixlab.io/v1alpha1".to_string(),
@@ -1995,22 +2029,27 @@ async fn ensure_vllm_cluster(
                 Err(kube::Error::Api(e)) if e.code == 409 => {}
                 Err(e) => return Err(Error::Kube(e)),
             }
-            return Ok(false);
+            return Ok(InferenceState::Starting);
         }
         Some(rj) => {
-            // Surface a Failed RayJob — it will NOT self-heal (get_opt sees it, so
-            // ensure never recreates), leaving the campaign hung at the readiness
-            // gate. Visible here; recreate-on-Failed is a future hardening.
-            let dep = rj
-                .data
-                .get("status")
+            // A Failed RayJob will NOT self-heal (get_opt sees it, so ensure
+            // never recreates); report it so the campaign status says why it
+            // is idle. Deleting the RayJob retries.
+            let st = rj.data.get("status");
+            let dep = st
                 .and_then(|s| s.get("jobDeploymentStatus"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if dep == "Failed" {
-                warn!(campaign = %campaign_name, %name,
-                    "vLLM RayJob is FAILED — campaign is gated with no experiments; \
-                     delete it to retry or inspect `kubectl logs`");
+                let message = st
+                    .and_then(|s| s.get("message"))
+                    .and_then(|v| v.as_str())
+                    .map(failure_summary)
+                    .unwrap_or_default();
+                warn!(campaign = %campaign_name, %name, %message, "vLLM RayJob is FAILED");
+                return Ok(InferenceState::Failed(format!(
+                    "RayJob {name} failed: {message} (delete the RayJob to retry)"
+                )));
             }
         }
     }
@@ -2033,7 +2072,35 @@ async fn ensure_vllm_cluster(
             .unwrap_or(false),
         Err(_) => false,
     };
-    Ok(ready)
+    Ok(if ready {
+        InferenceState::Ready
+    } else {
+        InferenceState::Starting
+    })
+}
+
+/// Readiness of a campaign's multi-node vLLM cluster.
+#[derive(Debug, PartialEq)]
+enum InferenceState {
+    Ready,
+    Starting,
+    Failed(String),
+}
+
+/// Condense a KubeRay failure message (which embeds up to 20k chars of driver
+/// log) to the line that names the error, bounded for a status condition.
+fn failure_summary(message: &str) -> String {
+    const MAX: usize = 240;
+    let line = message
+        .lines()
+        .rev()
+        .find(|l| l.contains("Error:") || l.contains("Error ") || l.contains("error:"))
+        .or_else(|| message.lines().next())
+        .unwrap_or("")
+        .trim();
+    // Drop rank prefixes like "[rank0]: ".
+    let line = line.rsplit("]: ").next().unwrap_or(line);
+    line.chars().take(MAX).collect()
 }
 
 /// Build the vLLM-on-Ray RayJob: GPU head (driver + rank 0) plus
@@ -2251,6 +2318,24 @@ async fn ensure_benchmark_run(
         Err(e) => warn!(%e, experiment = %exp_name, "failed to create BenchmarkRun"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod inference_failure_tests {
+    use super::failure_summary;
+
+    #[test]
+    fn summary_picks_the_error_line_and_bounds_it() {
+        let msg = "Job entrypoint command failed with exit code 1, last available logs:\n\
+[rank0]:   File \"sampler.py\", line 392\n\
+[rank0]: torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 446.00 MiB.\n\
+INFO Shutting down Ray distributed executor.";
+        assert_eq!(
+            failure_summary(msg),
+            "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 446.00 MiB."
+        );
+        assert!(failure_summary(&"x".repeat(1000)).len() <= 240);
+    }
 }
 
 #[cfg(test)]
