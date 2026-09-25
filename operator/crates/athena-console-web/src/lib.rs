@@ -342,7 +342,9 @@ const APP_CSS: &str = "
 .view-tab { display:inline-flex; }
 .view-btn.active-view { background:var(--inv-bg); color:var(--inv-fg); border-color:var(--inv-bg); }
 .view-del { padding:0 .3rem; border-left:0; }
-.view-name { width:8rem; }
+.views .view-name { width:8rem; flex:0 0 8rem; }
+.views { flex-wrap:nowrap; overflow-x:auto; }
+.pk-dt td .row-link { font-size:inherit; }
 .tbl { width:100%; border-collapse:collapse; font-size:.74rem; }
 .tbl th { text-align:left; color:var(--dim); font-weight:normal;
   border-bottom:1px solid var(--line2); padding:.25rem .4rem; }
