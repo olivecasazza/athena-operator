@@ -22,8 +22,9 @@ use athena_api::research_drive::ResearchDrive;
 use athena_api::research_report::{ResearchReport, ResearchReportSpec};
 use athena_api::runtime_profile::RuntimeProfile;
 use athena_console_web::models::{
-    ClusterSnapshot, ConditionDto, DriveSummary, ReportSpecDto, ReportSummary, ResourceSummary,
-    StageProgressDto, TemplateProgressDto, TemplateSummary,
+    ClusterSnapshot, ConditionDto, ConditionMessageDto, DriveSummary, ReportDetailDto,
+    ReportSpecDto, ReportSummary, ResourceSummary, StageProgressDto, TemplateProgressDto,
+    TemplateSummary,
 };
 use axum::{
     Json, Router,
@@ -33,7 +34,7 @@ use axum::{
     routing::{get, post},
 };
 use k8s_openapi::api::batch::v1::Job;
-use kube::api::{Api, ListParams, Patch, PatchParams};
+use kube::api::{Api, ListParams, PostParams};
 use kube::{Client, ResourceExt};
 use std::collections::HashMap;
 use std::process::Command;
@@ -58,6 +59,10 @@ async fn main() -> anyhow::Result<()> {
         // Report curation: persist a ResearchReport (spec only) and preview its
         // composed dossier from an unsaved draft.
         .route("/api/reports", post(create_report))
+        .route(
+            "/api/reports/:namespace/:name",
+            get(get_report).put(replace_report),
+        )
         .route("/api/reports/preview", post(preview_report))
         .fallback_service(ServeDir::new(dist));
 
@@ -526,16 +531,126 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
 // only (never status), via server-side apply with field manager "athena-console".
 // ---------------------------------------------------------------------------
 
-fn spec_from_dto(dto: &ReportSpecDto) -> ResearchReportSpec {
-    ResearchReportSpec {
+fn spec_from_dto(dto: &ReportSpecDto) -> Result<ResearchReportSpec, (StatusCode, String)> {
+    let bad = |what: &str, e: serde_json::Error| {
+        (StatusCode::BAD_REQUEST, format!("invalid {what}: {e}"))
+    };
+    Ok(ResearchReportSpec {
         campaign_ref: dto.campaign_ref.clone(),
         title: dto.title.clone(),
         included_experiments: dto.included_experiments.clone(),
         excluded_experiments: dto.excluded_experiments.clone(),
         sections: dto.sections.clone(),
         seeded_hypotheses: dto.seeded_hypotheses.clone(),
-        references: vec![],
-        about: None,
+        references: if dto.references.is_null() {
+            vec![]
+        } else {
+            serde_json::from_value(dto.references.clone()).map_err(|e| bad("references", e))?
+        },
+        about: if dto.about.is_null() {
+            None
+        } else {
+            serde_json::from_value(dto.about.clone()).map_err(|e| bad("about", e))?
+        },
+    })
+}
+
+/// RFC 1123 DNS label rules for a new report name.
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
+fn detail_of(r: &ResearchReport) -> ReportDetailDto {
+    let status = r.status.as_ref();
+    ReportDetailDto {
+        spec: ReportSpecDto {
+            namespace: r.namespace().unwrap_or_else(|| "default".to_string()),
+            name: r.name_any(),
+            campaign_ref: r.spec.campaign_ref.clone(),
+            title: r.spec.title.clone(),
+            included_experiments: r.spec.included_experiments.clone(),
+            excluded_experiments: r.spec.excluded_experiments.clone(),
+            sections: r.spec.sections.clone(),
+            seeded_hypotheses: r.spec.seeded_hypotheses.clone(),
+            references: serde_json::to_value(&r.spec.references).unwrap_or_default(),
+            about: serde_json::to_value(&r.spec.about).unwrap_or_default(),
+            resource_version: r.metadata.resource_version.clone(),
+        },
+        phase: status.and_then(|s| s.phase.clone()),
+        included_count: status.and_then(|s| s.included_count),
+        dataset_uri: status.and_then(|s| s.dataset_uri.clone()),
+        last_assembled_time: status.and_then(|s| s.last_assembled_time.clone()),
+        conditions: status
+            .and_then(|s| s.conditions.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| ConditionMessageDto {
+                ctype: c.condition_type.unwrap_or_default(),
+                status: c.status.unwrap_or_default(),
+                reason: c.reason.unwrap_or_default(),
+                message: c.message.unwrap_or_default(),
+            })
+            .collect(),
+        created_at: to_ms(&r.metadata.creation_timestamp),
+    }
+}
+
+/// `GET /api/reports/{ns}/{name}` — full editable spec + status.
+async fn get_report(
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<Json<ReportDetailDto>, (StatusCode, String)> {
+    let client = Client::try_default().await.map_err(ise)?;
+    let reports: Api<ResearchReport> = Api::namespaced(client, &namespace);
+    match reports.get_opt(&name).await.map_err(ise)? {
+        Some(r) => Ok(Json(detail_of(&r))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!("report {namespace}/{name} not found"),
+        )),
+    }
+}
+
+/// `PUT /api/reports/{ns}/{name}` — replace the spec of an existing report.
+/// Requires the resourceVersion the draft was loaded from, so a concurrent
+/// change (another curator, the drive's write-up) is a 409, not a silent
+/// overwrite. Replace — not apply — so removing a section removes it.
+async fn replace_report(
+    Path((namespace, name)): Path<(String, String)>,
+    Json(dto): Json<ReportSpecDto>,
+) -> Result<Json<ReportDetailDto>, (StatusCode, String)> {
+    let Some(rv) = dto.resource_version.clone() else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "resourceVersion is required to update".into(),
+        ));
+    };
+    let spec = spec_from_dto(&dto)?;
+    let client = Client::try_default().await.map_err(ise)?;
+    let reports: Api<ResearchReport> = Api::namespaced(client, &namespace);
+    let Some(mut current) = reports.get_opt(&name).await.map_err(ise)? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("report {namespace}/{name} not found"),
+        ));
+    };
+    current.spec = spec;
+    current.metadata.resource_version = Some(rv);
+    match reports
+        .replace(&name, &PostParams::default(), &current)
+        .await
+    {
+        Ok(r) => Ok(Json(detail_of(&r))),
+        Err(kube::Error::Api(e)) if e.code == 409 => Err((
+            StatusCode::CONFLICT,
+            "the report changed since it was loaded; reload it and reapply your edits".into(),
+        )),
+        Err(e) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
     }
 }
 
@@ -543,20 +658,23 @@ fn ise<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-/// `POST /api/reports` — validate + upsert a ResearchReport spec. Rejects an
-/// empty name/campaign or a campaignRef that does not exist in the namespace.
+/// `POST /api/reports` — create a new ResearchReport (spec only; the
+/// controller owns status). Rejects invalid names, a missing campaign, and an
+/// existing name (409): updates go through `PUT` with a resourceVersion.
 async fn create_report(
     Json(dto): Json<ReportSpecDto>,
-) -> Result<Json<ReportSummary>, (StatusCode, String)> {
-    if dto.name.trim().is_empty() || dto.campaign_ref.trim().is_empty() {
+) -> Result<Json<ReportDetailDto>, (StatusCode, String)> {
+    if !valid_name(&dto.name) {
         return Err((
             StatusCode::BAD_REQUEST,
-            "name and campaignRef are required".to_string(),
+            "name must be a DNS label: lowercase letters, digits, '-', max 63".into(),
         ));
     }
+    if dto.campaign_ref.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "campaignRef is required".into()));
+    }
+    let spec = spec_from_dto(&dto)?;
     let client = Client::try_default().await.map_err(ise)?;
-
-    // Validate the referenced campaign exists before persisting the report.
     let campaigns: Api<ResearchCampaign> = Api::namespaced(client.clone(), &dto.namespace);
     if campaigns
         .get_opt(&dto.campaign_ref)
@@ -572,37 +690,16 @@ async fn create_report(
             ),
         ));
     }
-
-    // Server-side apply needs apiVersion/kind/metadata in the body (a typed CR
-    // does not serialize them), so apply a JSON document carrying spec only.
-    let spec = spec_from_dto(&dto);
-    let body = serde_json::json!({
-        "apiVersion": "research.nixlab.io/v1alpha1",
-        "kind": "ResearchReport",
-        "metadata": { "name": dto.name, "namespace": dto.namespace },
-        "spec": spec,
-    });
+    let report = ResearchReport::new(&dto.name, spec);
     let reports: Api<ResearchReport> = Api::namespaced(client, &dto.namespace);
-    reports
-        .patch(
-            &dto.name,
-            &PatchParams::apply("athena-console").force(),
-            &Patch::Apply(&body),
-        )
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    Ok(Json(ReportSummary {
-        namespace: dto.namespace.clone(),
-        name: dto.name.clone(),
-        campaign_ref: dto.campaign_ref.clone(),
-        title: dto.title.clone().unwrap_or_default(),
-        phase: "Draft".to_string(),
-        excluded_count: dto.excluded_experiments.len(),
-        sections: dto.sections.clone(),
-        seeded_hypotheses: dto.seeded_hypotheses.clone(),
-        created_at: None,
-    }))
+    match reports.create(&PostParams::default(), &report).await {
+        Ok(r) => Ok(Json(detail_of(&r))),
+        Err(kube::Error::Api(e)) if e.code == 409 => Err((
+            StatusCode::CONFLICT,
+            format!("a report named '{}' already exists", dto.name),
+        )),
+        Err(e) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
+    }
 }
 
 /// `POST /api/reports/preview` — assemble the curated dossier Markdown for an
@@ -615,7 +712,7 @@ async fn preview_report(Json(dto): Json<ReportSpecDto>) -> Result<String, (Statu
         ));
     }
     let client = Client::try_default().await.map_err(ise)?;
-    let spec = spec_from_dto(&dto);
+    let spec = spec_from_dto(&dto)?;
     let curation = Curation::from_spec(&spec);
     dossier::assemble(&client, &dto.campaign_ref, &dto.namespace, Some(&curation))
         .await

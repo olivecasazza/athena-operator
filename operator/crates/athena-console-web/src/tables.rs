@@ -124,7 +124,18 @@ pub fn experiment_columns(with_campaign: bool) -> Vec<DataColumnSpec> {
 /// One experiment row; `name_cell` is the caller's (usually clickable) first
 /// cell and must render a `td`.
 pub fn experiment_row(e: &ResourceSummary, name_cell: Element, with_campaign: bool) -> DataRow {
-    let mut row = DataRow::new(e.name.clone()).cell(name_cell, SortKey::text(&e.name), &e.name);
+    experiment_cells(DataRow::new(e.name.clone()), e, name_cell, with_campaign)
+}
+
+/// Append the universal experiment cells to `row` (for tables that prepend
+/// their own leading columns, e.g. an include checkbox).
+pub fn experiment_cells(
+    row: DataRow,
+    e: &ResourceSummary,
+    name_cell: Element,
+    with_campaign: bool,
+) -> DataRow {
+    let mut row = row.cell(name_cell, SortKey::text(&e.name), &e.name);
     if with_campaign {
         row = row.opt_text(e.campaign.clone());
     }

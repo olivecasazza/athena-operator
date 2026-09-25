@@ -16,6 +16,7 @@
 //! here until the dashboard's panel ids are pinned in nixlab, since
 //! provisioning reassigns them.)
 
+mod curator;
 pub mod models;
 mod tables;
 mod workspace;
@@ -23,7 +24,7 @@ mod workspace;
 use dioxus::events::PointerEvent as DioxusPointerEvent;
 use dioxus::prelude::*;
 use models::{
-    ClusterSnapshot, ConditionDto, ReportSpecDto, ReportSummary, ResourceSummary,
+    ClusterSnapshot, ConditionDto, ReportDetailDto, ReportSpecDto, ReportSummary, ResourceSummary,
     SchedulingSnapshot, TemplateSummary,
 };
 use panel_kit::grafana::GrafanaDashboard;
@@ -35,7 +36,6 @@ use panel_kit_core::PanelCommand;
 use panel_kit_core::reducer::WorkspaceEvent;
 use panel_kit_core::widgets::data_table::{SortDir, TableQuery};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
 use tables::{RowExt, campaign_columns, campaign_row, experiment_columns, experiment_row, fmt_ms};
 use workspace::{PanelWorkspace, ViewPreset, ViewsSpec};
 use workspace::{
@@ -343,6 +343,38 @@ const APP_CSS: &str = "
 .view-btn.active-view { background:var(--inv-bg); color:var(--inv-fg); border-color:var(--inv-bg); }
 .view-del { padding:0 .3rem; border-left:0; }
 .views .view-name { width:8rem; flex:0 0 8rem; }
+/* Report Curator. Follows panel-kit's design rules: labels are tracked caps,
+   hierarchy is weight/case not colour, accent only for live state. */
+.cur { display:flex; flex-direction:column; gap:.45rem; min-height:100%; }
+.cur-subject, .cur-reports, .cur-bulk, .cur-add, .cur-footer {
+  display:flex; align-items:center; gap:.4rem; flex-wrap:wrap; }
+.cur-label { font-size:.68rem; text-transform:uppercase; letter-spacing:.06em;
+  color:var(--dim); min-width:5.5rem; }
+.cur-value { color:var(--fg); font-weight:600; }
+.cur-hint { font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; }
+.cur-report { max-width:22ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cur-report.active, .cur-tab.active { color:var(--fg); border-color:var(--fg); }
+.cur-tabs { display:flex; gap:0; border-bottom:1px solid var(--line); }
+.cur-tab { background:transparent; border:0; border-bottom:2px solid transparent;
+  color:var(--dim); font-family:var(--mono); font-size:.68rem; text-transform:uppercase;
+  letter-spacing:.06em; padding:.3rem .6rem; cursor:pointer; margin-bottom:-1px; }
+.cur-tab:hover { color:var(--fg); }
+.cur-count { margin-left:.35rem; color:var(--dim); }
+.cur-body { flex:1; min-height:0; display:flex; flex-direction:column; gap:.4rem; }
+.cur-section { border:1px solid var(--line2); padding:.35rem; display:flex;
+  flex-direction:column; gap:.3rem; }
+.cur-section-head { display:flex; gap:.4rem; align-items:center; }
+.cur-heading { font-weight:600; }
+.cur-text { min-height:7rem; resize:vertical; }
+.cur-text.tall { min-height:16rem; }
+.cur-footer { position:sticky; bottom:0; background:var(--panel);
+  border-top:1px solid var(--line); padding:.35rem 0 .1rem; margin-top:auto; }
+.cur-name { width:18ch; flex:0 0 18ch; }
+.cur-title { flex:1; min-width:12ch; width:auto; }
+.cur-dirty { color:var(--yellow); font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; }
+.btn.primary:not(:disabled) { border-color:var(--fg); color:var(--fg); }
+.btn:disabled { color:var(--dim); border-color:var(--line); cursor:not-allowed; }
+.ok { color:var(--green); font-size:.74rem; }
 .views { flex-wrap:nowrap; overflow-x:auto; }
 .pk-dt td .row-link { font-size:inherit; }
 .tbl { width:100%; border-collapse:collapse; font-size:.74rem; }
@@ -450,7 +482,7 @@ pub fn App() -> Element {
     let mut admin = use_signal(|| false);
 
     // Snapshot fetched once from the backend; views read it reactively.
-    let snapshot = use_resource(move || async move { fetch_snapshot().await });
+    let mut snapshot = use_resource(move || async move { fetch_snapshot().await });
     // Scheduling/inference stack snapshot for the admin page.
     let sched = use_resource(move || async move { fetch_scheduling().await });
 
@@ -460,18 +492,8 @@ pub fn App() -> Element {
     let manifest_doc = use_signal(|| "# Select an experiment to load its manifest.\n".to_string());
     let template_doc = use_signal(|| "# Load a template to view its YAML.\n".to_string());
 
-    // Report Curator state.
-    let selected_campaign = use_signal(|| Option::<ResourceSummary>::None);
-    let report_name = use_signal(String::new);
-    let report_title = use_signal(String::new);
-    let excluded: Signal<HashSet<String>> = use_signal(HashSet::new);
-    let sec_abstract = use_signal(String::new);
-    let sec_related_work = use_signal(String::new);
-    let sec_discussion = use_signal(String::new);
-    let sec_limitations = use_signal(String::new);
-    let seeds_text = use_signal(String::new);
-    let preview_doc = use_signal(String::new);
-    let save_status = use_signal(String::new);
+    // Report Curator state (draft, loaded report, tab, save outcome).
+    let curator_state = use_signal(curator::CuratorState::default);
 
     // Research drill-down navigation. `Panel` variants carry no data (PanelKind
     // is Copy), so the current depth — global fleet, one campaign, one
@@ -500,23 +522,22 @@ pub fn App() -> Element {
             Panel::Templates => templates_view(snap, template_doc),
             Panel::RuntimeProfiles => runtime_view(snap),
             Panel::Benchmarks => benchmarks_view(snap),
-            Panel::ReportCurator => report_curator_view(
-                snap,
-                selected_campaign,
-                report_name,
-                report_title,
-                excluded,
-                sec_abstract,
-                sec_related_work,
-                sec_discussion,
-                sec_limitations,
-                seeds_text,
-                preview_doc,
-                save_status,
-            ),
-            Panel::Reports => {
-                reports_view(snap, ws_emit, selected_campaign, report_name, report_title)
+            Panel::ReportCurator => {
+                let nav_campaign = match &*research_nav.read() {
+                    ResearchNav::Global => None,
+                    ResearchNav::Campaign(c)
+                    | ResearchNav::Experiment { campaign: c, .. }
+                    | ResearchNav::Report { campaign: c, .. } => Some(c.clone()),
+                };
+                curator::curator_view(
+                    snap,
+                    curator_state,
+                    selected,
+                    nav_campaign,
+                    EventHandler::new(move |_| snapshot.restart()),
+                )
             }
+            Panel::Reports => reports_view(snap, ws_emit, curator_state),
             Panel::Research => research_view(snap, research_nav, selected, manifest_doc, ws_emit),
         }
     };
@@ -883,7 +904,7 @@ fn fmt_rfc3339(at: &str) -> String {
 /// drive name as a prefix (sometimes twice). The CR name is immutable history,
 /// so the viewer strips the echo for display and keeps the full name in the
 /// tooltip and search haystack.
-fn campaign_label(c: &ResourceSummary) -> String {
+pub(crate) fn campaign_label(c: &ResourceSummary) -> String {
     let Some(drive) = c.drive.as_deref() else {
         return c.name.clone();
     };
@@ -1358,17 +1379,13 @@ fn research_view(
 fn reports_view(
     snap: ClusterSnapshot,
     emit: EventHandler<WorkspaceEvent<Panel>>,
-    mut selected_campaign: Signal<Option<ResourceSummary>>,
-    mut report_name: Signal<String>,
-    mut report_title: Signal<String>,
+    curator_state: Signal<curator::CuratorState>,
 ) -> Element {
-    let campaigns = snap.campaigns;
     let rows: Vec<Row> = snap
         .reports
         .into_iter()
         .map(|r| {
             let r2 = r.clone();
-            let camps = campaigns.clone();
             Row::new(r.name.clone())
                 .text(r.name.clone())
                 .text(r.campaign_ref.clone())
@@ -1385,14 +1402,10 @@ fn reports_view(
                         button {
                             class: "btn",
                             onclick: move |_| {
-                                if let Some(camp) = camps.iter().find(|c| c.name == r2.campaign_ref) {
-                                    selected_campaign.set(Some(camp.clone()));
-                                }
-                                report_name.set(r2.name.clone());
-                                report_title.set(r2.title.clone());
+                                curator::open_report(curator_state, r2.namespace.clone(), r2.name.clone());
                                 restore_panel(emit, Panel::ReportCurator);
                             },
-                            "Load"
+                            "Open"
                         }
                     } },
                     Key::Missing,
@@ -1403,7 +1416,7 @@ fn reports_view(
     rsx! {
         div { class: "view-head",
             h2 { "Reports" }
-            p { "Published ResearchReport resources. Click Load to open one in the Report Curator." }
+            p { "Published ResearchReport resources. Open one to review or edit it in the Report Curator." }
         }
         DataTable {
             columns: vec![
@@ -1421,321 +1434,6 @@ fn reports_view(
             empty: "No reports found.",
             placeholder: "filter reports…",
         }
-    }
-}
-
-/// Searchable campaign picker, newest first, grouped by owning drive, each
-/// label carrying its creation date. A component (not a plain view fn) because
-/// the dropdown's popup state is a hook.
-#[component]
-fn CampaignPicker(
-    campaigns: Vec<ResourceSummary>,
-    selected: String,
-    on_pick: EventHandler<Option<ResourceSummary>>,
-) -> Element {
-    use panel_kit::widgets::{Dropdown, DropdownAction, DropdownItem, DropdownState};
-    let state = use_signal(DropdownState::default);
-    let mut sorted = campaigns.clone();
-    sorted.sort_by_key(|c| {
-        std::cmp::Reverse(
-            c.created_at
-                .as_deref()
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(i64::MIN),
-        )
-    });
-    let items: Vec<DropdownItem> = sorted
-        .iter()
-        .map(|c| DropdownItem {
-            value: c.name.clone(),
-            label: format!("{} \u{b7} {}", campaign_label(c), fmt_ms(&c.created_at)),
-            group: c.drive.clone().unwrap_or_else(|| "standalone".to_string()),
-        })
-        .collect();
-    rsx! {
-        Dropdown {
-            items,
-            state,
-            selected,
-            placeholder: "select a campaign…".to_string(),
-            searchable: true,
-            on_action: move |action: DropdownAction| {
-                if let DropdownAction::Select { value } = action {
-                    on_pick.call(campaigns.iter().find(|c| c.name == value).cloned());
-                }
-            },
-        }
-    }
-}
-
-/// Build a [`ReportSpecDto`] from curator form state. Shared by preview and save.
-fn build_report_spec(
-    campaign: &ResourceSummary,
-    name: &str,
-    title: &str,
-    excluded: &HashSet<String>,
-    sec_abstract: &str,
-    sec_related_work: &str,
-    sec_discussion: &str,
-    sec_limitations: &str,
-    seeds_text: &str,
-) -> ReportSpecDto {
-    let mut sections = BTreeMap::new();
-    let pairs = [
-        ("Abstract", sec_abstract),
-        ("Related Work", sec_related_work),
-        ("Discussion", sec_discussion),
-        ("Limitations", sec_limitations),
-    ];
-    for (key, val) in pairs {
-        let v = val.trim();
-        if !v.is_empty() {
-            sections.insert(key.to_string(), v.to_string());
-        }
-    }
-    let seeded_hypotheses = seeds_text
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-    let title_opt = {
-        let t = title.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t.to_string())
-        }
-    };
-    ReportSpecDto {
-        namespace: campaign.namespace.clone(),
-        name: name.trim().to_string(),
-        campaign_ref: campaign.name.clone(),
-        title: title_opt,
-        included_experiments: vec![],
-        excluded_experiments: excluded.iter().cloned().collect(),
-        sections,
-        seeded_hypotheses,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn report_curator_view(
-    snap: ClusterSnapshot,
-    mut selected_campaign: Signal<Option<ResourceSummary>>,
-    mut report_name: Signal<String>,
-    mut report_title: Signal<String>,
-    mut excluded: Signal<HashSet<String>>,
-    mut sec_abstract: Signal<String>,
-    mut sec_related_work: Signal<String>,
-    mut sec_discussion: Signal<String>,
-    mut sec_limitations: Signal<String>,
-    mut seeds_text: Signal<String>,
-    mut preview_doc: Signal<String>,
-    mut save_status: Signal<String>,
-) -> Element {
-    // Two separate Vec copies: one for the handler closure, one for iteration.
-    let campaigns_for_change = snap.campaigns;
-    let experiments = snap.experiments;
-
-    let sel_campaign = selected_campaign.read().clone();
-    let sel_name = sel_campaign
-        .as_ref()
-        .map(|c| c.name.clone())
-        .unwrap_or_default();
-
-    let exp_rows: Vec<ResourceSummary> = experiments
-        .into_iter()
-        .filter(|e| !sel_name.is_empty() && e.campaign.as_deref() == Some(sel_name.as_str()))
-        .collect();
-
-    let excluded_set = excluded.read().clone();
-    let exp_table: Vec<Row> = exp_rows
-        .into_iter()
-        .map(|exp| {
-            let exp_name = exp.name.clone();
-            let is_included = !excluded_set.contains(&exp_name);
-            Row::new(exp.name.clone())
-                .cell(
-                    rsx! { td {
-                        input {
-                            r#type: "checkbox",
-                            checked: is_included,
-                            onchange: move |_| {
-                                let mut set = excluded.read().clone();
-                                if !set.remove(&exp_name) {
-                                    set.insert(exp_name.clone());
-                                }
-                                excluded.set(set);
-                            }
-                        }
-                    } },
-                    Key::Missing,
-                    "",
-                )
-                .text(exp.name.clone())
-                .text_class(exp.phase.clone(), "phase")
-                .opt_text(exp.decision.clone())
-                .date(&exp.created_at)
-                .text_class(exp.detail.clone(), "muted")
-        })
-        .collect();
-
-    rsx! {
-        div { class: "view-head",
-            h2 { "Report Curator" }
-            p { "Compose a campaign's experiments into a research-paper dataset (ResearchReport)." }
-        }
-
-        div { class: "section-label", "Campaign" }
-        CampaignPicker {
-            campaigns: campaigns_for_change,
-            selected: sel_name.clone(),
-            on_pick: move |found: Option<ResourceSummary>| {
-                selected_campaign.set(found);
-                excluded.set(HashSet::new());
-            },
-        }
-
-        div { class: "section-label", "Report Name" }
-        input {
-            class: "rc-input",
-            r#type: "text",
-            value: "{report_name()}",
-            placeholder: "my-report-2025",
-            oninput: move |e| report_name.set(e.value()),
-        }
-        div { class: "section-label", "Title (optional)" }
-        input {
-            class: "rc-input",
-            r#type: "text",
-            value: "{report_title()}",
-            placeholder: "Human-readable paper title",
-            oninput: move |e| report_title.set(e.value()),
-        }
-
-        div { class: "section-label", "Experiments" }
-        if sel_name.is_empty() {
-            p { class: "muted", "Select a campaign." }
-        } else {
-            DataTable {
-                columns: vec![
-                    DataColumnSpec::new("include", "Include").pinned().unsorted(),
-                    DataColumnSpec::new("name", "Experiment").pinned(),
-                    DataColumnSpec::new("phase", "Phase"),
-                    DataColumnSpec::new("decision", "Decision"),
-                    DataColumnSpec::new("created", "Created"),
-                    DataColumnSpec::new("detail", "Detail"),
-                ],
-                rows: exp_table,
-                initial: TableQuery::sorted("created", SortDir::Desc),
-                storage_key: Some("athena.table.curator".to_string()),
-                empty: "No experiments in this campaign.",
-                placeholder: "filter experiments…",
-            }
-        }
-
-        div { class: "section-label", "Abstract" }
-        textarea {
-            class: "rc-textarea",
-            value: "{sec_abstract()}",
-            oninput: move |e| sec_abstract.set(e.value()),
-        }
-        div { class: "section-label", "Related Work" }
-        textarea {
-            class: "rc-textarea",
-            value: "{sec_related_work()}",
-            oninput: move |e| sec_related_work.set(e.value()),
-        }
-        div { class: "section-label", "Discussion" }
-        textarea {
-            class: "rc-textarea",
-            value: "{sec_discussion()}",
-            oninput: move |e| sec_discussion.set(e.value()),
-        }
-        div { class: "section-label", "Limitations" }
-        textarea {
-            class: "rc-textarea",
-            value: "{sec_limitations()}",
-            oninput: move |e| sec_limitations.set(e.value()),
-        }
-        div { class: "section-label", "Seeded Hypotheses (one per line)" }
-        textarea {
-            class: "rc-textarea",
-            value: "{seeds_text()}",
-            oninput: move |e| seeds_text.set(e.value()),
-        }
-
-        div { style: "display:flex;gap:.5rem;margin:.5rem 0;",
-            button {
-                class: "btn",
-                onclick: move |_| {
-                    let sel = selected_campaign.read().clone();
-                    let rn = report_name.read().clone();
-                    let rt = report_title.read().clone();
-                    let ex = excluded.read().clone();
-                    let sa = sec_abstract.read().clone();
-                    let srw = sec_related_work.read().clone();
-                    let sd = sec_discussion.read().clone();
-                    let sl = sec_limitations.read().clone();
-                    let st = seeds_text.read().clone();
-                    let camp = match sel {
-                        None => {
-                            preview_doc.set("Select a campaign first.".to_string());
-                            return;
-                        }
-                        Some(c) => c,
-                    };
-                    if rn.trim().is_empty() {
-                        preview_doc.set("Enter a report name.".to_string());
-                        return;
-                    }
-                    let dto = build_report_spec(&camp, &rn, &rt, &ex, &sa, &srw, &sd, &sl, &st);
-                    spawn(async move {
-                        match preview_report(dto).await {
-                            Ok(md) => preview_doc.set(md),
-                            Err(e) => preview_doc.set(format!("Preview error: {e}")),
-                        }
-                    });
-                },
-                "Preview Dossier"
-            }
-            button {
-                class: "btn",
-                onclick: move |_| {
-                    let sel = selected_campaign.read().clone();
-                    let rn = report_name.read().clone();
-                    let rt = report_title.read().clone();
-                    let ex = excluded.read().clone();
-                    let sa = sec_abstract.read().clone();
-                    let srw = sec_related_work.read().clone();
-                    let sd = sec_discussion.read().clone();
-                    let sl = sec_limitations.read().clone();
-                    let st = seeds_text.read().clone();
-                    let camp = match sel {
-                        None => {
-                            save_status.set("Select a campaign first.".to_string());
-                            return;
-                        }
-                        Some(c) => c,
-                    };
-                    if rn.trim().is_empty() {
-                        save_status.set("Enter a report name.".to_string());
-                        return;
-                    }
-                    let dto = build_report_spec(&camp, &rn, &rt, &ex, &sa, &srw, &sd, &sl, &st);
-                    spawn(async move {
-                        match save_report(dto).await {
-                            Ok(s) => save_status.set(format!("Saved: {} ({})", s.name, s.phase)),
-                            Err(e) => save_status.set(format!("Save error: {e}")),
-                        }
-                    });
-                },
-                "Save Report"
-            }
-        }
-
-        pre { class: "preview", "{preview_doc}" }
-        p { class: "err", "{save_status}" }
     }
 }
 
@@ -1864,7 +1562,7 @@ fn inference_view(snap: SchedulingSnapshot) -> Element {
 
 /// Browser origin (`https://host:port`) for building absolute request URLs;
 /// empty string outside a browser.
-fn api_base() -> String {
+pub(crate) fn api_base() -> String {
     web_sys::window()
         .and_then(|w| w.location().origin().ok())
         .unwrap_or_default()
@@ -1915,24 +1613,29 @@ async fn fetch_template_yaml(namespace: &str, name: &str) -> Result<String, Stri
 }
 
 /// `POST /api/reports` — persist a ResearchReport spec, returns the summary row.
-async fn save_report(dto: ReportSpecDto) -> Result<ReportSummary, String> {
+pub(crate) async fn create_report(dto: ReportSpecDto) -> Result<ReportDetailDto, String> {
     let url = format!("{}/api/reports", api_base());
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .json(&dto)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    send_report(reqwest::Client::new().post(&url).json(&dto)).await
+}
+
+/// `PUT /api/reports/{ns}/{name}` — replace against the loaded resourceVersion.
+pub(crate) async fn update_report(dto: ReportSpecDto) -> Result<ReportDetailDto, String> {
+    let url = format!("{}/api/reports/{}/{}", api_base(), dto.namespace, dto.name);
+    send_report(reqwest::Client::new().put(&url).json(&dto)).await
+}
+
+async fn send_report(req: reqwest::RequestBuilder) -> Result<ReportDetailDto, String> {
+    let resp = req.send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(resp.text().await.unwrap_or_else(|e| e.to_string()));
     }
-    resp.json::<ReportSummary>()
+    resp.json::<ReportDetailDto>()
         .await
         .map_err(|e| e.to_string())
 }
 
 /// `POST /api/reports/preview` — compose the dossier Markdown; nothing persisted.
-async fn preview_report(dto: ReportSpecDto) -> Result<String, String> {
+pub(crate) async fn preview_report(dto: ReportSpecDto) -> Result<String, String> {
     let url = format!("{}/api/reports/preview", api_base());
     let resp = reqwest::Client::new()
         .post(&url)

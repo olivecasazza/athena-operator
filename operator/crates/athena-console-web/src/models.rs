@@ -227,6 +227,46 @@ pub struct ReportSpecDto {
     pub sections: BTreeMap<String, String>,
     #[serde(default)]
     pub seeded_hypotheses: Vec<String>,
+    /// Fields the curator does not edit but must carry through a save
+    /// unchanged (citations and the report's narrower subject), as raw JSON.
+    #[serde(default)]
+    pub references: serde_json::Value,
+    #[serde(default)]
+    pub about: serde_json::Value,
+    /// `metadata.resourceVersion` the draft was loaded from. `None` = create;
+    /// `Some` = replace, rejected with 409 if the report changed since.
+    #[serde(default)]
+    pub resource_version: Option<String>,
+}
+
+/// One report with its full editable spec and controller-observed status.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReportDetailDto {
+    pub spec: ReportSpecDto,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub included_count: Option<u32>,
+    #[serde(default)]
+    pub dataset_uri: Option<String>,
+    #[serde(default)]
+    pub last_assembled_time: Option<String>,
+    #[serde(default)]
+    pub conditions: Vec<ConditionMessageDto>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+/// A status condition with its message (report conditions explain
+/// themselves: missing provenance, uncited references).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ConditionMessageDto {
+    pub ctype: String,
+    pub status: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub message: String,
 }
 
 // ---------------------------------------------------------------------------
