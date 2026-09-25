@@ -24,51 +24,47 @@ Athena's product API is Kubernetes (`research.nixlab.io/v1alpha1`, namespace `ap
 
 Experiments have no template ref; it is their campaign's `spec.templateRef`. `status.cost` is currently never populated. `spec.parameters.mode` is a robot-trainer parameter (stance/locomotion/forage/arena), not a universal field.
 
-## Read: the normalized snapshot (preferred)
+## Access: MCP tools and the OpenAPI contract
 
-The console server joins all of the above into one JSON document with the universal fields already resolved (template via campaign, objective value, decision, lineage, runtime from the Job window, created dates):
+The console server exposes one API three ways, all generated from a single endpoint registry (`api::ops` in `operator/crates/athena-console-web/src/bin/server.rs`) with schemas derived from the Rust types:
 
-```bash
-kubectl -n apps port-forward svc/athena-console 3999:80 &   # or run it locally, below
-curl -s localhost:3999/api/snapshot | jq '.campaigns[] | {name, drive, template, phase, succeeded, failed, best_experiment, objective_value}'
-curl -s localhost:3999/api/snapshot | jq '.experiments[] | select(.campaign=="citation-audit") | {name, phase, decision, objective, objective_value, parent}'
-curl -s localhost:3999/api/reports/apps/<report>          # full spec + resourceVersion + status
-curl -s localhost:3999/api/scheduling                     # Kueue pools/workloads, node power, inference
-```
+- **MCP** at `POST /mcp`. Tools: `list_campaigns`, `list_experiments`, `list_reports`, `list_drives`, `get_report`, `get_manifest`, `get_scheduling`, `preview_report`, `create_report`, `update_report`. The project config `.omp/mcp.json` points at `http://127.0.0.1:3999/mcp`.
+- **OpenAPI 3.0** at `GET /api/openapi.json`.
+- **REST**: the same paths, e.g. `GET /api/experiments?campaign=…&query=…&decision=Keep&limit=20`.
 
-Timestamps in the snapshot are epoch-millis strings.
-
-Raw kubectl equivalents:
+The public host is behind Cloudflare Access, so reach it in-cluster:
 
 ```bash
-kubectl get rcp -n apps --sort-by=.metadata.creationTimestamp
-kubectl get exp -n apps -l athena.nixlab.io/campaign=<campaign>
-kubectl get rcp <campaign> -n apps -o jsonpath='{.status.phase}{"\n"}{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
+kubectl -n apps port-forward svc/athena-console 3999:80    # then MCP/REST on 127.0.0.1:3999
+curl -s localhost:3999/api/openapi.json | jq '.paths | keys'
 ```
+
+To add an endpoint, add the handler and one `Op` entry. It then appears in OpenAPI and as an MCP tool, and the tests check the document for dangling refs.
+
+List results are newest first as `{total, items}`, with the universal fields resolved: template via campaign, objective value, decision, lineage, runtime from the Job window, created dates. Timestamps are epoch-millis strings.
 
 ## Prior art before running anything
 
-Search hypotheses and report text for the robot/stage/topic first; a recorded failure is the most valuable hit.
+Search hypotheses and report text for the robot/stage/topic first; a recorded failure is the most valuable hit. Use `list_experiments` / `list_reports` with `query`, or:
 
 ```bash
-curl -s localhost:3999/api/snapshot | jq -r '.experiments[] | select(.hypothesis // "" | test("recover"; "i")) | "\(.name)\t\(.phase)\t\(.decision)\t\(.hypothesis)"'
-curl -s localhost:3999/api/snapshot | jq -r '.reports[] | select((.sections|tostring) | test("footgun|fall"; "i")) | "\(.name)\t\(.title)"'
+curl -s 'localhost:3999/api/experiments?query=recover&limit=100' | jq -r '.items[] | "\(.name)\t\(.phase)\t\(.decision)\t\(.hypothesis)"'
+curl -s 'localhost:3999/api/reports?query=footgun' | jq -r '.items[] | "\(.name)\t\(.title)"'
+```
+
+Raw kubectl remains available:
+
+```bash
+kubectl get rcp <campaign> -n apps -o jsonpath='{.status.phase}{"\n"}{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
 ```
 
 ## Write: ResearchReport specs
 
-Use the console API; it enforces the safe semantics.
+Use `create_report` / `update_report` (or the REST equivalents); they enforce the safe semantics:
 
-- `POST /api/reports` creates. The name must be a DNS label, the campaign must exist, and an existing name returns 409.
-- `PUT /api/reports/{ns}/{name}` replaces the spec. It **must** carry the `resource_version` you loaded, and a concurrent change returns 409. Reload, reapply, retry — never force.
-- `POST /api/reports/preview` composes the dossier from an unsaved spec and writes nothing. Preview before saving.
-
-```bash
-curl -s localhost:3999/api/reports/apps/<name> | jq '.spec' > /tmp/r.json          # includes resource_version
-# edit /tmp/r.json (sections are a map; keep references/about as loaded)
-curl -s -X POST -H 'content-type: application/json' --data @/tmp/r.json localhost:3999/api/reports/preview | head
-curl -s -X PUT  -H 'content-type: application/json' --data @/tmp/r.json localhost:3999/api/reports/apps/<name>
-```
+- `create_report`: the name must be a DNS label, the campaign must exist, and an existing name returns 409.
+- `update_report`: `body.resource_version` **must** be the one from `get_report`. A concurrent change returns 409 — reload, reapply, retry; never force. Pass `references` and `about` through unchanged.
+- `preview_report`: composes the dossier from an unsaved spec and writes nothing. Preview before saving.
 
 Drive-authored reports use the sections `Findings`, `Method`, `Footguns`, and `Limitations`. Record negative results and footguns explicitly.
 

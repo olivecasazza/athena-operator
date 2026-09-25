@@ -227,6 +227,7 @@ dependencies = [
  "panel-kit",
  "panel-kit-core",
  "reqwest",
+ "schemars",
  "serde",
  "serde_json",
  "tokio",

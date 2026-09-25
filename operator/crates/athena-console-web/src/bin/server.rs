@@ -7,10 +7,9 @@
 //!
 //! Run with: `cargo run -p athena-console-web --features server --bin console-server`
 //! Endpoints:
-//!   GET /api/snapshot                       -> ClusterSnapshot JSON
-//!   GET /api/manifest/{namespace}/{kind}/{name} -> resource YAML (text)
-//!   GET /api/template/{namespace}/{name}    -> ExperimentTemplate YAML (text)
-//!   GET /*                                  -> static SPA (ATHENA_CONSOLE_DIST, default ./dist)
+//! Endpoints are declared once in [`api::ops`]; `GET /api/openapi.json` is
+//! generated from that registry and the same registry is served as MCP tools
+//! at `POST /mcp`. `GET /*` serves the SPA (ATHENA_CONSOLE_DIST, default ./dist).
 
 use athena_api::benchmark_run::BenchmarkRun;
 use athena_api::benchmark_suite::BenchmarkSuite;
@@ -58,15 +57,24 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/template/:namespace/:name", get(template))
         // Report curation: persist a ResearchReport (spec only) and preview its
         // composed dossier from an unsaved draft.
-        .route("/api/reports", post(create_report))
         .route(
             "/api/reports/:namespace/:name",
             get(get_report).put(replace_report),
         )
         .route("/api/reports/preview", post(preview_report))
+        // Filtered, newest-first lists (the agent-facing read surface).
+        .route("/api/campaigns", get(api::list_campaigns))
+        .route("/api/experiments", get(api::list_experiments))
+        .route("/api/reports", get(api::list_reports).post(create_report))
+        .route("/api/drives", get(api::list_drives))
+        // One registry describes every endpoint: OpenAPI for humans/tools,
+        // MCP tools for agents. Neither is hand-written JSON.
+        .route("/api/openapi.json", get(api::openapi))
+        .route("/mcp", post(api::mcp).get(api::mcp_get))
         .fallback_service(ServeDir::new(dist));
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    api::set_self_addr(listener.local_addr()?);
     eprintln!("athena-console server listening on http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
@@ -718,4 +726,666 @@ async fn preview_report(Json(dto): Json<ReportSpecDto>) -> Result<String, (Statu
         .await
         .map(|d| d.markdown)
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// API registry: one declaration per endpoint drives the OpenAPI document and
+// the MCP tool list. Schemas come from the Rust types (schemars), so the
+// published contract cannot drift from what the handlers accept and return.
+// MCP tool calls are dispatched as real HTTP requests to this server, so an
+// agent gets exactly the REST semantics (validation, 409 conflicts) the
+// console gets. Writes are ResearchReport specs only; no status, no deletes.
+// ---------------------------------------------------------------------------
+mod api {
+    use super::*;
+    use axum::extract::Query;
+    use schemars::JsonSchema;
+    use schemars::r#gen::{SchemaGenerator, SchemaSettings};
+    use schemars::schema::Schema;
+    use serde::{Deserialize, Serialize};
+    use serde_json::{Value, json};
+    use std::net::SocketAddr;
+    use std::sync::OnceLock;
+
+    const DEFAULT_LIMIT: usize = 50;
+    const MAX_LIMIT: usize = 500;
+
+    // --- list endpoints -------------------------------------------------------
+
+    /// Filters for `GET /api/campaigns`.
+    #[derive(Deserialize, JsonSchema, Default)]
+    pub struct CampaignQuery {
+        /// Whitespace-separated terms; all must match name, template or progress text.
+        pub query: Option<String>,
+        /// Only campaigns owned by this ResearchDrive.
+        pub drive: Option<String>,
+        /// Only this phase (e.g. Running, Completed, InferenceFailed).
+        pub phase: Option<String>,
+        /// Max items (default 50, max 500).
+        pub limit: Option<usize>,
+    }
+
+    /// Filters for `GET /api/experiments`.
+    #[derive(Deserialize, JsonSchema, Default)]
+    pub struct ExperimentQuery {
+        /// Only experiments of this campaign.
+        pub campaign: Option<String>,
+        /// Whitespace-separated terms; all must match name, hypothesis or status message.
+        pub query: Option<String>,
+        /// Only this phase (e.g. Succeeded, Failed).
+        pub phase: Option<String>,
+        /// Only this decision (Keep, Discard, NeedsReview).
+        pub decision: Option<String>,
+        /// Max items (default 50, max 500).
+        pub limit: Option<usize>,
+    }
+
+    /// Filters for `GET /api/reports`.
+    #[derive(Deserialize, JsonSchema, Default)]
+    pub struct ReportQuery {
+        /// Only reports of this campaign.
+        pub campaign: Option<String>,
+        /// Whitespace-separated terms; all must match name, title or section text.
+        pub query: Option<String>,
+        /// Max items (default 50, max 500).
+        pub limit: Option<usize>,
+    }
+
+    /// Newest-first page of results.
+    #[derive(Serialize, JsonSchema)]
+    pub struct Page<T> {
+        /// Matches before the limit.
+        pub total: usize,
+        pub items: Vec<T>,
+    }
+
+    /// Report listing row: headings only; `GET /api/reports/{ns}/{name}` has the text.
+    #[derive(Serialize, JsonSchema)]
+    pub struct ReportListItem {
+        pub namespace: String,
+        pub name: String,
+        pub campaign: String,
+        pub title: String,
+        pub phase: String,
+        pub created_at: Option<String>,
+        pub sections: Vec<String>,
+        pub seeded_hypotheses: usize,
+        pub excluded: usize,
+    }
+
+    type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
+
+    fn terms_match(query: Option<&str>, hay: &[&str]) -> bool {
+        let Some(q) = query.filter(|q| !q.trim().is_empty()) else {
+            return true;
+        };
+        let hay = hay.join(" ").to_lowercase();
+        q.split_whitespace()
+            .all(|t| hay.contains(&t.to_lowercase()))
+    }
+
+    fn eq_opt(want: Option<&str>, have: Option<&str>) -> bool {
+        want.is_none_or(|w| have.is_some_and(|h| h.eq_ignore_ascii_case(w)))
+    }
+
+    fn page<T>(
+        mut items: Vec<T>,
+        created: impl Fn(&T) -> Option<&String>,
+        limit: Option<usize>,
+    ) -> Page<T> {
+        items.sort_by_key(|i| {
+            std::cmp::Reverse(
+                created(i)
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(i64::MIN),
+            )
+        });
+        let total = items.len();
+        items.truncate(limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT));
+        Page { total, items }
+    }
+
+    async fn snap() -> Result<ClusterSnapshot, (StatusCode, String)> {
+        load_snapshot().await.map_err(ise)
+    }
+
+    pub async fn list_campaigns(
+        Query(q): Query<CampaignQuery>,
+    ) -> ApiResult<Page<ResourceSummary>> {
+        let items = snap()
+            .await?
+            .campaigns
+            .into_iter()
+            .filter(|c| eq_opt(q.drive.as_deref(), c.drive.as_deref()))
+            .filter(|c| eq_opt(q.phase.as_deref(), Some(&c.phase)))
+            .filter(|c| {
+                terms_match(
+                    q.query.as_deref(),
+                    &[&c.name, c.template.as_deref().unwrap_or(""), &c.detail],
+                )
+            })
+            .collect();
+        Ok(Json(page(items, |c| c.created_at.as_ref(), q.limit)))
+    }
+
+    pub async fn list_experiments(
+        Query(q): Query<ExperimentQuery>,
+    ) -> ApiResult<Page<ResourceSummary>> {
+        let items = snap()
+            .await?
+            .experiments
+            .into_iter()
+            .filter(|e| eq_opt(q.campaign.as_deref(), e.campaign.as_deref()))
+            .filter(|e| eq_opt(q.phase.as_deref(), Some(&e.phase)))
+            .filter(|e| eq_opt(q.decision.as_deref(), e.decision.as_deref()))
+            .filter(|e| {
+                terms_match(
+                    q.query.as_deref(),
+                    &[&e.name, e.hypothesis.as_deref().unwrap_or(""), &e.detail],
+                )
+            })
+            .collect();
+        Ok(Json(page(items, |e| e.created_at.as_ref(), q.limit)))
+    }
+
+    pub async fn list_reports(Query(q): Query<ReportQuery>) -> ApiResult<Page<ReportListItem>> {
+        let items = snap()
+            .await?
+            .reports
+            .into_iter()
+            .filter(|r| q.campaign.as_deref().is_none_or(|c| r.campaign_ref == c))
+            .filter(|r| {
+                let mut hay = vec![r.name.as_str(), r.title.as_str()];
+                hay.extend(r.sections.values().map(String::as_str));
+                terms_match(q.query.as_deref(), &hay)
+            })
+            .map(|r| ReportListItem {
+                sections: r.sections.keys().cloned().collect(),
+                seeded_hypotheses: r.seeded_hypotheses.len(),
+                excluded: r.excluded_count,
+                namespace: r.namespace,
+                name: r.name,
+                campaign: r.campaign_ref,
+                title: r.title,
+                phase: r.phase,
+                created_at: r.created_at,
+            })
+            .collect();
+        Ok(Json(page(items, |r| r.created_at.as_ref(), q.limit)))
+    }
+
+    pub async fn list_drives() -> ApiResult<Vec<DriveSummary>> {
+        Ok(Json(snap().await?.drives))
+    }
+
+    // --- registry ---------------------------------------------------------------
+
+    type SchemaFn = fn(&mut SchemaGenerator) -> Schema;
+
+    fn schema<T: JsonSchema>(g: &mut SchemaGenerator) -> Schema {
+        g.subschema_for::<T>()
+    }
+
+    /// One HTTP operation. `id` is both the OpenAPI operationId and the MCP
+    /// tool name.
+    pub struct Op {
+        pub id: &'static str,
+        pub method: &'static str,
+        /// Path template; `{param}` segments are string path parameters.
+        pub path: &'static str,
+        pub summary: &'static str,
+        pub query: Option<SchemaFn>,
+        pub body: Option<SchemaFn>,
+        /// `None` = `text/plain` response.
+        pub response: Option<SchemaFn>,
+        /// Exposed as an MCP tool.
+        pub tool: bool,
+    }
+
+    pub fn ops() -> Vec<Op> {
+        vec![
+            Op {
+                id: "list_campaigns",
+                method: "get",
+                path: "/api/campaigns",
+                summary: "Campaigns newest first: drive, template, strategy, phase, counts, best experiment/objective, conditions.",
+                query: Some(schema::<CampaignQuery>),
+                body: None,
+                response: Some(schema::<Page<ResourceSummary>>),
+                tool: true,
+            },
+            Op {
+                id: "list_experiments",
+                method: "get",
+                path: "/api/experiments",
+                summary: "Experiments newest first: campaign, template, phase, decision, objective and best value, lineage parent/generation, runtime, hypothesis. Search here for prior art before proposing work.",
+                query: Some(schema::<ExperimentQuery>),
+                body: None,
+                response: Some(schema::<Page<ResourceSummary>>),
+                tool: true,
+            },
+            Op {
+                id: "list_reports",
+                method: "get",
+                path: "/api/reports",
+                summary: "ResearchReports newest first with section headings. The research memory: conclusions, footguns, negative results.",
+                query: Some(schema::<ReportQuery>),
+                body: None,
+                response: Some(schema::<Page<ReportListItem>>),
+                tool: true,
+            },
+            Op {
+                id: "list_drives",
+                method: "get",
+                path: "/api/drives",
+                summary: "ResearchDrives: phase, current curriculum stage, stagnation, conditions, per-stage template gate evidence.",
+                query: None,
+                body: None,
+                response: Some(schema::<Vec<DriveSummary>>),
+                tool: true,
+            },
+            Op {
+                id: "get_report",
+                method: "get",
+                path: "/api/reports/{namespace}/{name}",
+                summary: "Full editable ResearchReport spec (including resource_version) plus controller status and conditions.",
+                query: None,
+                body: None,
+                response: Some(schema::<ReportDetailDto>),
+                tool: true,
+            },
+            Op {
+                id: "get_manifest",
+                method: "get",
+                path: "/api/manifest/{namespace}/{kind}/{name}",
+                summary: "YAML of one resource (kind: experiment, researchcampaign, researchreport, researchdrive, experimenttemplate, runtimeprofile, benchmarksuite, benchmarkrun).",
+                query: None,
+                body: None,
+                response: None,
+                tool: true,
+            },
+            Op {
+                id: "get_scheduling",
+                method: "get",
+                path: "/api/scheduling",
+                summary: "GPU scheduling: Kueue pools and workloads, node power, inference backends.",
+                query: None,
+                body: None,
+                response: Some(schema::<athena_api::scheduling::SchedulingSnapshot>),
+                tool: true,
+            },
+            Op {
+                id: "preview_report",
+                method: "post",
+                path: "/api/reports/preview",
+                summary: "Compose the dossier Markdown for an unsaved report spec. Writes nothing.",
+                query: None,
+                body: Some(schema::<ReportSpecDto>),
+                response: None,
+                tool: true,
+            },
+            Op {
+                id: "create_report",
+                method: "post",
+                path: "/api/reports",
+                summary: "Create a ResearchReport (spec only). 400 if the name is not a DNS label or the campaign is missing; 409 if the name exists.",
+                query: None,
+                body: Some(schema::<ReportSpecDto>),
+                response: Some(schema::<ReportDetailDto>),
+                tool: true,
+            },
+            Op {
+                id: "update_report",
+                method: "put",
+                path: "/api/reports/{namespace}/{name}",
+                summary: "Replace a ResearchReport spec. body.resource_version must come from get_report; 409 if the report changed since (reload, reapply). Pass references/about through unchanged.",
+                query: None,
+                body: Some(schema::<ReportSpecDto>),
+                response: Some(schema::<ReportDetailDto>),
+                tool: true,
+            },
+            Op {
+                id: "get_snapshot",
+                method: "get",
+                path: "/api/snapshot",
+                summary: "Everything the console shows, unfiltered (large).",
+                query: None,
+                body: None,
+                response: Some(schema::<ClusterSnapshot>),
+                tool: false,
+            },
+        ]
+    }
+
+    fn path_params(path: &str) -> Vec<&str> {
+        path.split('/')
+            .filter_map(|seg| seg.strip_prefix('{').and_then(|s| s.strip_suffix('}')))
+            .collect()
+    }
+
+    fn to_value(s: Schema) -> Value {
+        serde_json::to_value(s).unwrap_or_default()
+    }
+
+    /// Query-struct properties as OpenAPI query parameters.
+    fn query_params(g: &mut SchemaGenerator, f: SchemaFn) -> Vec<Value> {
+        let root = to_value(f(g));
+        let resolved = resolve(&root, g);
+        let required: Vec<String> = resolved["required"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        resolved["properties"]
+            .as_object()
+            .map(|props| {
+                props
+                    .iter()
+                    .map(|(name, schema)| {
+                        json!({
+                            "name": name, "in": "query",
+                            "required": required.contains(name),
+                            "description": schema.get("description").cloned().unwrap_or(Value::Null),
+                            "schema": schema,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Follow a single `$ref` into the generator's definitions.
+    fn resolve(v: &Value, g: &SchemaGenerator) -> Value {
+        if let Some(r) = v.get("$ref").and_then(Value::as_str) {
+            let name = r.rsplit('/').next().unwrap_or("");
+            if let Some(def) = g.definitions().get(name) {
+                return serde_json::to_value(def).unwrap_or_default();
+            }
+        }
+        v.clone()
+    }
+
+    /// `GET /api/openapi.json` — OpenAPI 3.0 generated from [`ops`].
+    pub async fn openapi() -> Json<Value> {
+        Json(openapi_doc())
+    }
+
+    pub fn openapi_doc() -> Value {
+        let mut g = SchemaSettings::openapi3().into_generator();
+        let mut paths = serde_json::Map::new();
+        for op in ops() {
+            let mut params: Vec<Value> = path_params(op.path)
+                .into_iter()
+                .map(|p| json!({ "name": p, "in": "path", "required": true, "schema": { "type": "string" } }))
+                .collect();
+            if let Some(q) = op.query {
+                params.extend(query_params(&mut g, q));
+            }
+            let response = match op.response {
+                Some(f) => json!({ "application/json": { "schema": to_value(f(&mut g)) } }),
+                None => json!({ "text/plain": { "schema": { "type": "string" } } }),
+            };
+            let mut operation = json!({
+                "operationId": op.id,
+                "summary": op.summary,
+                "parameters": params,
+                "responses": {
+                    "200": { "description": "OK", "content": response },
+                    "400": { "description": "Invalid request" },
+                    "409": { "description": "Conflict" },
+                },
+            });
+            if let Some(b) = op.body {
+                operation["requestBody"] = json!({
+                    "required": true,
+                    "content": { "application/json": { "schema": to_value(b(&mut g)) } },
+                });
+            }
+            paths
+                .entry(op.path.to_string())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("path item is an object")
+                .insert(op.method.to_string(), operation);
+        }
+        let schemas: serde_json::Map<String, Value> = g
+            .take_definitions()
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::to_value(v).unwrap_or_default()))
+            .collect();
+        json!({
+            "openapi": "3.0.3",
+            "info": {
+                "title": "Athena console API",
+                "version": env!("CARGO_PKG_VERSION"),
+                "description": "Read Athena research resources; write ResearchReport specs only. Controllers own status. Timestamps are epoch-millis strings.",
+            },
+            "paths": paths,
+            "components": { "schemas": schemas },
+        })
+    }
+
+    // --- MCP ----------------------------------------------------------------------
+
+    static SELF_ADDR: OnceLock<SocketAddr> = OnceLock::new();
+
+    pub fn set_self_addr(addr: SocketAddr) {
+        let _ = SELF_ADDR.set(addr);
+    }
+
+    const INSTRUCTIONS: &str = "Athena research platform (research.nixlab.io, namespace apps). \
+The CRDs are the research record: search prior art with list_experiments / list_reports (query) \
+before proposing work, and record conclusions as ResearchReports. Report writes are spec-only; \
+update_report needs the resource_version from get_report and fails with 409 if the report changed. \
+Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis strings.";
+
+    /// MCP tool input schema for an op: path params + query fields + `body`.
+    /// Self-contained (inlined subschemas) because MCP clients do not resolve refs.
+    fn tool_schema(op: &Op) -> Value {
+        let mut settings = SchemaSettings::draft07();
+        settings.inline_subschemas = true;
+        let mut g = settings.into_generator();
+        let mut props = serde_json::Map::new();
+        let mut required: Vec<Value> = Vec::new();
+        for p in path_params(op.path) {
+            let default = if p == "namespace" {
+                " (use \"apps\")"
+            } else {
+                ""
+            };
+            props.insert(
+                p.into(),
+                json!({ "type": "string", "description": format!("path parameter{default}") }),
+            );
+            required.push(json!(p));
+        }
+        if let Some(q) = op.query {
+            let qs = to_value(q(&mut g));
+            if let Some(obj) = qs["properties"].as_object() {
+                props.extend(obj.clone());
+            }
+        }
+        if let Some(b) = op.body {
+            props.insert("body".into(), to_value(b(&mut g)));
+            required.push(json!("body"));
+        }
+        json!({ "type": "object", "properties": props, "required": required })
+    }
+
+    pub async fn mcp_get() -> impl IntoResponse {
+        (StatusCode::METHOD_NOT_ALLOWED, "POST JSON-RPC 2.0 to /mcp")
+    }
+
+    pub async fn mcp(Json(req): Json<Value>) -> axum::response::Response {
+        let Some(id) = req.get("id").cloned() else {
+            // Notifications get no JSON-RPC response.
+            return StatusCode::ACCEPTED.into_response();
+        };
+        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+        let params = req.get("params").cloned().unwrap_or(Value::Null);
+        let result = match method {
+            "initialize" => Ok(json!({
+                "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-03-26"),
+                "capabilities": { "tools": { "listChanged": false } },
+                "serverInfo": { "name": "athena", "version": env!("CARGO_PKG_VERSION") },
+                "instructions": INSTRUCTIONS,
+            })),
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(json!({
+                "tools": ops().iter().filter(|o| o.tool).map(|o| json!({
+                    "name": o.id,
+                    "description": o.summary,
+                    "inputSchema": tool_schema(o),
+                })).collect::<Vec<_>>()
+            })),
+            "tools/call" => Ok(call(&params).await),
+            other => {
+                Err(json!({ "code": -32601, "message": format!("method not found: {other}") }))
+            }
+        };
+        let body = match result {
+            Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
+            Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": e }),
+        };
+        Json(body).into_response()
+    }
+
+    fn tool_result(text: String, is_error: bool) -> Value {
+        json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
+    }
+
+    /// Execute a tool as the HTTP request it describes, against this server.
+    async fn call(params: &Value) -> Value {
+        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let Some(op) = ops().into_iter().find(|o| o.tool && o.id == name) else {
+            return tool_result(format!("unknown tool: {name}"), true);
+        };
+        let Some(addr) = SELF_ADDR.get() else {
+            return tool_result("server address not initialised".into(), true);
+        };
+        let mut path = op.path.to_string();
+        for p in path_params(op.path) {
+            let Some(v) = args
+                .get(p)
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+            else {
+                return tool_result(format!("missing argument: {p}"), true);
+            };
+            if v.contains('/') {
+                return tool_result(format!("invalid {p}: {v}"), true);
+            }
+            path = path.replace(&format!("{{{p}}}"), v);
+        }
+        let host = if addr.ip().is_unspecified() {
+            "127.0.0.1".to_string()
+        } else {
+            addr.ip().to_string()
+        };
+        let url = format!("http://{host}:{}{path}", addr.port());
+        let client = reqwest::Client::new();
+        let mut req = match op.method {
+            "get" => client.get(&url),
+            "post" => client.post(&url),
+            "put" => client.put(&url),
+            _ => return tool_result("unsupported method".into(), true),
+        };
+        if op.query.is_some() {
+            let pairs: Vec<(String, String)> = args
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(k, _)| {
+                    !path_params(op.path).contains(&k.as_str()) && k.as_str() != "body"
+                })
+                .filter_map(|(k, v)| match v {
+                    Value::String(s) => Some((k.clone(), s.clone())),
+                    Value::Number(n) => Some((k.clone(), n.to_string())),
+                    Value::Bool(b) => Some((k.clone(), b.to_string())),
+                    _ => None,
+                })
+                .collect();
+            req = req.query(&pairs);
+        }
+        if op.body.is_some() {
+            req = req.json(args.get("body").unwrap_or(&Value::Null));
+        }
+        match req.send().await {
+            Ok(resp) => {
+                let ok = resp.status().is_success();
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                // Pretty JSON reads better for models; text/plain passes through.
+                let text = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                    .unwrap_or(text);
+                if ok {
+                    tool_result(text, false)
+                } else {
+                    tool_result(format!("HTTP {status}: {text}"), true)
+                }
+            }
+            Err(e) => tool_result(e.to_string(), true),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn openapi_documents_every_op_with_resolvable_refs() {
+            let doc = openapi_doc();
+            for op in ops() {
+                assert!(
+                    doc["paths"][op.path][op.method].is_object(),
+                    "{} {}",
+                    op.method,
+                    op.path
+                );
+            }
+            let text = doc.to_string();
+            for r in text.split("\"$ref\":\"#/components/schemas/").skip(1) {
+                let name = &r[..r.find('"').unwrap()];
+                assert!(
+                    doc["components"]["schemas"][name].is_object(),
+                    "dangling ref {name}"
+                );
+            }
+            let params = doc["paths"]["/api/experiments"]["get"]["parameters"]
+                .as_array()
+                .unwrap();
+            assert!(
+                params
+                    .iter()
+                    .any(|p| p["name"] == "decision" && p["in"] == "query")
+            );
+        }
+
+        #[test]
+        fn tool_schemas_are_self_contained_and_require_path_params() {
+            for op in ops().iter().filter(|o| o.tool) {
+                let s = tool_schema(op);
+                assert!(!s.to_string().contains("$ref"), "{} has refs", op.id);
+                for p in path_params(op.path) {
+                    assert!(
+                        s["required"].as_array().unwrap().contains(&json!(p)),
+                        "{} {p}",
+                        op.id
+                    );
+                }
+            }
+            let upd = ops().into_iter().find(|o| o.id == "update_report").unwrap();
+            let s = tool_schema(&upd);
+            assert!(s["properties"]["body"]["properties"]["resource_version"].is_object());
+        }
+    }
 }

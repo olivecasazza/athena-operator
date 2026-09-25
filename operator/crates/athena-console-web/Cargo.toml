@@ -21,6 +21,7 @@ server = [
     "dep:tokio",
     "dep:tower-http",
     "dep:anyhow",
+    "dep:schemars",
 ]
 
 [lib]
@@ -56,4 +57,5 @@ k8s-openapi = { workspace = true, optional = true }
 athena-api = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
 tower-http = { version = "0.6", features = ["fs"], optional = true }

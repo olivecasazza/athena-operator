@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 /// One snapshot of all Athena resources in the cluster — the JSON payload of
 /// `GET /api/snapshot`. Mirrors the native `ClusterSnapshot`.
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ClusterSnapshot {
     pub experiments: Vec<ResourceSummary>,
@@ -33,6 +34,7 @@ pub struct ClusterSnapshot {
 
 /// One status condition, flattened for the wire. `type` is a Rust keyword, so
 /// the field is `ctype` renamed on the wire.
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ConditionDto {
     #[serde(rename = "type")]
@@ -43,6 +45,7 @@ pub struct ConditionDto {
 }
 
 /// A ResearchDrive, collapsed for the console's global view.
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DriveSummary {
@@ -64,6 +67,7 @@ pub struct DriveSummary {
 
 /// One curriculum stage's record, with the per-template gate evidence that
 /// answers "which line is holding promotion back".
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StageProgressDto {
@@ -74,6 +78,7 @@ pub struct StageProgressDto {
     pub templates: Vec<TemplateProgressDto>,
 }
 
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateProgressDto {
@@ -89,6 +94,7 @@ pub struct TemplateProgressDto {
 /// A generic Kubernetes resource row (experiment, campaign, suite, run,
 /// profile). Mirrors the native `ResourceSummary` minus the per-resource metric
 /// panel computation — the Grafana iframe is the metrics surface now.
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ResourceSummary {
     pub namespace: String,
@@ -177,6 +183,7 @@ impl ResourceSummary {
 }
 
 /// An ExperimentTemplate row. Mirrors the native `TemplateSummary`.
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TemplateSummary {
     pub namespace: String,
@@ -189,6 +196,7 @@ pub struct TemplateSummary {
 }
 
 /// A ResearchReport row for the reports list.
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ReportSummary {
     pub namespace: String,
@@ -212,6 +220,7 @@ pub struct ReportSummary {
 /// Payload for creating/updating a ResearchReport and for previewing its dossier.
 /// Mirrors `athena_api::research_report::ResearchReportSpec` plus the object's
 /// namespace/name so a single struct drives both save and preview.
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ReportSpecDto {
     pub namespace: String,
@@ -240,6 +249,7 @@ pub struct ReportSpecDto {
 }
 
 /// One report with its full editable spec and controller-observed status.
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ReportDetailDto {
     pub spec: ReportSpecDto,
@@ -259,6 +269,7 @@ pub struct ReportDetailDto {
 
 /// A status condition with its message (report conditions explain
 /// themselves: missing provenance, uncited references).
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ConditionMessageDto {
     pub ctype: String,
@@ -274,6 +285,7 @@ pub struct ConditionMessageDto {
 // `athena_api::scheduling::*` on the wire (camelCase) — `GET /api/scheduling`.
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchedulingSnapshot {
@@ -283,6 +295,7 @@ pub struct SchedulingSnapshot {
     pub inference: Vec<InferenceBackend>,
 }
 
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuPool {
@@ -295,6 +308,7 @@ pub struct GpuPool {
     pub admitted_workloads: i64,
 }
 
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadRow {
@@ -306,6 +320,7 @@ pub struct WorkloadRow {
     pub gpus: i64,
 }
 
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NodePower {
@@ -315,6 +330,7 @@ pub struct NodePower {
     pub pool: String,
 }
 
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct InferenceBackend {
