@@ -161,7 +161,10 @@ spec:
 
   proposer:
     endpoint: http://omniroute.apps.svc.cluster.local:20128/v1
-    model: auto/best-fast
+    # OmniRoute combo: free OpenRouter lanes (Space Bunny, GLM-5.2:free,
+    # Nemotron-3-ultra:free) with a MiniMax-M3 plan terminal. See nixlab
+    # modules/k8s/apps/omniroute/combo-seed.nix.
+    model: research-free
     apiKeySecretRef:
       name: omniroute-secrets
       key: API_KEY_PRIMARY
