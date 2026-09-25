@@ -95,11 +95,11 @@ pub(super) fn reduce_and_persist_workspace_event<K: PanelKind>(
 
     enforce_tile_minimums(&mut snapshot, &workspace.tile_min_rows);
 
-    if let Err(error) =
-        apply_save_decision(decision, &*workspace.store, &snapshot, &workspace.catalog)
-    {
-        log_layout_error("save layout", workspace.storage_key, &error);
-    }
+    workspace.with_store(|store, key| {
+        if let Err(error) = apply_save_decision(decision, store, &snapshot, &workspace.catalog) {
+            log_layout_error("save layout", key, &error);
+        }
+    });
 
     changed
 }

@@ -3,6 +3,7 @@
 mod catalog;
 mod events;
 mod state;
+mod views;
 
 use dioxus::prelude::*;
 use panel_kit_core::frame::{FrameStatus, Placement, ProjectedFrame};
@@ -12,9 +13,11 @@ use panel_kit_core::{PanelCatalog, PanelKind};
 pub(crate) use events::{
     handle_key, handle_pointer_move, handle_pointer_up, handle_wheel, workspace_event_handler,
 };
+pub(crate) use state::PanelWorkspace;
 pub(crate) use state::{
     mount_viewport_observer, project_workspace, use_panel_workspace, workspace_area_class,
 };
+pub(crate) use views::{ViewPreset, ViewsSpec};
 
 /// Compose projected panel shells, chrome, bodies, controls, and resize grips.
 pub(crate) fn workspace_contents<K, F>(

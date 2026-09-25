@@ -30,12 +30,14 @@ use panel_kit::grafana::GrafanaDashboard;
 use panel_kit::ide::IdePanel;
 use panel_kit::widgets::{DataColumnSpec, DataRow as Row, DataTable, SortKey as Key};
 use panel_kit::{LayoutBuilder, PanelKind, PanelWin};
+use panel_kit_core::Mode;
 use panel_kit_core::PanelCommand;
 use panel_kit_core::reducer::WorkspaceEvent;
 use panel_kit_core::widgets::data_table::{SortDir, TableQuery};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use tables::{RowExt, campaign_columns, campaign_row, experiment_columns, experiment_row, fmt_ms};
+use workspace::{PanelWorkspace, ViewPreset, ViewsSpec};
 use workspace::{
     handle_key, handle_pointer_move, handle_pointer_up, handle_wheel, mount_viewport_observer,
     project_workspace, use_panel_workspace, workspace_area_class, workspace_contents,
@@ -165,6 +167,131 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
     wins
 }
 
+/// Named views over the research workspace: which panels are visible, their
+/// tile spans (4-column grid, row-major shelves), and mode. Every other panel
+/// is minimized to the dock. Spans are relative: tiles stretch to fill the
+/// viewport, so shelf heights set proportions, not pixels.
+static RESEARCH_VIEWS: ViewsSpec<Panel> = ViewsSpec {
+    base: "athena_console_web_v4",
+    presets: &[
+        ViewPreset {
+            name: "Research",
+            mode: Mode::Tiling,
+            panels: &[
+                (Panel::Research, 2, 4),
+                (Panel::ExperimentMetrics, 2, 4),
+                (Panel::ExperimentDetail, 4, 1),
+            ],
+        },
+        ViewPreset {
+            name: "Experiments",
+            mode: Mode::Tiling,
+            panels: &[
+                (Panel::Experiments, 2, 4),
+                (Panel::ExperimentMetrics, 2, 4),
+                (Panel::ExperimentDetail, 2, 2),
+                (Panel::ExperimentManifest, 2, 2),
+            ],
+        },
+        ViewPreset {
+            name: "Campaigns",
+            mode: Mode::Tiling,
+            panels: &[
+                (Panel::Campaigns, 2, 4),
+                (Panel::ExperimentMetrics, 2, 4),
+                (Panel::ExperimentDetail, 4, 1),
+            ],
+        },
+        ViewPreset {
+            name: "Reports",
+            mode: Mode::Tiling,
+            panels: &[(Panel::Reports, 2, 4), (Panel::ReportCurator, 2, 4)],
+        },
+        ViewPreset {
+            name: "Catalog",
+            mode: Mode::Tiling,
+            panels: &[
+                (Panel::Templates, 2, 3),
+                (Panel::Benchmarks, 2, 3),
+                (Panel::RuntimeProfiles, 4, 2),
+            ],
+        },
+    ],
+};
+
+/// Top-bar view switcher: one button per view, reset, save-as, delete custom.
+fn view_bar(
+    ws: &PanelWorkspace<Panel>,
+    mut draft: Signal<String>,
+    mut err: Signal<String>,
+) -> Element {
+    let registry = ws.registry.read().clone();
+    let reset_ws = ws.clone();
+    let save_ws = ws.clone();
+    rsx! {
+        nav { class: "views", aria_label: "views",
+            for name in registry.views.clone() {
+                {
+                    let active = name == registry.active;
+                    let custom = !RESEARCH_VIEWS.is_preset(&name);
+                    let switch_ws = ws.clone();
+                    let delete_ws = ws.clone();
+                    let target = name.clone();
+                    let doomed = name.clone();
+                    rsx! {
+                        span { class: "view-tab", key: "{name}",
+                            button {
+                                class: if active { "btn view-btn active-view" } else { "btn view-btn" },
+                                aria_pressed: "{active}",
+                                onclick: move |_| switch_ws.switch_view(&target),
+                                "{name}"
+                            }
+                            if custom {
+                                button {
+                                    class: "btn view-del",
+                                    title: "delete view {name}",
+                                    onclick: move |_| delete_ws.delete_view(&doomed),
+                                    "\u{d7}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            button {
+                class: "btn",
+                title: "restore this view's panels and layout",
+                onclick: move |_| reset_ws.reset_view(),
+                "Reset"
+            }
+            input {
+                class: "rc-input view-name",
+                placeholder: "new view…",
+                value: "{draft}",
+                oninput: move |e| draft.set(e.value()),
+            }
+            button {
+                class: "btn",
+                disabled: draft.read().trim().is_empty(),
+                onclick: move |_| {
+                    let name = draft.read().trim().to_string();
+                    match save_ws.save_view_as(&name) {
+                        Ok(()) => {
+                            draft.set(String::new());
+                            err.set(String::new());
+                        }
+                        Err(e) => err.set(e),
+                    }
+                },
+                "Save as"
+            }
+            if !err.read().is_empty() {
+                span { class: "err", "{err}" }
+            }
+        }
+    }
+}
+
 /// Admin-only page: the GPU-scheduling / inference stack. Rendered on a SEPARATE
 /// panel-kit workspace (its own layout), opened via the topbar "Admin" toggle.
 /// Observability only — cluster config stays GitOps (nixlab/Flux).
@@ -211,6 +338,11 @@ const APP_CSS: &str = "
   border-bottom:1px solid var(--line); }
 .topbar h1 { font-size:1rem; color:var(--pink); margin:0; }
 .topbar .hint { color:var(--dim); font-size:.72rem; }
+.views { display:flex; align-items:center; gap:.3rem; flex:1; min-width:0; flex-wrap:wrap; }
+.view-tab { display:inline-flex; }
+.view-btn.active-view { background:var(--inv-bg); color:var(--inv-fg); border-color:var(--inv-bg); }
+.view-del { padding:0 .3rem; border-left:0; }
+.view-name { width:8rem; }
 .tbl { width:100%; border-collapse:collapse; font-size:.74rem; }
 .tbl th { text-align:left; color:var(--dim); font-weight:normal;
   border-bottom:1px solid var(--line2); padding:.25rem .4rem; }
@@ -298,8 +430,14 @@ pub fn App() -> Element {
     // Preserve the existing versioned localStorage keys. The core V1/V2 reader
     // accepts the controller-era records; authored tile spans are reapplied as
     // floors so old saved layouts cannot collapse iframe-backed panels.
-    let ws = use_panel_workspace("athena_console_web_v3", default_layout);
-    let admin_ws = use_panel_workspace("athena_console_web_admin_v2", admin_layout);
+    let ws = use_panel_workspace(
+        "athena_console_web_v3",
+        default_layout,
+        Some(&RESEARCH_VIEWS),
+    );
+    let admin_ws = use_panel_workspace("athena_console_web_admin_v2", admin_layout, None);
+    let view_draft = use_signal(String::new);
+    let view_err = use_signal(String::new);
     mount_viewport_observer(&ws);
     mount_viewport_observer(&admin_ws);
     let ws_emit = workspace_event_handler(&ws);
@@ -479,7 +617,7 @@ pub fn App() -> Element {
                 onkeydown: move |event| handle_key(&key_workspace, &event),
                 header { class: "topbar",
                     h1 { "Athena Console" }
-                    span { class: "hint", "Kubernetes research operator dashboard · drag, resize, tile panels" }
+                    {view_bar(&ws, view_draft, view_err)}
                     button { class: "btn admin-toggle", onclick: move |_| admin.set(true), "⚙ Admin" }
                 }
                 div {
