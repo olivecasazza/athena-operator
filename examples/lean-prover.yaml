@@ -43,18 +43,14 @@ spec:
     workspaceAccessModes:
       - ReadWriteMany
     workspaceStorageClassName: nfs
-  # LLM tactic policy (phase 2): proposals come from the in-cluster litellm
-  # gateway; the kernel remains the only judge. Key is file-mounted (env vars
-  # in RuntimeProfile are plain values; never inline a secret).
+  # LLM tactic policy (phase 2): proposals come from a campaign-managed vLLM
+  # mesh (ResearchCampaign.spec.inferenceCluster) or any OpenAI-compatible
+  # endpoint; the kernel remains the only judge. The standalone litellm
+  # gateway and its litellm-secrets secret were removed from the cluster —
+  # do not reintroduce that mount.
   env:
     - name: LLM_BASE_URL
-      value: http://litellm.apps.svc.cluster.local:4000/v1
-    - name: LLM_API_KEY_FILE
-      value: /var/run/secrets/llm/key
-  secretMounts:
-    - secretName: litellm-secrets
-      mountPath: /var/run/secrets/llm/key
-      subPath: LITELLM_MASTER_KEY
+      value: http://vllm-hp-vllm-mesh-demo.apps.svc.cluster.local:8000/v1
   metricsEndpoint:
     prometheusQueryUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
 ---
@@ -84,15 +80,15 @@ spec:
     flow end-to-end (result.json -> status.metrics.proof_closed -> campaign
     ranking -> dossier) without any self-reported scoring?
   defaults:
-    target_statement: "smoke_add_comm"
+    target_statement: "easy_add_comm"
   parameterSchema:
     target_statement:
       type: string
-      description: "Statement id in experiments/prover/statements.json."
-      default: "smoke_add_comm"
+      description: "Statement id in experiments/prover/statements.json. Must exist in the vendored set (easy_/med_/hard_/canary_*); a placeholder id fails the prover at startup."
+      default: "easy_add_comm"
     llm_model:
       type: string
-      description: "LLM tactic-policy model (litellm id); empty = sweep-only baseline. Proposals are kernel-checked; the policy can never affect soundness."
+      description: "LLM tactic-policy model (served id); empty = sweep-only baseline. Proposals are kernel-checked; the policy can never affect soundness."
       default: ""
     llm_candidates:
       type: integer
