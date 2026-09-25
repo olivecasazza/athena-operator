@@ -162,7 +162,9 @@ def main() -> None:
         "pre-imported: `await mcp.list_tools(\"athena\")`, `await mcp.call_tool(\"athena\", "
         "<tool>, {...})` reads live Athena state (campaigns, experiments, reports with "
         "footguns). Use it to check prior art before proposing. When done, write the "
-        f"proposal as STRICT JSON to {PROPOSAL} and reply with the same JSON. Keep it "
+        f"proposal as STRICT JSON to {PROPOSAL} and reply with the same JSON. The "
+        "top-level \"summary\" (one or two sentences: what you propose and the evidence) "
+        "is required. Keep it "
         f"under {MAX_MESSAGE} bytes: at most 4 actions, concise hypotheses. Your budget "
         f"is {os.environ.get('TIMEOUT_SECONDS', '900')} seconds and the run is killed at "
         "the limit: write a first valid proposal to that file early, then overwrite it "
@@ -195,7 +197,14 @@ def main() -> None:
     if not isinstance(proposal, dict) or not isinstance(proposal.get("actions"), list):
         tail = (stderr or events)[-300:]
         finish({"error": f"no proposal JSON (exit {returncode}): {tail}"}, 1)
-    finish({"summary": str(proposal.get("summary", ""))[:600], "actions": proposal["actions"][:4]}, 0)
+    actions = proposal["actions"][:4]
+    summary = str(proposal.get("summary") or "").strip()
+    if not summary:
+        # The drive records the summary as the proposal's one-line history;
+        # never let it be blank.
+        first = actions[0] if actions and isinstance(actions[0], dict) else {}
+        summary = str(first.get("hypothesis") or first.get("title") or "proposal without summary")
+    finish({"summary": summary[:600], "actions": actions}, 0)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,12 @@ spec:
     # Nemotron-3-ultra:free) with a MiniMax-M3 plan terminal. See nixlab
     # modules/k8s/apps/omniroute/combo-seed.nix.
     model: research-free
+    # Agent harness: Prime Agent in a sandboxed runner Job reads Athena via the
+    # console MCP endpoint (prior art, reports, footguns) before proposing.
+    harness:
+      type: PrimeAgent
+      image: ghcr.io/olivecasazza/athena-prime-proposer@sha256:381cc154f24afae33b4368c24bbff41b587d5712d6398b0ac6e827da3f544afa
+      timeoutSeconds: 900
     apiKeySecretRef:
       name: omniroute-secrets
       key: API_KEY_PRIMARY

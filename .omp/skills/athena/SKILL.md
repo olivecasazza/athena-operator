@@ -68,6 +68,17 @@ Use `create_report` / `update_report` (or the REST equivalents); they enforce th
 
 Drive-authored reports use the sections `Findings`, `Method`, `Footguns`, and `Limitations`. Record negative results and footguns explicitly.
 
+## The research loop's proposer
+
+Drives call their proposer through OmniRoute (`http://omniroute.apps.svc.cluster.local:20128/v1`) with `model: research-free`. That combo tries free OpenRouter lanes in order — `stealth/space-bunny-alpha`, `z-ai/glm-5.2:free`, `nemotron-3-ultra:free` — and ends on plan-covered `minimax/MiniMax-M3`, so it never hard-fails. The OpenRouter connection is seeded by nixlab `modules/k8s/apps/omniroute/provider-seed.nix`, and the combo is defined in `combo-seed.nix`. OmniRoute's `oc/*-free` opencode lanes are dead (401/403); do not use them.
+
+With `spec.proposer.harness` set (`type: PrimeAgent`), each proposal is a **runner Job** instead of one chat call:
+
+- **What runs:** Prime Agent (image `ghcr.io/olivecasazza/athena-prime-proposer`, source `runners/prime-proposer/`) reads Athena through the console MCP endpoint (read-only tools) and returns `{summary, actions}` in its pod termination message.
+- **How the drive tracks it:** the drive records the Job in `status.pendingProposalJob`, shows `Progressing=True ProposerRunning` while it works, then validates the result like any proposer reply.
+- **Sandboxing:** Jobs carry the label `athena.nixlab.io/role=proposer-harness`. The chart NetworkPolicy `athena-proposer-harness` limits their egress to DNS, OmniRoute, and athena-console. They get no ServiceAccount token, run non-root, and have a read-only root filesystem.
+- **Watching one:** `kubectl logs -n apps -l athena.nixlab.io/role=proposer-harness` shows each `[tool]` call and `[assistant]` turn.
+
 ## Diagnose
 
 | Symptom | Check |
