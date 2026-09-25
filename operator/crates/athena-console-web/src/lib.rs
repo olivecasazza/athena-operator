@@ -274,6 +274,9 @@ const APP_CSS: &str = "
 .tbl th.sortable:hover { color:var(--fg); }
 .tbl tr.selected td { background:color-mix(in srgb, var(--accent) 12%, transparent); }
 .tbl td.date { white-space:nowrap; color:var(--dim); }
+/* One line per row: long CR names and hypotheses clip, full text in title. */
+.dt .tbl td { max-width:34ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dt .tbl td .row-link { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:bottom; }
 .filmstrip { width:100%; margin:.2rem 0; border:1px solid var(--line); }
 .crumb-current { color:var(--fg); }
 ";
@@ -754,6 +757,13 @@ fn campaigns_view(
     }
 }
 
+/// RFC 3339 timestamp (status fields) → `YYYY-MM-DD HH:MM`, matching [`fmt_ms`].
+fn fmt_rfc3339(at: &str) -> String {
+    at.get(..16)
+        .map(|s| s.replace('T', " "))
+        .unwrap_or_else(|| at.to_string())
+}
+
 /// Campaign name as shown in lists: legacy drive-spawned campaigns repeat the
 /// drive name as a prefix (sometimes twice). The CR name is immutable history,
 /// so the viewer strips the echo for display and keeps the full name in the
@@ -1013,7 +1023,7 @@ fn research_view(
                                 p { class: "muted",
                                     "{st.name}"
                                     if let Some(at) = st.promoted_at.clone() {
-                                        " \u{2014} promoted {at}"
+                                        " \u{2014} promoted {fmt_rfc3339(&at)}"
                                     }
                                 }
                                 table { class: "tbl",
