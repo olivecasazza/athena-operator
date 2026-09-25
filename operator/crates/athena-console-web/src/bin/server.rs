@@ -192,6 +192,8 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 metrics_link: status.and_then(|s| s.metrics_link.clone()),
                 started_at: jt.as_ref().and_then(|(s, _)| s.clone()),
                 ended_at: jt.as_ref().and_then(|(_, en)| en.clone()),
+                created_at: to_ms(&e.metadata.creation_timestamp),
+                drive: None,
                 campaign: Some(e.spec.campaign_ref.clone()),
                 mode: e
                     .spec
@@ -236,6 +238,15 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 // Campaign window: created → now (ended None ⇒ embed uses "now").
                 started_at: to_ms(&c.metadata.creation_timestamp),
                 ended_at: None,
+                created_at: to_ms(&c.metadata.creation_timestamp),
+                // Owning drive, so the viewer can drop an echoed drive prefix
+                // from legacy branch names without renaming the CR.
+                drive: c
+                    .metadata
+                    .owner_references
+                    .as_ref()
+                    .and_then(|o| o.iter().find(|r| r.kind == "ResearchDrive"))
+                    .map(|r| r.name.clone()),
                 campaign: None,
                 // Campaign mode needs a template fetch per campaign; the drive
                 // summary carries stage context instead, so None is honest here.
@@ -261,6 +272,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .map(|t| TemplateSummary {
             namespace: t.namespace().unwrap_or_else(|| "default".to_string()),
             name: t.name_any(),
+            created_at: to_ms(&t.metadata.creation_timestamp),
             objective: format!("{} / {:?}", t.spec.objective.metric, t.spec.objective.goal),
             detail: format!(
                 "runtime={} source={}",
@@ -287,6 +299,8 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             metrics_link: None,
             started_at: None,
             ended_at: None,
+            created_at: to_ms(&s.metadata.creation_timestamp),
+            drive: None,
             campaign: None,
             mode: None,
             hypothesis: None,
@@ -321,6 +335,8 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 metrics_link: status.and_then(|s| s.metrics_link.clone()),
                 started_at: None,
                 ended_at: None,
+                created_at: to_ms(&r.metadata.creation_timestamp),
+                drive: None,
                 campaign: None,
                 mode: None,
                 hypothesis: None,
@@ -350,6 +366,8 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             metrics_link: None,
             started_at: None,
             ended_at: None,
+            created_at: to_ms(&p.metadata.creation_timestamp),
+            drive: None,
             campaign: None,
             mode: None,
             hypothesis: None,
@@ -373,6 +391,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 excluded_count: r.spec.excluded_experiments.len(),
                 sections: r.spec.sections.clone(),
                 seeded_hypotheses: r.spec.seeded_hypotheses.clone(),
+                created_at: to_ms(&r.metadata.creation_timestamp),
             }
         })
         .collect();
@@ -386,6 +405,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
             DriveSummary {
                 namespace: d.namespace().unwrap_or_else(|| "default".to_string()),
                 name: d.name_any(),
+                created_at: to_ms(&d.metadata.creation_timestamp),
                 phase: st
                     .phase
                     .map(|p| format!("{p:?}"))
@@ -515,6 +535,7 @@ async fn create_report(
         excluded_count: dto.excluded_experiments.len(),
         sections: dto.sections.clone(),
         seeded_hypotheses: dto.seeded_hypotheses.clone(),
+        created_at: None,
     }))
 }
 

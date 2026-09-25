@@ -6,13 +6,13 @@ use panel_kit::input::{
     clear_selection, keyboard_event, pointer_event, release_pointer, wheel_event,
 };
 use panel_kit_core::persist::apply_save_decision;
-use panel_kit_core::reducer::{reduce, HitTarget, ReduceContext, WorkspaceEvent};
+use panel_kit_core::reducer::{HitTarget, ReduceContext, WorkspaceEvent, reduce};
 use panel_kit_core::{
     Clamp, CommandStep, FocusContext, PanelKind, PointerButton, PointerEventKind, SnapPolicy,
     TileMetrics,
 };
 
-use super::state::{enforce_tile_minimums, log_layout_error, PanelWorkspace};
+use super::state::{PanelWorkspace, enforce_tile_minimums, log_layout_error};
 
 /// Build an event handler that reduces into one workspace and applies persistence.
 pub(crate) fn workspace_event_handler<K: PanelKind>(

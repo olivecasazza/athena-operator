@@ -48,6 +48,9 @@ pub struct ConditionDto {
 pub struct DriveSummary {
     pub namespace: String,
     pub name: String,
+    /// Creation time as an epoch-millis string (metadata.creationTimestamp).
+    #[serde(default)]
+    pub created_at: Option<String>,
     pub phase: String,
     #[serde(default)]
     pub stage: Option<String>,
@@ -121,6 +124,12 @@ pub struct ResourceSummary {
     /// Status conditions (campaigns: ExperimentsHealthy et al).
     #[serde(default)]
     pub conditions: Vec<ConditionDto>,
+    /// Creation time as an epoch-millis string (metadata.creationTimestamp).
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// Campaigns: the owning ResearchDrive, if any.
+    #[serde(default)]
+    pub drive: Option<String>,
 }
 
 impl ResourceSummary {
@@ -136,6 +145,9 @@ impl ResourceSummary {
 pub struct TemplateSummary {
     pub namespace: String,
     pub name: String,
+    /// Creation time as an epoch-millis string (metadata.creationTimestamp).
+    #[serde(default)]
+    pub created_at: Option<String>,
     pub objective: String,
     pub detail: String,
 }
@@ -156,6 +168,9 @@ pub struct ReportSummary {
     pub sections: BTreeMap<String, String>,
     #[serde(default)]
     pub seeded_hypotheses: Vec<String>,
+    /// Creation time as an epoch-millis string (metadata.creationTimestamp).
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 /// Payload for creating/updating a ResearchReport and for previewing its dossier.

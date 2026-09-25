@@ -16,9 +16,11 @@
 //! here until the dashboard's panel ids are pinned in nixlab, since
 //! provisioning reassigns them.)
 
+mod datatable;
 pub mod models;
 mod workspace;
 
+use datatable::{Col, DataTable, Key, Row, fmt_ms};
 use dioxus::events::PointerEvent as DioxusPointerEvent;
 use dioxus::prelude::*;
 use models::{
@@ -265,6 +267,13 @@ const APP_CSS: &str = "
 .cond.True, .cond.ok, .cond.ready { border-color:var(--green); color:var(--green); }
 .cond.warn { border-color:var(--yellow); color:var(--yellow); }
 .cond.bad, .cond.err { border-color:var(--red); color:var(--red); }
+.dt-bar { display:flex; align-items:center; gap:.5rem; margin:.2rem 0 .3rem; }
+.dt-filter { flex:1; width:auto; }
+.dt-count { font-size:.7rem; white-space:nowrap; }
+.tbl th.sortable { cursor:pointer; user-select:none; }
+.tbl th.sortable:hover { color:var(--fg); }
+.tbl tr.selected td { background:color-mix(in srgb, var(--accent) 12%, transparent); }
+.tbl td.date { white-space:nowrap; color:var(--dim); }
 .filmstrip { width:100%; margin:.2rem 0; border:1px solid var(--line); }
 .crumb-current { color:var(--fg); }
 ";
@@ -513,64 +522,54 @@ fn restore_detail_panels(emit: EventHandler<WorkspaceEvent<Panel>>) {
 fn experiments_view(
     snap: ClusterSnapshot,
     emit: EventHandler<WorkspaceEvent<Panel>>,
-    mut selected: Signal<Option<ResourceSummary>>,
-    mut manifest_doc: Signal<String>,
+    selected: Signal<Option<ResourceSummary>>,
+    manifest_doc: Signal<String>,
 ) -> Element {
-    let rows = snap.experiments;
+    let sel = selected.read().as_ref().map(|s| s.name.clone());
+    let rows: Vec<Row> = snap
+        .experiments
+        .into_iter()
+        .map(|exp| {
+            let pick = exp.clone();
+            let is_sel = sel.as_deref() == Some(exp.name.as_str());
+            Row::new(exp.name.clone())
+                .cell(
+                    rsx! { td {
+                        button {
+                            class: "row-link",
+                            onclick: move |_| select_resource(selected, manifest_doc, emit, pick.clone()),
+                            "{exp.name}"
+                        }
+                    } },
+                    Key::text(exp.name.clone()),
+                    &exp.name,
+                )
+                .text(exp.campaign.clone().unwrap_or_default())
+                .phase(exp.phase.clone())
+                .text(exp.mode.clone().unwrap_or_default())
+                .date(&exp.created_at)
+                .muted(exp.workspace_path.clone().unwrap_or_else(|| exp.detail.clone()))
+                .selected(is_sel)
+        })
+        .collect();
     rsx! {
         div { class: "view-head",
             h2 { "Experiments" }
             p { "Kubernetes-native experiment resources, phases, and workspace refs." }
         }
-        div { class: "scroll-tbl",
-        table { class: "tbl",
-            thead {
-                tr {
-                    th { "Experiment" }
-                    th { "Phase" }
-                    th { "Workspace" }
-                }
-            }
-            tbody {
-                if rows.is_empty() {
-                    tr { td { colspan: "3", class: "muted", "No experiments found." } }
-                }
-                for exp in rows {
-                    {
-                        let exp_select = exp.clone();
-                        rsx! {
-                            tr {
-                                td {
-                                    button {
-                                        class: "row-link",
-                                        onclick: move |_| {
-                                            let e = exp_select.clone();
-                                            selected.set(Some(e.clone()));
-                                            // Surface all three per-experiment panels through the host reducer.
-                                            restore_detail_panels(emit);
-                                            // Load the manifest YAML into the IDE panel.
-                                            spawn(async move {
-                                                match fetch_manifest(&e.namespace, &e.kind, &e.name).await {
-                                                    Ok(yaml) => manifest_doc.set(yaml),
-                                                    Err(err) => manifest_doc.set(format!("# failed to load manifest: {err}\n")),
-                                                }
-                                            });
-                                        },
-                                        "{exp.name}"
-                                    }
-                                    div { class: "muted", "{exp.namespace}" }
-                                }
-                                td { class: "phase", "{exp.phase}" }
-                                td {
-                                    div { "{exp.workspace_path.clone().unwrap_or_else(|| \"Not reported\".to_string())}" }
-                                    div { class: "muted", "{exp.detail}" }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        DataTable {
+            cols: vec![
+                Col::new("Experiment"),
+                Col::new("Campaign"),
+                Col::new("Phase"),
+                Col::new("Mode"),
+                Col::new("Created"),
+                Col::new("Workspace / detail"),
+            ],
+            rows,
+            sort: Some((4, true)),
+            empty: "No experiments found.",
+            placeholder: "filter experiments…",
         }
     }
 }
@@ -707,90 +706,122 @@ fn campaigns_view(
     selected: Signal<Option<ResourceSummary>>,
     manifest_doc: Signal<String>,
 ) -> Element {
-    let rows = snap.campaigns;
+    let sel = selected.read().as_ref().map(|s| s.name.clone());
+    let rows: Vec<Row> = snap
+        .campaigns
+        .into_iter()
+        .map(|c| {
+            let pick = c.clone();
+            let shown = campaign_label(&c);
+            let is_sel = sel.as_deref() == Some(c.name.as_str());
+            Row::new(c.name.clone())
+                .cell(
+                    rsx! { td { title: "{c.name}",
+                        button {
+                            class: "row-link",
+                            onclick: move |_| select_resource(selected, manifest_doc, emit, pick.clone()),
+                            "{shown}"
+                        }
+                    } },
+                    Key::text(shown.clone()),
+                    &c.name,
+                )
+                .text(c.drive.clone().unwrap_or_default())
+                .phase(c.phase.clone())
+                .date(&c.created_at)
+                .muted(c.detail.clone())
+                .selected(is_sel)
+        })
+        .collect();
     rsx! {
         div { class: "view-head",
             h2 { "Campaigns" }
             p { "Click a campaign to load its metrics (all member experiments, over the campaign window) into the Metrics panel." }
         }
-        table { class: "tbl",
-            thead {
-                tr { th { "Campaign" } th { "Phase" } th { "Progress" } }
-            }
-            tbody {
-                if rows.is_empty() {
-                    tr { td { colspan: "3", class: "muted", "No campaigns found." } }
-                }
-                for c in rows {
-                    {
-                        let cs = c.clone();
-                        rsx! {
-                            tr {
-                                td {
-                                    button {
-                                        class: "row-link",
-                                        onclick: move |_| select_resource(selected, manifest_doc, emit, cs.clone()),
-                                        "{c.name}"
-                                    }
-                                    div { class: "muted", "{c.namespace}" }
-                                }
-                                td { class: "phase", "{c.phase}" }
-                                td { div { class: "muted", "{c.detail}" } }
-                            }
-                        }
-                    }
-                }
-            }
+        DataTable {
+            cols: vec![
+                Col::new("Campaign"),
+                Col::new("Drive"),
+                Col::new("Phase"),
+                Col::new("Created"),
+                Col::new("Progress"),
+            ],
+            rows,
+            sort: Some((3, true)),
+            empty: "No campaigns found.",
+            placeholder: "filter campaigns…",
         }
     }
 }
 
+/// Campaign name as shown in lists: legacy drive-spawned campaigns repeat the
+/// drive name as a prefix (sometimes twice). The CR name is immutable history,
+/// so the viewer strips the echo for display and keeps the full name in the
+/// tooltip and search haystack.
+fn campaign_label(c: &ResourceSummary) -> String {
+    let Some(drive) = c.drive.as_deref() else {
+        return c.name.clone();
+    };
+    let prefix = format!("{drive}-");
+    let mut shown = c.name.as_str();
+    while let Some(rest) = shown.strip_prefix(prefix.as_str()) {
+        if rest.is_empty() {
+            break;
+        }
+        shown = rest;
+    }
+    shown.to_string()
+}
+
 fn templates_view(snap: ClusterSnapshot, mut template_doc: Signal<String>) -> Element {
-    let rows: Vec<TemplateSummary> = snap.templates;
+    let rows: Vec<Row> = snap
+        .templates
+        .into_iter()
+        .map(|tpl: TemplateSummary| {
+            let t = tpl.clone();
+            Row::new(tpl.name.clone())
+                .text(tpl.name.clone())
+                .text(tpl.objective.clone())
+                .date(&tpl.created_at)
+                .muted(tpl.detail.clone())
+                .cell(
+                    rsx! { td {
+                        button {
+                            class: "btn",
+                            onclick: move |_| {
+                                let t = t.clone();
+                                spawn(async move {
+                                    match fetch_template_yaml(&t.namespace, &t.name).await {
+                                        Ok(yaml) => template_doc.set(yaml),
+                                        Err(err) => template_doc.set(format!("# failed to load template: {err}\n")),
+                                    }
+                                });
+                            },
+                            "Load YAML"
+                        }
+                    } },
+                    Key::None,
+                    "",
+                )
+        })
+        .collect();
     rsx! {
         div { class: "view-head",
             h2 { "Experiment Templates" }
             p { "Load Kubernetes-owned template YAML and inspect objectives + sources." }
         }
-        table { class: "tbl",
-            thead {
-                tr { th { "Template" } th { "Objective" } th { "Source" } th { "" } }
-            }
-            tbody {
-                if rows.is_empty() {
-                    tr { td { colspan: "4", class: "muted", "No templates found." } }
-                }
-                for tpl in rows {
-                    {
-                        let tpl_load = tpl.clone();
-                        rsx! {
-                            tr {
-                                td {
-                                    div { "{tpl.name}" }
-                                    div { class: "muted", "{tpl.namespace}" }
-                                }
-                                td { class: "phase", "{tpl.objective}" }
-                                td { "{tpl.detail}" }
-                                td {
-                                    button {
-                                        class: "btn",
-                                        onclick: move |_| {
-                                            let t = tpl_load.clone();
-                                            spawn(async move {
-                                                match fetch_template_yaml(&t.namespace, &t.name).await {
-                                                    Ok(yaml) => template_doc.set(yaml),
-                                                    Err(err) => template_doc.set(format!("# failed to load template: {err}\n")),
-                                                }
-                                            });
-                                        },
-                                        "Load YAML"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        DataTable {
+            cols: vec![
+                Col::new("Template"),
+                Col::new("Objective"),
+                Col::new("Created"),
+                Col::new("Source"),
+                Col::action(""),
+            ],
+            rows,
+            sort: Some((0, false)),
+            empty: "No templates found.",
+            placeholder: "filter templates…",
         }
         div { class: "section-label", "Template YAML" }
         div { class: "ide-block",
@@ -829,27 +860,26 @@ fn benchmarks_view(snap: ClusterSnapshot) -> Element {
 
 /// A generic three-column table (name+namespace, phase, detail) for the views
 /// that don't need row interactions.
-fn resource_table(rows: Vec<ResourceSummary>, name_col: &str, detail_col: &str) -> Element {
+fn resource_table(
+    rows: Vec<ResourceSummary>,
+    name_col: &'static str,
+    detail_col: &'static str,
+) -> Element {
+    let rows: Vec<Row> = rows
+        .into_iter()
+        .map(|r| {
+            Row::new(r.name.clone())
+                .text(r.name.clone())
+                .phase(r.phase.clone())
+                .date(&r.created_at)
+                .muted(r.detail.clone())
+        })
+        .collect();
     rsx! {
-        table { class: "tbl",
-            thead {
-                tr { th { "{name_col}" } th { "Phase" } th { "{detail_col}" } }
-            }
-            tbody {
-                if rows.is_empty() {
-                    tr { td { colspan: "3", class: "muted", "Nothing found." } }
-                }
-                for r in rows {
-                    tr {
-                        td {
-                            div { "{r.name}" }
-                            div { class: "muted", "{r.namespace}" }
-                        }
-                        td { class: "phase", "{r.phase}" }
-                        td { "{r.detail}" }
-                    }
-                }
-            }
+        DataTable {
+            cols: vec![Col::new(name_col), Col::new("Phase"), Col::new("Created"), Col::new(detail_col)],
+            rows,
+            sort: Some((2, true)),
         }
     }
 }
@@ -937,7 +967,30 @@ fn research_view(
     let body = match level {
         ResearchNav::Global => {
             let drives = snap.drives.clone();
-            let campaigns = snap.campaigns.clone();
+            let campaign_rows: Vec<Row> = snap
+                .campaigns
+                .iter()
+                .map(|c| {
+                    let name = c.name.clone();
+                    let shown = campaign_label(c);
+                    Row::new(c.name.clone())
+                        .cell(
+                            rsx! { td { title: "{c.name}",
+                                button {
+                                    class: "row-link",
+                                    onclick: move |_| nav.set(ResearchNav::Campaign(name.clone())),
+                                    "{shown}"
+                                }
+                            } },
+                            Key::text(shown.clone()),
+                            &c.name,
+                        )
+                        .text(c.drive.clone().unwrap_or_default())
+                        .phase(c.phase.clone())
+                        .date(&c.created_at)
+                        .muted(c.detail.clone())
+                })
+                .collect();
             rsx! {
                 div { class: "view-head",
                     h2 { "Research" }
@@ -948,6 +1001,7 @@ fn research_view(
                         h3 { "{d.name}" }
                         p {
                             span { class: "phase", "{d.phase}" }
+                            span { class: "muted", " created {fmt_ms(&d.created_at)}" }
                             if let Some(stage) = d.stage.clone() {
                                 span { class: "chip", "stage: {stage}" }
                             }
@@ -986,33 +1040,18 @@ fn research_view(
                     }
                 }
                 h3 { "Campaigns" }
-                div { class: "scroll-tbl",
-                table { class: "tbl",
-                    thead { tr { th { "Campaign" } th { "Phase" } th { "Detail" } } }
-                    tbody {
-                        if campaigns.is_empty() {
-                            tr { td { colspan: "3", class: "muted", "No campaigns found." } }
-                        }
-                        for c in campaigns {
-                            {
-                                let name = c.name.clone();
-                                rsx! {
-                                    tr {
-                                        td {
-                                            button {
-                                                class: "row-link",
-                                                onclick: move |_| nav.set(ResearchNav::Campaign(name.clone())),
-                                                "{c.name}"
-                                            }
-                                        }
-                                        td { class: "phase", "{c.phase}" }
-                                        td { class: "muted", "{c.detail}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                DataTable {
+                    cols: vec![
+                        Col::new("Campaign"),
+                        Col::new("Drive"),
+                        Col::new("Phase"),
+                        Col::new("Created"),
+                        Col::new("Detail"),
+                    ],
+                    rows: campaign_rows,
+                    sort: Some((3, true)),
+                    empty: "No campaigns found.",
+                    placeholder: "filter campaigns…",
                 }
             }
         }
@@ -1030,81 +1069,89 @@ fn research_view(
                 .filter(|r| r.campaign_ref == campaign)
                 .cloned()
                 .collect();
-            let campaign_for_exp = campaign.clone();
-            let campaign_for_rep = campaign.clone();
+            let exp_rows: Vec<Row> = exps
+                .into_iter()
+                .map(|e| {
+                    let camp = campaign.clone();
+                    let pick = e.clone();
+                    Row::new(e.name.clone())
+                        .cell(
+                            rsx! { td {
+                                button {
+                                    class: "row-link",
+                                    onclick: move |_| nav.set(ResearchNav::Experiment {
+                                        campaign: camp.clone(),
+                                        exp: pick.clone(),
+                                    }),
+                                    "{e.name}"
+                                }
+                            } },
+                            Key::text(e.name.clone()),
+                            &e.name,
+                        )
+                        .phase(e.phase.clone())
+                        .text(e.mode.clone().unwrap_or_default())
+                        .date(&e.created_at)
+                        .muted(e.hypothesis.clone().unwrap_or_default())
+                })
+                .collect();
+            let report_rows: Vec<Row> = reports
+                .into_iter()
+                .map(|r| {
+                    let camp = campaign.clone();
+                    let pick = r.clone();
+                    Row::new(r.name.clone())
+                        .cell(
+                            rsx! { td {
+                                button {
+                                    class: "row-link",
+                                    onclick: move |_| nav.set(ResearchNav::Report {
+                                        campaign: camp.clone(),
+                                        report: pick.clone(),
+                                    }),
+                                    "{r.name}"
+                                }
+                            } },
+                            Key::text(r.name.clone()),
+                            &r.name,
+                        )
+                        .text(r.title.clone())
+                        .phase(r.phase.clone())
+                        .date(&r.created_at)
+                })
+                .collect();
             rsx! {
                 div { class: "view-head",
-                    h2 { "{campaign}" }
+                    h2 { title: "{campaign}", {camp.as_ref().map(campaign_label).unwrap_or_else(|| campaign.clone())} }
                     if let Some(c) = camp.clone() {
                         p {
                             span { class: "phase", "{c.phase}" }
+                            span { class: "muted", " created {fmt_ms(&c.created_at)}" }
                             span { class: "muted", " {c.detail}" }
                         }
                         p { {cond_badges(&c.conditions)} }
                     }
                 }
                 h3 { "Experiments" }
-                div { class: "scroll-tbl",
-                table { class: "tbl",
-                    thead { tr { th { "Experiment" } th { "Phase" } th { "Mode" } th { "Hypothesis" } } }
-                    tbody {
-                        if exps.is_empty() {
-                            tr { td { colspan: "4", class: "muted", "No experiments in this campaign." } }
-                        }
-                        for e in exps {
-                            {
-                                let e2 = e.clone();
-                                let camp2 = campaign_for_exp.clone();
-                                rsx! {
-                                    tr {
-                                        td {
-                                            button {
-                                                class: "row-link",
-                                                onclick: move |_| nav.set(ResearchNav::Experiment {
-                                                    campaign: camp2.clone(),
-                                                    exp: e2.clone(),
-                                                }),
-                                                "{e.name}"
-                                            }
-                                        }
-                                        td { class: "phase", "{e.phase}" }
-                                        td { {e.mode.clone().unwrap_or_else(|| "\u{2014}".into())} }
-                                        td { class: "muted", {e.hypothesis.clone().unwrap_or_default()} }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                DataTable {
+                    cols: vec![
+                        Col::new("Experiment"),
+                        Col::new("Phase"),
+                        Col::new("Mode"),
+                        Col::new("Created"),
+                        Col::new("Hypothesis"),
+                    ],
+                    rows: exp_rows,
+                    sort: Some((3, true)),
+                    empty: "No experiments in this campaign.",
+                    placeholder: "filter experiments…",
                 }
-                }
-                if !reports.is_empty() {
+                if !report_rows.is_empty() {
                     h3 { "Reports" }
-                    table { class: "tbl",
-                        thead { tr { th { "Report" } th { "Title" } th { "Phase" } } }
-                        tbody {
-                            for r in reports {
-                                {
-                                    let r2 = r.clone();
-                                    let camp2 = campaign_for_rep.clone();
-                                    rsx! {
-                                        tr {
-                                            td {
-                                                button {
-                                                    class: "row-link",
-                                                    onclick: move |_| nav.set(ResearchNav::Report {
-                                                        campaign: camp2.clone(),
-                                                        report: r2.clone(),
-                                                    }),
-                                                    "{r.name}"
-                                                }
-                                            }
-                                            td { "{r.title}" }
-                                            td { class: "phase", "{r.phase}" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    DataTable {
+                        cols: vec![Col::new("Report"), Col::new("Title"), Col::new("Phase"), Col::new("Created")],
+                        rows: report_rows,
+                        sort: Some((3, true)),
                     }
                 }
             }
@@ -1123,6 +1170,7 @@ fn research_view(
                     h2 { "{exp.name}" }
                     p { span { class: "phase", "{exp.phase}" }
                         if let Some(m) = exp.mode.clone() { span { class: "chip", "{m}" } }
+                        span { class: "muted", " created {fmt_ms(&exp.created_at)} \u{b7} started {fmt_ms(&exp.started_at)} \u{b7} ended {fmt_ms(&exp.ended_at)}" }
                     }
                 }
                 if let Some(h) = exp.hypothesis.clone() {
@@ -1190,61 +1238,107 @@ fn reports_view(
     mut report_name: Signal<String>,
     mut report_title: Signal<String>,
 ) -> Element {
-    let rows = snap.reports;
     let campaigns = snap.campaigns;
+    let rows: Vec<Row> = snap
+        .reports
+        .into_iter()
+        .map(|r| {
+            let r2 = r.clone();
+            let camps = campaigns.clone();
+            Row::new(r.name.clone())
+                .text(r.name.clone())
+                .text(r.campaign_ref.clone())
+                .text(r.title.clone())
+                .phase(r.phase.clone())
+                .date(&r.created_at)
+                .cell(
+                    rsx! { td { "{r.excluded_count}" } },
+                    Key::Num(r.excluded_count as f64),
+                    "",
+                )
+                .cell(
+                    rsx! { td {
+                        button {
+                            class: "btn",
+                            onclick: move |_| {
+                                if let Some(camp) = camps.iter().find(|c| c.name == r2.campaign_ref) {
+                                    selected_campaign.set(Some(camp.clone()));
+                                }
+                                report_name.set(r2.name.clone());
+                                report_title.set(r2.title.clone());
+                                restore_panel(emit, Panel::ReportCurator);
+                            },
+                            "Load"
+                        }
+                    } },
+                    Key::None,
+                    "",
+                )
+        })
+        .collect();
     rsx! {
         div { class: "view-head",
             h2 { "Reports" }
             p { "Published ResearchReport resources. Click Load to open one in the Report Curator." }
         }
-        table { class: "tbl",
-            thead {
-                tr {
-                    th { "Report" }
-                    th { "Campaign" }
-                    th { "Title" }
-                    th { "Phase" }
-                    th { "Excluded" }
-                    th { "" }
+        DataTable {
+            cols: vec![
+                Col::new("Report"),
+                Col::new("Campaign"),
+                Col::new("Title"),
+                Col::new("Phase"),
+                Col::new("Created"),
+                Col::new("Excluded"),
+                Col::action(""),
+            ],
+            rows,
+            sort: Some((4, true)),
+            empty: "No reports found.",
+            placeholder: "filter reports…",
+        }
+    }
+}
+
+/// Searchable campaign picker, newest first, grouped by owning drive, each
+/// label carrying its creation date. A component (not a plain view fn) because
+/// the dropdown's popup state is a hook.
+#[component]
+fn CampaignPicker(
+    campaigns: Vec<ResourceSummary>,
+    selected: String,
+    on_pick: EventHandler<Option<ResourceSummary>>,
+) -> Element {
+    use panel_kit::widgets::{Dropdown, DropdownAction, DropdownItem, DropdownState};
+    let state = use_signal(DropdownState::default);
+    let mut sorted = campaigns.clone();
+    sorted.sort_by_key(|c| {
+        std::cmp::Reverse(
+            c.created_at
+                .as_deref()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(i64::MIN),
+        )
+    });
+    let items: Vec<DropdownItem> = sorted
+        .iter()
+        .map(|c| DropdownItem {
+            value: c.name.clone(),
+            label: format!("{} \u{b7} {}", campaign_label(c), fmt_ms(&c.created_at)),
+            group: c.drive.clone().unwrap_or_else(|| "standalone".to_string()),
+        })
+        .collect();
+    rsx! {
+        Dropdown {
+            items,
+            state,
+            selected,
+            placeholder: "select a campaign…".to_string(),
+            searchable: true,
+            on_action: move |action: DropdownAction| {
+                if let DropdownAction::Select { value } = action {
+                    on_pick.call(campaigns.iter().find(|c| c.name == value).cloned());
                 }
-            }
-            tbody {
-                if rows.is_empty() {
-                    tr { td { colspan: "6", class: "muted", "No reports found." } }
-                }
-                for r in rows {
-                    {
-                        let r2 = r.clone();
-                        let camps = campaigns.clone();
-                        rsx! {
-                            tr {
-                                td {
-                                    div { "{r.name}" }
-                                    div { class: "muted", "{r.namespace}" }
-                                }
-                                td { "{r.campaign_ref}" }
-                                td { "{r.title}" }
-                                td { class: "phase", "{r.phase}" }
-                                td { "{r.excluded_count}" }
-                                td {
-                                    button {
-                                        class: "btn",
-                                        onclick: move |_| {
-                                            if let Some(camp) = camps.iter().find(|c| c.name == r2.campaign_ref) {
-                                                selected_campaign.set(Some(camp.clone()));
-                                            }
-                                            report_name.set(r2.name.clone());
-                                            report_title.set(r2.title.clone());
-                                            restore_panel(emit, Panel::ReportCurator);
-                                        },
-                                        "Load"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            },
         }
     }
 }
@@ -1315,8 +1409,7 @@ fn report_curator_view(
     mut save_status: Signal<String>,
 ) -> Element {
     // Two separate Vec copies: one for the handler closure, one for iteration.
-    let campaigns_for_change = snap.campaigns.clone();
-    let campaigns = snap.campaigns;
+    let campaigns_for_change = snap.campaigns;
     let experiments = snap.experiments;
 
     let sel_campaign = selected_campaign.read().clone();
@@ -1331,6 +1424,35 @@ fn report_curator_view(
         .collect();
 
     let excluded_set = excluded.read().clone();
+    let exp_table: Vec<Row> = exp_rows
+        .into_iter()
+        .map(|exp| {
+            let exp_name = exp.name.clone();
+            let is_included = !excluded_set.contains(&exp_name);
+            Row::new(exp.name.clone())
+                .cell(
+                    rsx! { td {
+                        input {
+                            r#type: "checkbox",
+                            checked: is_included,
+                            onchange: move |_| {
+                                let mut set = excluded.read().clone();
+                                if !set.remove(&exp_name) {
+                                    set.insert(exp_name.clone());
+                                }
+                                excluded.set(set);
+                            }
+                        }
+                    } },
+                    Key::None,
+                    "",
+                )
+                .text(exp.name.clone())
+                .phase(exp.phase.clone())
+                .date(&exp.created_at)
+                .muted(exp.detail.clone())
+        })
+        .collect();
 
     rsx! {
         div { class: "view-head",
@@ -1339,28 +1461,13 @@ fn report_curator_view(
         }
 
         div { class: "section-label", "Campaign" }
-        select {
-            class: "rc-select",
-            onchange: move |e| {
-                let name = e.value();
-                if let Some(found) = campaigns_for_change.iter().find(|c| c.name == name) {
-                    selected_campaign.set(Some(found.clone()));
-                    excluded.set(HashSet::new());
-                } else {
-                    selected_campaign.set(None);
-                }
+        CampaignPicker {
+            campaigns: campaigns_for_change,
+            selected: sel_name.clone(),
+            on_pick: move |found: Option<ResourceSummary>| {
+                selected_campaign.set(found);
+                excluded.set(HashSet::new());
             },
-            option { value: "", "— select a campaign —" }
-            for c in &campaigns {
-                {
-                    let cname = c.name.clone();
-                    let cns = c.namespace.clone();
-                    let is_sel = cname == sel_name;
-                    rsx! {
-                        option { value: "{cname}", selected: is_sel, "{cname} ({cns})" }
-                    }
-                }
-            }
         }
 
         div { class: "section-label", "Report Name" }
@@ -1381,49 +1488,21 @@ fn report_curator_view(
         }
 
         div { class: "section-label", "Experiments" }
-        table { class: "tbl",
-            thead {
-                tr {
-                    th { "Include" }
-                    th { "Experiment" }
-                    th { "Phase" }
-                    th { "Detail" }
-                }
-            }
-            tbody {
-                if sel_name.is_empty() {
-                    tr { td { colspan: "4", class: "muted", "Select a campaign." } }
-                } else if exp_rows.is_empty() {
-                    tr { td { colspan: "4", class: "muted", "No experiments in this campaign." } }
-                }
-                for exp in exp_rows {
-                    {
-                        let exp_name = exp.name.clone();
-                        let is_included = !excluded_set.contains(&exp_name);
-                        rsx! {
-                            tr {
-                                td {
-                                    input {
-                                        r#type: "checkbox",
-                                        checked: is_included,
-                                        onchange: move |_| {
-                                            let mut set = excluded.read().clone();
-                                            if set.contains(&exp_name) {
-                                                set.remove(&exp_name);
-                                            } else {
-                                                set.insert(exp_name.clone());
-                                            }
-                                            excluded.set(set);
-                                        }
-                                    }
-                                }
-                                td { "{exp.name}" }
-                                td { class: "phase", "{exp.phase}" }
-                                td { "{exp.detail}" }
-                            }
-                        }
-                    }
-                }
+        if sel_name.is_empty() {
+            p { class: "muted", "Select a campaign." }
+        } else {
+            DataTable {
+                cols: vec![
+                    Col::action("Include"),
+                    Col::new("Experiment"),
+                    Col::new("Phase"),
+                    Col::new("Created"),
+                    Col::new("Detail"),
+                ],
+                rows: exp_table,
+                sort: Some((3, true)),
+                empty: "No experiments in this campaign.",
+                placeholder: "filter experiments…",
             }
         }
 
@@ -1554,33 +1633,32 @@ fn gpu_pools_view(snap: SchedulingSnapshot) -> Element {
                 dd { "{p.admitted_workloads} admitted · {p.pending_workloads} pending" }
             }
         }
-        div { class: "scroll-tbl",
-            table { class: "tbl",
-                thead {
-                    tr {
-                        th { "Workload" }
-                        th { "NS" }
-                        th { "Queue" }
-                        th { "Priority" }
-                        th { "State" }
-                        th { "GPU" }
-                    }
-                }
-                tbody {
-                    for w in snap.workloads.iter().filter(|w| w.state != "Finished") {
-                        tr {
-                            td { "{w.name}" }
-                            td { "{w.namespace}" }
-                            td { "{w.queue}" }
-                            td { class: "phase",
-                                {if w.priority_class.is_empty() { "default" } else { w.priority_class.as_str() }}
-                            }
-                            td { "{w.state}" }
-                            td { "{w.gpus}" }
-                        }
-                    }
-                }
-            }
+        DataTable {
+            cols: vec![
+                Col::new("Workload"),
+                Col::new("NS"),
+                Col::new("Queue"),
+                Col::new("Priority"),
+                Col::new("State"),
+                Col::new("GPU"),
+            ],
+            rows: snap
+                .workloads
+                .iter()
+                .filter(|w| w.state != "Finished")
+                .map(|w| {
+                    let prio = if w.priority_class.is_empty() { "default" } else { w.priority_class.as_str() };
+                    Row::new(format!("{}/{}", w.namespace, w.name))
+                        .text(w.name.clone())
+                        .text(w.namespace.clone())
+                        .text(w.queue.clone())
+                        .phase(prio)
+                        .text(w.state.clone())
+                        .cell(rsx! { td { "{w.gpus}" } }, Key::Num(w.gpus as f64), "")
+                })
+                .collect::<Vec<Row>>(),
+            empty: "No active workloads.",
+            placeholder: "filter workloads…",
         }
     }
 }
