@@ -1,0 +1,46 @@
+# Harness proposer Jobs (drive spec.proposer.harness) execute model-generated
+# Python. Default-deny: no ingress; egress only to DNS, the model gateway
+# (OmniRoute) and the Athena MCP endpoint (athena-console). Everything else —
+# the internet, the Kubernetes API, other services — is unreachable from the
+# agent. Selector matches the label the drive controller stamps on the Jobs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: athena-proposer-harness
+  labels:
+    app.kubernetes.io/name: athena
+spec:
+  podSelector:
+    matchLabels:
+      athena.nixlab.io/role: proposer-harness
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app: omniroute
+      ports:
+        - protocol: TCP
+          port: 20128
+    - to:
+        - podSelector:
+            matchLabels:
+              app: athena-console
+      ports:
+        - protocol: TCP
+          port: 3000

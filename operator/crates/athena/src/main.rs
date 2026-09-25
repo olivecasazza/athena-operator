@@ -5,6 +5,7 @@ mod dossier;
 mod drive_reconciler;
 pub mod metrics;
 mod panathenaia;
+mod proposer_harness;
 mod reconciler;
 mod report_reconciler;
 mod telemetry;

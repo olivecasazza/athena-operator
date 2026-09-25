@@ -369,8 +369,28 @@ pub async fn reconcile(drive: Arc<ResearchDrive>, ctx: Arc<Context>) -> Result<A
     let mut created_this_pass: Vec<String> = Vec::new();
     let has_free_slot = (status.current_campaigns.len() as u32) < spec.limits.max_active_branches;
     if phase == DrivePhase::Proposing && has_free_slot {
-        match propose_and_create(&drive, &ctx, &ns, &name, &owned.items, &status).await {
-            Ok((branches, record)) => {
+        match propose_and_create(&drive, &ctx, &ns, &name, &owned.items, &mut status).await {
+            Ok(None) => {
+                // A harness Job is producing the proposal; check back soon.
+                let job = status.pending_proposal_job.clone().unwrap_or_default();
+                status.conditions = vec![
+                    cond(
+                        "Ready",
+                        ConditionStatus::True,
+                        "LoopActive",
+                        "perpetual loop running",
+                    ),
+                    cond(
+                        "Progressing",
+                        ConditionStatus::True,
+                        "ProposerRunning",
+                        &format!("harness proposer job {job} is researching the next campaign"),
+                    ),
+                ];
+                write_status(&ctx, &ns, &name, &drive, status, DrivePhase::Proposing).await?;
+                return Ok(Action::requeue(Duration::from_secs(20)));
+            }
+            Ok(Some((branches, record))) => {
                 crate::metrics::DRIVE_PROPOSER_CALLS
                     .with_label_values(&[&ns, &spec.domain, "ok"])
                     .inc();
@@ -1142,8 +1162,8 @@ async fn propose_and_create(
     ns: &str,
     name: &str,
     owned: &[ResearchCampaign],
-    status: &ResearchDriveStatus,
-) -> Result<(Vec<BranchRef>, ProposalRecord), Error> {
+    status: &mut ResearchDriveStatus,
+) -> Result<Option<(Vec<BranchRef>, ProposalRecord)>, Error> {
     let spec = &drive.spec;
     let proposal_id = format!(
         "proposal-{}",
@@ -1249,9 +1269,27 @@ async fn propose_and_create(
     let user =
         serde_json::to_string_pretty(&context).map_err(|e| Error::ProposerOutput(e.to_string()))?;
 
-    let cleaned = chat_completion(&spec.proposer, ctx, ns, system, &user).await?;
-    let proposal: Value =
-        serde_json::from_str(&cleaned).map_err(|e| Error::ProposerOutput(e.to_string()))?;
+    let proposal: Value = if spec.proposer.harness.is_some() {
+        // Agent harness in a Job: start it, or collect its finished proposal.
+        match crate::proposer_harness::poll_or_start(
+            drive,
+            ctx,
+            ns,
+            name,
+            &proposal_id,
+            &mut status.pending_proposal_job,
+            system,
+            &user,
+        )
+        .await?
+        {
+            crate::proposer_harness::HarnessPoll::Ready(v) => v,
+            crate::proposer_harness::HarnessPoll::Running => return Ok(None),
+        }
+    } else {
+        let cleaned = chat_completion(&spec.proposer, ctx, ns, system, &user).await?;
+        serde_json::from_str(&cleaned).map_err(|e| Error::ProposerOutput(e.to_string()))?
+    };
 
     // ---- Validate + execute actions. ----
     let summary = proposal
@@ -1354,7 +1392,7 @@ async fn propose_and_create(
                 record.decision
             };
     }
-    Ok((branches, record))
+    Ok(Some((branches, record)))
 }
 
 /// Build (not create) a ResearchCampaign from a validated proposer action.
@@ -1718,6 +1756,7 @@ mod tests {
                 max_tokens: Some(128),
                 temperature: Some(0.0),
                 timeout_seconds: Some(5),
+                harness: None,
             },
             limits: DriveLimits::default(),
             stagnation: StagnationSpec::default(),

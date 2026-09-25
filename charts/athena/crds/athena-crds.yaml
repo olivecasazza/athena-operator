@@ -919,6 +919,47 @@
                         "description": "Base URL of an OpenAI-compatible API (e.g. an in-cluster mesh-llm/vLLM Service or an external provider). The controller POSTs to `{endpoint}/chat/completions`.",
                         "type": "string"
                       },
+                      "harness": {
+                        "description": "Run the proposer as an agent harness in a Job instead of one chat call.\n\nAbsent (the default) keeps the single chat-completion proposer. When set, each proposal is a stateless runner Job: the agent reads Athena through the console's MCP endpoint (prior art, reports, footguns) and calls the same `endpoint`/`model`, then returns the proposal in its pod termination message. The controller validates it exactly like a chat reply — the harness is untrusted input either way.",
+                        "nullable": true,
+                        "properties": {
+                          "image": {
+                            "description": "Runner image (use a digest when policy requires immutability).",
+                            "type": "string"
+                          },
+                          "maxTurns": {
+                            "default": 16,
+                            "description": "Agent turn budget per proposal.",
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "type": "integer"
+                          },
+                          "mcpUrl": {
+                            "default": "http://athena-console.apps.svc.cluster.local/mcp",
+                            "description": "Athena MCP endpoint the agent reads from.",
+                            "type": "string"
+                          },
+                          "timeoutSeconds": {
+                            "default": 900,
+                            "description": "Wall-clock budget per proposal Job, seconds.",
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "type": "integer"
+                          },
+                          "type": {
+                            "description": "Harness implementation.",
+                            "enum": [
+                              "PrimeAgent"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "image",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
                       "maxTokens": {
                         "description": "Max completion tokens per proposal call.",
                         "format": "uint32",
@@ -1312,6 +1353,47 @@
                         "description": "Base URL of an OpenAI-compatible API (e.g. an in-cluster mesh-llm/vLLM Service or an external provider). The controller POSTs to `{endpoint}/chat/completions`.",
                         "type": "string"
                       },
+                      "harness": {
+                        "description": "Run the proposer as an agent harness in a Job instead of one chat call.\n\nAbsent (the default) keeps the single chat-completion proposer. When set, each proposal is a stateless runner Job: the agent reads Athena through the console's MCP endpoint (prior art, reports, footguns) and calls the same `endpoint`/`model`, then returns the proposal in its pod termination message. The controller validates it exactly like a chat reply — the harness is untrusted input either way.",
+                        "nullable": true,
+                        "properties": {
+                          "image": {
+                            "description": "Runner image (use a digest when policy requires immutability).",
+                            "type": "string"
+                          },
+                          "maxTurns": {
+                            "default": 16,
+                            "description": "Agent turn budget per proposal.",
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "type": "integer"
+                          },
+                          "mcpUrl": {
+                            "default": "http://athena-console.apps.svc.cluster.local/mcp",
+                            "description": "Athena MCP endpoint the agent reads from.",
+                            "type": "string"
+                          },
+                          "timeoutSeconds": {
+                            "default": 900,
+                            "description": "Wall-clock budget per proposal Job, seconds.",
+                            "format": "uint32",
+                            "minimum": 0.0,
+                            "type": "integer"
+                          },
+                          "type": {
+                            "description": "Harness implementation.",
+                            "enum": [
+                              "PrimeAgent"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "image",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
                       "maxTokens": {
                         "description": "Max completion tokens per proposal call.",
                         "format": "uint32",
@@ -1592,6 +1674,11 @@
                     "format": "int64",
                     "nullable": true,
                     "type": "integer"
+                  },
+                  "pendingProposalJob": {
+                    "description": "Harness proposer Job currently producing the next proposal. The controller consumes its result on a later reconcile and clears this.",
+                    "nullable": true,
+                    "type": "string"
                   },
                   "phase": {
                     "description": "Loop lifecycle phase.",

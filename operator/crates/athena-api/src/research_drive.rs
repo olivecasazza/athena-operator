@@ -247,6 +247,55 @@ pub struct ProposerSpec {
     /// HTTP timeout for one proposal call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u32>,
+    /// Run the proposer as an agent harness in a Job instead of one chat call.
+    ///
+    /// Absent (the default) keeps the single chat-completion proposer. When
+    /// set, each proposal is a stateless runner Job: the agent reads Athena
+    /// through the console's MCP endpoint (prior art, reports, footguns) and
+    /// calls the same `endpoint`/`model`, then returns the proposal in its
+    /// pod termination message. The controller validates it exactly like a
+    /// chat reply — the harness is untrusted input either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<ProposerHarness>,
+}
+
+/// Agent harness that produces proposals in a runner Job.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposerHarness {
+    /// Harness implementation.
+    #[serde(rename = "type")]
+    pub harness_type: HarnessType,
+    /// Runner image (use a digest when policy requires immutability).
+    pub image: String,
+    /// Athena MCP endpoint the agent reads from.
+    #[serde(default = "default_mcp_url")]
+    pub mcp_url: String,
+    /// Agent turn budget per proposal.
+    #[serde(default = "default_harness_turns")]
+    pub max_turns: u32,
+    /// Wall-clock budget per proposal Job, seconds.
+    #[serde(default = "default_harness_timeout")]
+    pub timeout_seconds: u32,
+}
+
+/// Supported proposer harnesses.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum HarnessType {
+    /// PrimeIntellect-ai/prime-agent, headless (`-p --autonomous`).
+    PrimeAgent,
+}
+
+fn default_mcp_url() -> String {
+    "http://athena-console.apps.svc.cluster.local/mcp".to_string()
+}
+
+fn default_harness_turns() -> u32 {
+    16
+}
+
+fn default_harness_timeout() -> u32 {
+    900
 }
 
 /// Reference to one key inside a same-namespace Secret.
@@ -475,6 +524,10 @@ pub struct ResearchDriveStatus {
     /// RFC 3339 timestamp of the last successful proposer call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_proposal_at: Option<String>,
+    /// Harness proposer Job currently producing the next proposal. The
+    /// controller consumes its result on a later reconcile and clears this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_proposal_job: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
