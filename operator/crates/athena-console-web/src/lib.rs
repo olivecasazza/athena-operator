@@ -427,7 +427,7 @@ const APP_CSS: &str = "
 .crumbs { display:flex; align-items:baseline; gap:.3rem; font-size:.74rem;
   font-family:var(--mono); margin:.1rem 0 .6rem; }
 .crumbs .sep { color:var(--dim); }
-.chip { display:inline-block; border:1px solid var(--blue); color:var(--blue);
+.chip { display:inline-block; margin-left:.35rem; border:1px solid var(--blue); color:var(--blue);
   border-radius:3px; padding:0 .25rem; font-size:.66rem; margin-left:.3rem; }
 .cond { display:inline-block; border-radius:3px; padding:0 .25rem;
   font-size:.66rem; margin:0 .15rem .15rem 0; border:1px solid var(--line2);
