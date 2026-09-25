@@ -1,0 +1,37 @@
+# mesh-llm serving image (Vulkan) — the ephemeral inference endpoint the
+# athena campaign controller brings up per run (ResearchCampaign.spec.inferenceMesh).
+#
+# Same contract as Dockerfile.mesh (CUDA) but on the Vulkan backend: this is
+# the ONLY flavor that runs on tyan01's 8x GTX Titan Black (Kepler sm_35,
+# driver 470 = CUDA 11.4 ceiling; CUDA-12/13 mesh images cannot even init
+# there — see docs/research/qwen3.8-27b-fleet-benchmark.md).
+#
+# Driver injection: k3s nvidia runtimeClassName mounts the host driver libs;
+# NVIDIA_DRIVER_CAPABILITIES=graphics is what makes the Vulkan ICD json +
+# libGLX_nvidia visible inside the container (compute,utility alone is not
+# enough — the vulkan loader finds zero devices without it).
+#
+# Serves an OpenAI-compatible API on :9337. Multi-GPU llama.cpp auto-split
+# (mesh-llm `--split`), verified pattern from Dockerfile.mesh on 2x RTX 5000.
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates libgomp1 libvulkan1 vulkan-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG MESH_VER=v0.76.2
+RUN curl -fsSL "https://github.com/Mesh-LLM/mesh-llm/releases/download/${MESH_VER}/mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz" -o /tmp/m.tgz \
+ && mkdir -p /opt/mesh && tar xzf /tmp/m.tgz -C /opt/mesh \
+ && ln -s /opt/mesh/mesh-bundle/mesh-llm /usr/local/bin/mesh-llm \
+ && rm /tmp/m.tgz
+
+# Best-effort native-runtime pre-bake (non-fatal — falls back to first-boot fetch).
+RUN mesh-llm runtime install vulkan --cache-dir /opt/mesh-runtime || true
+
+ENV MESH_LLM_NATIVE_RUNTIME_CACHE=/opt/mesh-runtime \
+    HF_HOME=/data/hf \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility
+
+EXPOSE 9337 3131
+ENTRYPOINT ["mesh-llm"]
