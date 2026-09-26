@@ -1271,7 +1271,7 @@ async fn propose_and_create(
 
     let proposal: Value = if spec.proposer.harness.is_some() {
         // Agent harness in a Job: start it, or collect its finished proposal.
-        match crate::proposer_harness::poll_or_start(
+        let polled = crate::proposer_harness::poll_or_start(
             drive,
             ctx,
             ns,
@@ -1281,10 +1281,27 @@ async fn propose_and_create(
             system,
             &user,
         )
-        .await?
-        {
-            crate::proposer_harness::HarnessPoll::Ready(v) => v,
-            crate::proposer_harness::HarnessPoll::Running => return Ok(None),
+        .await;
+        match polled {
+            Ok(crate::proposer_harness::HarnessPoll::Ready(v)) => v,
+            Ok(crate::proposer_harness::HarnessPoll::Running) => return Ok(None),
+            // A proposer that never produced a proposal is still a research
+            // event: record it as a rejected proposal. Without this the id is
+            // recomputed identically, the drive re-adopts its own dead Job on
+            // 409, and the loop spins forever on one failed attempt.
+            Err(e) => {
+                warn!(drive = %name, proposal = %proposal_id, %e, "harness proposer failed");
+                push_proposal(
+                    status,
+                    ProposalRecord {
+                        id: proposal_id.clone(),
+                        summary: format!("[harness] proposer produced no proposal: {e}"),
+                        decision: ProposalDecision::Rejected,
+                        campaign_names: Vec::new(),
+                    },
+                );
+                return Err(e);
+            }
         }
     } else {
         let cleaned = chat_completion(&spec.proposer, ctx, ns, system, &user).await?;
