@@ -293,6 +293,21 @@ pub struct SchedulingProfile {
     /// queue's quota. Unset → Jobs schedule directly, no Kueue involvement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_name: Option<String>,
+    /// Per-EXPERIMENT wall-clock cap, as a Go duration ("8h", "24h", "90m").
+    /// This is the Job's `activeDeadlineSeconds` — a hung (non-crashing)
+    /// trainer must not squat a GPU forever, since `backoffLimit` only catches
+    /// crashes, not freezes.
+    ///
+    /// Distinct from a campaign's `budget.maxDuration`, which bounds the
+    /// campaign's whole life. Default 8h matches the historical blanket cap and
+    /// fits a 15M-timestep on-prem run; workloads that legitimately need
+    /// longer (multi-agent PBT, 7.2M timesteps x 8 children) raise it here.
+    #[serde(default = "default_experiment_deadline", skip_serializing_if = "Option::is_none")]
+    pub experiment_deadline: Option<String>,
+}
+
+fn default_experiment_deadline() -> Option<String> {
+    Some("8h".to_string())
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]

@@ -233,6 +233,7 @@ async fn ensure_experiment_job(
             &metrics_path,
             ns,
             name,
+            experiment_deadline_override(experiment),
         )
     };
     jobs.create(&PostParams::default(), &job).await?;
@@ -1133,6 +1134,87 @@ fn experiment_env(
     container_env
 }
 
+/// A campaign may raise (or lower) the per-experiment wall clock for one of its
+/// experiments via `spec.parameters.experimentDeadline` ("24h"). This is an
+/// intentional escape hatch for a single expensive child, so it overrides the
+/// profile default; anything unparseable falls through to the profile value
+/// (which itself falls back to 8h), so a typo can never wedge a run.
+fn experiment_deadline_override(experiment: &Experiment) -> Option<i64> {
+    let raw = experiment
+        .spec
+        .parameters
+        .get("experimentDeadline")
+        .and_then(|v| v.as_str())?;
+    match parse_go_duration(raw) {
+        Some(seconds) if seconds > 0 => Some(seconds),
+        _ => {
+            warn!(experiment = %experiment.name_any(), duration = %raw, "unparseable experimentDeadline parameter; using the profile default");
+            None
+        }
+    }
+}
+
+/// Seconds for a profile's per-experiment wall-clock cap, from
+/// `scheduling.experimentDeadline` ("8h", "90m", "1h30m"). Unparseable or
+/// non-positive values fall back to the 8h default rather than failing the
+/// experiment: a bad duration string must not wedge a research run.
+fn experiment_deadline_seconds(profile: &RuntimeProfile) -> i64 {
+    const DEFAULT_SECONDS: i64 = 8 * 3600;
+    let Some(raw) = profile
+        .spec
+        .scheduling
+        .experiment_deadline
+        .as_deref()
+    else {
+        return DEFAULT_SECONDS;
+    };
+    parse_go_duration(raw).filter(|s| *s > 0).unwrap_or_else(|| {
+        warn!(profile = %profile.name_any(), duration = %raw, "unparseable experimentDeadline; using 8h");
+        DEFAULT_SECONDS
+    })
+}
+
+/// Minimal Go duration parser: a sequence of `<number><unit>` terms, where the
+/// units are ns, us, ms, s, m, h. Go allows decimals per term (e.g. "1.5h").
+fn parse_go_duration(raw: &str) -> Option<i64> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut total_nanos: f64 = 0.0;
+    let mut rest = raw;
+    let mut saw_term = false;
+    while !rest.is_empty() {
+        let num_end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len());
+        if num_end == 0 {
+            return None;
+        }
+        let value: f64 = rest[..num_end].parse().ok()?;
+        rest = &rest[num_end..];
+        let unit_end = rest
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let nanos_per_unit = match &rest[..unit_end] {
+            "ns" => 1.0,
+            "us" | "\u{b5}s" | "\u{3bc}s" => 1e3,
+            "ms" => 1e6,
+            "s" => 1e9,
+            "m" => 60e9,
+            "h" => 3600e9,
+            _ => return None,
+        };
+        total_nanos += value * nanos_per_unit;
+        rest = &rest[unit_end..];
+        saw_term = true;
+    }
+    if !saw_term || !total_nanos.is_finite() || total_nanos <= 0.0 {
+        return None;
+    }
+    Some((total_nanos / 1e9).ceil() as i64)
+}
+
 fn build_job(
     experiment: &Experiment,
     profile: &RuntimeProfile,
@@ -1141,6 +1223,7 @@ fn build_job(
     metrics_path: &str,
     namespace: &str,
     experiment_name: &str,
+    deadline_override: Option<i64>,
 ) -> Job {
     let labels = experiment_labels(experiment, profile, experiment_name);
     let metrics_endpoint = &profile.spec.metrics_endpoint;
@@ -1217,13 +1300,16 @@ fn build_job(
             // Small >0 budget so a pod lost to preemption / node scale-down is
             // recreated instead of failing the whole experiment.
             backoff_limit: Some(3),
-            // Wall-clock cap so a *hung* (non-crashing) trainer can't squat a GPU
-            // forever — backoff_limit only catches crashes, not freezes. A real
-            // RLlib freeze once burned a node for 32h at 0% progress. 8h matches
-            // the sky ttl default; any single on-prem experiment (15M timesteps
-            // ~2-5h) finishes well under it. ponytail: blanket cap; make it a
-            // RuntimeProfile field if a legit run ever needs >8h.
-            active_deadline_seconds: Some(8 * 3600),
+            // Wall-clock cap so a *hung* (non-crashing) trainer can't squat a
+            // GPU forever — backoff_limit only catches crashes, not freezes. A
+            // real RLlib freeze once burned a node for 32h at 0% progress.
+            // Per-profile (`scheduling.experimentDeadline`, default 8h): a
+            // multi-agent PBT child legitimately needs longer than a 15M-step
+            // single-agent run, and a campaign's `budget.maxDuration` bounds the
+            // campaign, not this Job.
+            active_deadline_seconds: Some(
+                deadline_override.unwrap_or_else(|| experiment_deadline_seconds(profile)),
+            ),
             // Kueue requires managed Jobs to start suspended; it unsuspends on
             // admission. Only when a queue is set — otherwise schedule directly.
             suspend: profile.spec.scheduling.queue_name.as_ref().map(|_| true),
@@ -1614,6 +1700,56 @@ mod tests {
         RuntimeProfile::new("sky-a10", spec)
     }
 
+    /// Go duration strings the deadline parser must accept. These are
+    /// human-written, so the parser has to be boring and total.
+    #[test]
+    fn go_duration_parses_human_written_budgets() {
+        use super::parse_go_duration;
+        assert_eq!(parse_go_duration("8h"), Some(8 * 3600));
+        assert_eq!(parse_go_duration("24h"), Some(24 * 3600));
+        assert_eq!(parse_go_duration("90m"), Some(90 * 60));
+        assert_eq!(parse_go_duration("1h30m"), Some(90 * 60));
+        assert_eq!(parse_go_duration("45s"), Some(45));
+        // 1.5h rounds UP to whole seconds so the cap is never shortened.
+        assert_eq!(parse_go_duration("1.5h"), Some(5400));
+        assert_eq!(parse_go_duration("500ms"), Some(1));
+        // Garbage must not silently become a deadline.
+        assert_eq!(parse_go_duration(""), None);
+        assert_eq!(parse_go_duration("8"), None);
+        assert_eq!(parse_go_duration("8x"), None);
+        assert_eq!(parse_go_duration("0h"), None);
+        assert_eq!(parse_go_duration("-1h"), None);
+        assert_eq!(parse_go_duration("h"), None);
+    }
+
+    /// The default stays 8h: profiles that never set the field keep the
+    /// historical blanket cap.
+    #[test]
+    fn unset_profile_deadline_defaults_to_eight_hours() {
+        use super::experiment_deadline_seconds;
+        assert_eq!(experiment_deadline_seconds(&onprem_profile()), 8 * 3600);
+    }
+
+    /// A campaign may raise the per-experiment cap for one expensive child
+    /// through spec.parameters; a typo falls through to the profile default
+    /// rather than wedging the run.
+    #[test]
+    fn campaign_parameter_overrides_and_falls_back_safely() {
+        use super::experiment_deadline_override;
+        let mut e = test_experiment("e1");
+        assert_eq!(experiment_deadline_override(&e), None);
+
+        e.spec
+            .parameters
+            .insert("experimentDeadline".into(), "24h".into());
+        assert_eq!(experiment_deadline_override(&e), Some(24 * 3600));
+
+        e.spec
+            .parameters
+            .insert("experimentDeadline".into(), "banana".into());
+        assert_eq!(experiment_deadline_override(&e), None);
+    }
+
     // The launcher Job — not the cloud node — is what Kueue admits: it must
     // carry the profile's queue label and start suspended, and its hard TTL
     // must bound the Job via activeDeadlineSeconds.
@@ -1723,6 +1859,7 @@ mod tests {
             "/workspace/runs/camp/recover-1/metrics.json",
             "athena",
             "recover-1",
+            None,
         );
         let spec = job.spec.expect("job spec present");
         assert_eq!(spec.active_deadline_seconds, Some(8 * 3600));

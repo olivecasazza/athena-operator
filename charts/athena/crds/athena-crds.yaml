@@ -216,6 +216,12 @@
                   "scheduling": {
                     "default": {},
                     "properties": {
+                      "experimentDeadline": {
+                        "default": "8h",
+                        "description": "Per-EXPERIMENT wall-clock cap, as a Go duration (\"8h\", \"24h\", \"90m\"). This is the Job's `activeDeadlineSeconds` — a hung (non-crashing) trainer must not squat a GPU forever, since `backoffLimit` only catches crashes, not freezes.\n\nDistinct from a campaign's `budget.maxDuration`, which bounds the campaign's whole life. Default 8h matches the historical blanket cap and fits a 15M-timestep on-prem run; workloads that legitimately need longer (multi-agent PBT, 7.2M timesteps x 8 children) raise it here.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "nodeSelector": {
                         "additionalProperties": {
                           "type": "string"
