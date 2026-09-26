@@ -2113,6 +2113,20 @@ fn build_vllm_rayjob(
     cluster: &VllmClusterSpec,
     owner: OwnerReference,
 ) -> DynamicObject {
+    let body = build_vllm_rayjob_json(name, ns, campaign_name, cluster, owner);
+    serde_json::from_value(body).expect("vLLM RayJob JSON is a valid DynamicObject")
+}
+
+/// The authored RayJob manifest, as JSON. Kept separate from the DynamicObject
+/// so tests can assert on exactly what is sent to the API (see
+/// `queued_rayjob_arrives_suspended`).
+fn build_vllm_rayjob_json(
+    name: &str,
+    ns: &str,
+    campaign_name: &str,
+    cluster: &VllmClusterSpec,
+    owner: OwnerReference,
+) -> serde_json::Value {
     let workers = cluster.pipeline_parallel_size.saturating_sub(1);
     let mut entrypoint = format!(
         "vllm serve {} --pipeline-parallel-size {} --distributed-executor-backend ray \
@@ -2160,6 +2174,15 @@ fn build_vllm_rayjob(
         },
         "spec": {
             "shutdownAfterJobFinishes": true,
+            // Kueue's RayJob integration, like its batch/job one, expects the
+            // object to arrive SUSPENDED and flips it to running on admission
+            // (the trainer Jobs do the same: `suspend: queue_name.map(|_| true)`).
+            // The queue label above is only half the contract — without this
+            // the RayJob races the scheduler, grabs whatever GPU is free, and
+            // the failure surfaces as a CUDA OOM inside vLLM rather than as
+            // "waiting for quota". Present only when a queue is configured, so
+            // an unqueued cluster still starts eagerly.
+            "suspend": (!cluster.queue_name.is_empty()).then_some(true),
             "entrypoint": entrypoint,
             "rayClusterSpec": {
                 "rayVersion": cluster.ray_version,
@@ -2213,7 +2236,7 @@ fn build_vllm_rayjob(
             },
         },
     });
-    serde_json::from_value(body).expect("vLLM RayJob JSON is a valid DynamicObject")
+    body
 }
 
 /// Delete the campaign's vLLM RayJob + head Service at terminal phase. Idempotent.
@@ -2322,7 +2345,66 @@ async fn ensure_benchmark_run(
 
 #[cfg(test)]
 mod inference_failure_tests {
-    use super::failure_summary;
+    use super::{build_vllm_rayjob_json, failure_summary};
+    use athena_api::research_campaign::VllmClusterSpec;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+
+    fn cluster(queue: &str) -> VllmClusterSpec {
+        VllmClusterSpec {
+            image: "img".into(),
+            model: "Qwen/Qwen3-1.7B".into(),
+            pipeline_parallel_size: 1,
+            port: 8000,
+            ray_version: "2.43.0".into(),
+            max_model_len: 4096,
+            dtype: "bfloat16".into(),
+            gpu_product: "Quadro-RTX-4000".into(),
+            queue_name: queue.into(),
+            priority_class: "mesh-high".into(),
+            tolerations: Vec::new(),
+            runtime_class_name: "nvidia".into(),
+            extra_args: Vec::new(),
+        }
+    }
+
+    fn owner() -> OwnerReference {
+        OwnerReference {
+            api_version: "research.nixlab.io/v1alpha1".into(),
+            kind: "ResearchCampaign".into(),
+            name: "c".into(),
+            uid: "u".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Kueue admits an object by unsuspending it; the queue label alone is
+    /// half the contract. A RayJob that arrives running races the scheduler
+    /// and shows up as an in-pod CUDA OOM instead of "waiting for quota".
+    ///
+    /// Asserted on the AUTHORED json, not the DynamicObject: converting through
+    /// `DynamicObject` keeps only the fields its deserializer knows, so a
+    /// `suspend` it does not model would be dropped before the assert and the
+    /// test would silently pass on a regression. The authored value is what the
+    /// controller actually POSTs to the API.
+    #[test]
+    fn queued_rayjob_arrives_suspended() {
+        let body = build_vllm_rayjob_json("v", "apps", "camp", &cluster("athena-gpu"), owner());
+        assert_eq!(body["spec"]["suspend"], serde_json::json!(true));
+        assert_eq!(
+            body["metadata"]["labels"]["kueue.x-k8s.io/queue-name"],
+            serde_json::json!("athena-gpu")
+        );
+    }
+
+    /// An explicitly unqueued cluster still starts eagerly rather than
+    /// parking forever on a queue that will never admit it.
+    #[test]
+    fn unqueued_rayjob_starts_unsuspended() {
+        let body = build_vllm_rayjob_json("v", "apps", "camp", &cluster(""), owner());
+        // `then_some` yields None, which serializes to an explicit null: the
+        // field is present but says "do not suspend".
+        assert_eq!(body["spec"]["suspend"], serde_json::Value::Null);
+    }
 
     #[test]
     fn summary_picks_the_error_line_and_bounds_it() {
