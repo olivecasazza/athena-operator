@@ -1683,7 +1683,15 @@ async fn write_status(
     status.phase = Some(phase);
     status.observed_generation = drive.metadata.generation;
     status.controller_version = Some(env!("CARGO_PKG_VERSION").to_string());
-    let patch = json!({ "status": status });
+    let mut patch = json!({ "status": status });
+    // A merge patch CANNOT clear an optional key: `None` is skipped by serde,
+    // so a finished or failed harness Job would leave
+    // status.pendingProposalJob pointing at the dead Job forever and the drive
+    // would re-reference it instead of starting a new one. An explicit JSON
+    // null is what removes the key in a merge patch.
+    if patch["status"].get("pendingProposalJob").is_none() {
+        patch["status"]["pendingProposalJob"] = Value::Null;
+    }
     drives
         .patch_status(name, &PatchParams::apply(MANAGER), &Patch::Merge(&patch))
         .await?;
@@ -1694,6 +1702,20 @@ async fn write_status(
 mod tests {
     use super::*;
     use athena_api::research_campaign::ResearchCampaignStatus;
+
+    /// A finished or failed harness Job must not leave the drive pointing at
+    /// it: a merge patch cannot clear a `None` that serde skipped, so the key
+    /// has to be sent as explicit null.
+    #[test]
+    fn status_patch_nulls_a_cleared_pending_job() {
+        let patch = json!({ "status": ResearchDriveStatus::default() });
+        assert!(patch["status"].get("pendingProposalJob").is_none());
+        let mut cleared = patch;
+        if cleared["status"].get("pendingProposalJob").is_none() {
+            cleared["status"]["pendingProposalJob"] = Value::Null;
+        }
+        assert_eq!(cleared["status"]["pendingProposalJob"], Value::Null);
+    }
 
     fn campaign_with(
         template: &str,
