@@ -175,9 +175,17 @@ fn build_job(
 ) -> Result<Job, Error> {
     let HarnessType::PrimeAgent = harness.harness_type;
     let name = job_name(drive_name, proposal_id);
-    let labels = BTreeMap::from([
+    let mut labels = BTreeMap::from([
         (ROLE_LABEL.to_string(), ROLE_VALUE.to_string()),
         (DRIVE_LABEL.to_string(), drive_name.to_string()),
+        // The cloud-node guard (ValidatingAdmissionPolicy cloud-node-opt-in)
+        // requires this label on any pod tolerating node.kubernetes.io/cloud.
+        // A harness Job is CPU-only, node-agnostic work whose isolation comes
+        // from the NetworkPolicy (DNS + OmniRoute + the console only), non-root
+        // and a read-only rootfs — so letting it land on the always-on cloud
+        // hosts when the always-on mac pool is down is safe, and without it the
+        // proposer silently stops running.
+        ("nixlab.io/cloud-opt-in".to_string(), "true".to_string()),
     ]);
     let owner = drive
         .controller_owner_ref(&())
@@ -241,6 +249,12 @@ fn build_job(
                     restart_policy: Some("Never".into()),
                     automount_service_account_token: Some(false),
                     enable_service_links: Some(false),
+                    tolerations: Some(vec![k8s_openapi::api::core::v1::Toleration {
+                        key: Some("node.kubernetes.io/cloud".into()),
+                        operator: Some("Exists".into()),
+                        effect: Some("NoSchedule".into()),
+                        ..Default::default()
+                    }]),
                     security_context: Some(PodSecurityContext {
                         run_as_non_root: Some(true),
                         run_as_user: Some(10001),
