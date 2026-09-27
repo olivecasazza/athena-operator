@@ -84,7 +84,23 @@ pub async fn reconcile(experiment: Arc<Experiment>, ctx: Arc<Context>) -> Result
         "reconciling Experiment"
     );
 
-    if matches!(phase, ExperimentPhase::Pending | ExperimentPhase::Preparing) {
+    // A Job that vanishes with its node (power-down, drain, preemption-scale)
+    // must be recreated, not written off: `build_job` already sets
+    // backoffLimit 3 "so a pod lost to preemption / node scale-down is
+    // recreated", and that intent is void unless the Job itself is re-created.
+    // `error` + reason `JobMissing` is the fingerprint of exactly that case —
+    // a non-terminal experiment whose Job is gone. A genuine `error`
+    // (JobFailed, unparseable metrics) is NOT recreated.
+    let job_lost = job_vanished(&experiment);
+    if should_ensure_job(&phase, job_lost) {
+        if job_lost {
+            warn!(
+                name,
+                namespace = ns,
+                campaign,
+                "experiment Job vanished; recreating it (node power-down, drain, or scale-down)"
+            );
+        }
         ensure_experiment_job(&experiment, ctx.clone(), ns, name).await?;
     }
     reconcile_experiment_status(&experiment, ctx.clone(), ns, name).await?;
@@ -411,6 +427,27 @@ fn resolve_metrics_path(workspace_path: &str, metrics_path: &str) -> String {
     } else {
         format!("{workspace_path}/{metrics_path}")
     }
+}
+
+/// Did this experiment's Job disappear while the experiment was still
+/// running? `error` + reason `JobMissing` is the exact fingerprint the
+/// status reconciler stamps when `get_opt` finds no Job.
+fn job_vanished(experiment: &Experiment) -> bool {
+    experiment
+        .status
+        .as_ref()
+        .is_some_and(|s| {
+            s.phase == ExperimentPhase::Error
+                && s.conditions.as_ref().is_some_and(|conds| {
+                    conds.iter().any(|c| c.reason.as_deref() == Some("JobMissing"))
+                })
+        })
+}
+
+/// Whether this pass should (re)create the experiment's Job: a fresh
+/// experiment, or one whose Job was lost to the infrastructure.
+fn should_ensure_job(phase: &ExperimentPhase, job_lost: bool) -> bool {
+    matches!(phase, ExperimentPhase::Pending | ExperimentPhase::Preparing) || job_lost
 }
 
 async fn reconcile_experiment_status(
@@ -1698,6 +1735,44 @@ mod tests {
         )
         .expect("profile spec deserializes");
         RuntimeProfile::new("sky-a10", spec)
+    }
+
+    /// A Job that vanished with its node must be re-created, and a genuine
+    /// error must not. This is the difference between "the infra took my
+    /// experiment away" and "my experiment failed".
+    #[test]
+    fn vanished_job_is_recreated_but_a_real_error_is_not() {
+        use super::{job_vanished, should_ensure_job};
+
+        // Fresh experiments are ensured.
+        assert!(should_ensure_job(&ExperimentPhase::Pending, false));
+        assert!(should_ensure_job(&ExperimentPhase::Preparing, false));
+
+        // Terminal records are immutable: never resurrect them.
+        assert!(!should_ensure_job(&ExperimentPhase::Succeeded, false));
+        assert!(!should_ensure_job(&ExperimentPhase::Failed, false));
+        assert!(!should_ensure_job(&ExperimentPhase::Error, false));
+
+        // The vanished-Job case opts back in.
+        assert!(should_ensure_job(&ExperimentPhase::Error, true));
+
+        let mut e = test_experiment("e1");
+        assert!(!job_vanished(&e), "no status yet");
+
+        e.status = Some(ExperimentStatus {
+            phase: ExperimentPhase::Error,
+            conditions: Some(vec![condition("JobObserved", "False", "JobMissing", "gone")]),
+            ..Default::default()
+        });
+        assert!(job_vanished(&e), "error + JobMissing is a vanished job");
+
+        // A genuine error carries a different reason and stays terminal.
+        e.status = Some(ExperimentStatus {
+            phase: ExperimentPhase::Error,
+            conditions: Some(vec![condition("JobObserved", "False", "JobFailed", "crashed")]),
+            ..Default::default()
+        });
+        assert!(!job_vanished(&e), "a real failure must not be retried forever");
     }
 
     /// Go duration strings the deadline parser must accept. These are
