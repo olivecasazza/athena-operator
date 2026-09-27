@@ -1039,10 +1039,16 @@ spec:
       description: Terrain roughness 0..1.
     total_timesteps:
       type: number
-      default: 6000000
+      # Sized to MEASURED throughput on one RTX 4000 in the hpc pool:
+      # ~13.6 env-steps/s with 6 robots (4096 steps in ~5 min, observed
+      # 2026-09-27). 1M steps completes inside the 24h per-experiment cap
+      # with margin. The previous 6M default needed ~122h, so every arena
+      # run was killed by its deadline having produced NO metric — the
+      # experiment budget, not the trainer, was the bug.
+      default: 1000000
       description: >-
-        Training budget in env steps. Higher than the single-agent stages: an
-        adversarial game needs enough interaction for both sides to adapt.
+        Training budget in env steps, sized to the measured throughput of the
+        target pool so a run finishes inside its per-experiment deadline.
   dashboard:
     title: "Curriculum 4/arena — predator vs prey (all morphologies)"
     metrics:
