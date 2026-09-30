@@ -469,3 +469,73 @@ the operator, which is the whole of this incident. Fix it at the builder (§7.1b
   specific product. Not exercised by any pending workload at time of writing. **[I]**
 - **Build and test verification was not run**, per the assignment. The assertions here are
   source-grep and live-API reads only.
+
+## Post-deploy: what the fix did and what it revealed (2026-09-30)
+
+**Deployed.** `4990458a` (PR #46) is live as operator image
+`sha256:dd01fb4a8e00…`, pinned in nixlab by `5c7cb979` (#459). Verified end to end:
+a stuck Job was deleted, the operator recreated it from its Experiment with
+`kueue.x-k8s.io/podset-preferred-topology: kubernetes.io/hostname` on the pod
+template, and Kueue admitted it within 30 s.
+
+**Live athena-gpu Workloads went 17 not-admitted -> 4.** The topology deadlock is
+gone.
+
+### The fix only applies to Jobs created after it
+
+All 256 pre-existing Kueue-managed Jobs were created before the deploy and carry
+no annotation — the operator stamps it at Job creation and does not retroactively
+patch existing Jobs. Pre-existing stuck Jobs must be deleted to be rebuilt; the
+operator recreates them because `should_ensure_job` also fires on `job_lost`.
+
+Of the 17 deleted: 3 were recreated and admitted, 4 recreated but still blocked
+(below), and 10 were **ad-hoc Jobs with no owner** (`imgen-*`, `sti464-*` — lane
+and flavor probes), so nothing recreated them. They were 25 h-old stuck test
+scaffolding, not Experiments; 22 of 408 jobs in `apps` are ownerless in the same
+way. No Experiment was lost.
+
+### What the deadlock was masking: CPU quota inside the GPU flavors
+
+The 4 survivors now fail with the *opposite* error:
+
+```
+couldn't assign flavors to pod set main:
+  Flavor "cpu-any" does not support TopologyAwareScheduling,
+  insufficient quota for cpu in flavor rtx5000, ...
+```
+
+This is **not** the annotation over-triggering. Those 4 request byte-identical
+resources to one that was admitted — `nvidia.com/gpu: 1`, `cpu: 8`,
+`memory: 16Gi`/`24Gi`. The annotation is correct; the binding constraint moved.
+
+- `rtx4000` (`queues.nix:99`) matches `nvidia.com/gpu.product=Quadro-RTX-4000`
+  -> hp01, hp02, hp03. Three GPUs, three admitted. Full.
+- `rtx5000` (`queues.nix:131`) matches `Quadro-RTX-5000` -> seir alone, with
+  `cpu` `nominalQuota = "6"` (`queues.nix:360`). These Jobs request 8. **One of
+  them cannot fit in that quota at all.**
+
+Raising that nominal would let Kueue reserve it, and the pod would then fail at
+the kubelet: seir had 9.0 cores requested of 12 allocatable, so 9 + 8 > 12. It
+converts an invisible Kueue stall into a visible `Insufficient cpu` Pending pod —
+better observability, no extra throughput. The quota is correctly refusing to
+promise 8 cores where 3 exist.
+
+Every GPU node is covered by exactly one flavor — rtx4000 -> hp01-03,
+rtx5000 -> seir, ada -> contra (hostname-keyed, its product label is unset),
+amd -> traitor, kepler -> tyan01 (hostname-keyed because the node is mixed
+Pascal/Ampere). Nothing is invisible to Kueue; earlier suspicion that contra was
+unreachable was wrong.
+
+### The real lever
+
+The per-job `cpu: 8` request, not the flavor quota. Trading training throughput
+for concurrency is a workload decision, not a scheduling one.
+
+### Still open
+
+- 10 ownerless test Jobs deleted and not recreated (see above).
+- The vLLM inference RayJob still needs `required` vs `preferred` at `hostname`,
+  which turns on GPUs-per-node in the deployed topology.
+- `K8s Apply Dry-Run (Server)` in nixlab fails on unmodified `main` too
+  (rc=1): field-manager conflicts with `kustomize-controller` on seaweedfs,
+  dealbot and the heph CRDs. Pre-existing, unrelated to athena.
