@@ -1044,6 +1044,47 @@ fn experiment_labels(
     labels
 }
 
+/// Kueue Topology-Aware-Scheduling request, stamped on the pod template of a
+/// Kueue-managed Job that asks for a GPU.
+///
+/// Every GPU ResourceFlavor in nixlab's `hp-gpu` and `kepler-gpu` carries
+/// `topologyName = "gpu-topology"` (`modules/k8s/kueue/queues.nix:104,131,182,209,227`),
+/// and a TAS flavor admits only podsets that request topology. A GPU podset
+/// without this annotation is structurally unadmittable: it waits behind its
+/// SchedulingGate indefinitely with
+/// `Flavor "rtx4000" supports only TopologyAwareScheduling`, and because
+/// `cpu-any` — the only non-TAS flavor — declares `nvidia.com/gpu` nominalQuota
+/// "0" (`queues.nix:304`), there is no flavor left that could admit it.
+///
+/// `hostname` is the right level: a single experiment pod cannot span nodes, so
+/// any topology would be satisfied by one node. `preferred` rather than
+/// `required` keeps the podset admissible against a non-TAS flavor should
+/// topology labels ever be incomplete. This mirrors the hand-written workload at
+/// `modules/k8s/apps/north-mini-code.nix:123`, which carries it for the same reason.
+///
+/// Only stamped when a queue is set AND a GPU is requested: a CPU-only podset is
+/// admitted by `cpu-any`, which has no topology, so asking for one would only
+/// narrow its options. Same rule as the campaign path, where CPU-only meshes
+/// bypass Kueue entirely (`research_campaign.rs:239-240`).
+pub(crate) fn kueue_tas_annotations(
+    profile: &RuntimeProfile,
+) -> Option<BTreeMap<String, String>> {
+    profile.spec.scheduling.queue_name.as_ref()?;
+    let requests_gpu = profile
+        .spec
+        .resources
+        .requests
+        .keys()
+        .chain(profile.spec.resources.limits.keys())
+        .any(|key| key.contains("gpu"));
+    requests_gpu.then(|| {
+        BTreeMap::from([(
+            "kueue.x-k8s.io/podset-preferred-topology".to_string(),
+            "kubernetes.io/hostname".to_string(),
+        )])
+    })
+}
+
 /// The experiment's environment contract, identical for the on-prem Job path
 /// and the sky task a launcher renders: operator-managed vars first, then
 /// checkpointing controls, then the RuntimeProfile's additive env, then
@@ -1353,6 +1394,7 @@ fn build_job(
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(labels),
+                    annotations: kueue_tas_annotations(profile),
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
@@ -1939,6 +1981,73 @@ mod tests {
         let spec = job.spec.expect("job spec present");
         assert_eq!(spec.active_deadline_seconds, Some(8 * 3600));
         assert_eq!(spec.backoff_limit, Some(3));
+    }
+
+    fn gpu_profile(resources: serde_json::Value, queue: Option<&str>) -> RuntimeProfile {
+        let spec: RuntimeProfileSpec = serde_json::from_value(
+            athena_api::defaults::apply_runtime_profile_defaults(json!({
+                "runtime": { "type": "pytorch", "mode": "batchJob" },
+                "image": "ghcr.io/example/trainer:v1",
+                "command": ["python", "train.py"],
+                "resources": resources,
+                "scheduling": { "queueName": queue },
+            })),
+        )
+        .expect("profile spec deserializes");
+        RuntimeProfile::new("gpu", spec)
+    }
+
+    // Every GPU ResourceFlavor in nixlab carries topologyName="gpu-topology", and a
+    // TAS flavor admits only podsets that request topology. Without this annotation
+    // a GPU podset is unadmittable and sits behind its SchedulingGate forever with
+    // "Flavor rtx4000 supports only TopologyAwareScheduling" — 17 workloads stuck
+    // that way on 2026-09-28, introduced by nixlab 4294d509.
+    #[test]
+    fn gpu_job_podset_asks_for_topology() {
+        let profile = gpu_profile(
+            json!({ "limits": { "nvidia.com/gpu": "1" } }),
+            Some("athena-gpu"),
+        );
+        let job = build_job(
+            &test_experiment("tas-1"),
+            &profile,
+            "exp-tas-1",
+            "/workspace/runs/camp/tas-1",
+            "/workspace/runs/camp/tas-1/metrics.json",
+            "athena",
+            "tas-1",
+            None,
+        );
+        let spec = job.spec.expect("job spec present");
+        let annotations = spec
+            .template
+            .metadata
+            .and_then(|m| m.annotations)
+            .expect("pod template carries annotations");
+        assert_eq!(
+            annotations.get("kueue.x-k8s.io/podset-preferred-topology"),
+            Some(&"kubernetes.io/hostname".to_string()),
+            "a Kueue-managed GPU podset must request a topology or no flavor can admit it",
+        );
+    }
+
+    // CPU-only podsets must NOT ask: they are admitted by cpu-any, which carries
+    // no topology, so requesting one would only narrow their options.
+    #[test]
+    fn cpu_only_job_does_not_ask_for_topology() {
+        let profile = gpu_profile(
+            json!({ "limits": { "cpu": "4", "memory": "16Gi" } }),
+            Some("athena-gpu"),
+        );
+        assert!(kueue_tas_annotations(&profile).is_none());
+    }
+
+    // No queue means Kueue is not involved at all (manageJobsWithoutQueueName=false),
+    // so the annotation would be dead weight.
+    #[test]
+    fn unqueued_gpu_job_does_not_ask_for_topology() {
+        let profile = gpu_profile(json!({ "limits": { "nvidia.com/gpu": "1" } }), None);
+        assert!(kueue_tas_annotations(&profile).is_none());
     }
 
     // Shell quoting for the run line: safe tokens pass through, everything

@@ -35,6 +35,7 @@ use tracing::warn;
 
 use crate::Context;
 use crate::metrics;
+use crate::reconciler::kueue_tas_annotations;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -362,6 +363,7 @@ fn build_job(
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(labels),
+                    annotations: kueue_tas_annotations(profile),
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
