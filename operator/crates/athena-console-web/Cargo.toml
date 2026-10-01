@@ -22,6 +22,8 @@ server = [
     "dep:tower-http",
     "dep:anyhow",
     "dep:schemars",
+    "dep:jsonwebtoken",
+    "dep:parking_lot",
 ]
 
 [lib]
@@ -34,7 +36,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "console-server"
-path = "src/bin/server.rs"
+path = "src/bin/console-server/main.rs"
 required-features = ["server"]
 
 [dependencies]
@@ -48,7 +50,13 @@ wasm-bindgen = "=0.2.121"
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-web-sys = { version = "0.3", features = ["Window", "Location"] }
+web-sys = { version = "0.3", features = ["Window", "Location", "History", "Url", "UrlSearchParams", "Storage", "Request", "RequestInit", "RequestMode", "Response"] }
+# Browser PKCE (RFC 7636) for the Dioxus frontend: CSPRNG verifier + S256.
+# Both are pure Rust and compile for wasm32 and host, so the contract tests
+# below run on the host target.
+getrandom = { version = "0.2", features = ["js"] }
+sha2 = "0.10"
+base64 = { workspace = true }
 
 # Backend — optional, gated behind the `server` feature.
 axum = { workspace = true, optional = true }
@@ -57,5 +65,8 @@ k8s-openapi = { workspace = true, optional = true }
 athena-api = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
+# Backend-only auth (OIDC bearer validation for /mcp and /api writes).
+jsonwebtoken = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 tower-http = { version = "0.6", features = ["fs"], optional = true }
