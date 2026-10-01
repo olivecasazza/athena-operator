@@ -268,6 +268,7 @@ pub async fn require_auth(
         )
             .into_response(),
     }
+
 }
 
 /// Read the validated auth from request extensions (set by `require_auth`).
@@ -495,5 +496,31 @@ mod contract_tests {
         c["aud"] = json!("athena-console");
         let auth = state.validate(&sign(c)).await.unwrap();
         assert_eq!(auth.role, Role::Viewer);
+    }
+
+    /// A no-TLS reqwest rejects `https` before it ever opens a socket, so the
+    /// failure is visible offline: connecting to a closed port on 127.0.0.1
+    /// must fail for want of a connection, NOT because the scheme is unusable.
+    ///
+    /// This is the regression guard for a real outage: with reqwest declared
+    /// `default-features = false` and no `rustls-tls`, the backend built fine,
+    /// all 12 contract tests passed (they validate against a local RSA fixture
+    /// and never touch the network), and then the container refused to start
+    /// with "invalid URL, scheme is not http" while fetching the JWKS. Every
+    /// OIDC validation path was dead on arrival.
+    #[tokio::test]
+    async fn jwks_fetch_reaches_https() {
+        let err = reqwest::Client::new()
+            .get("https://127.0.0.1:1/protocol/openid-connect/certs")
+            .send()
+            .await
+            .expect_err("nothing listens on port 1, so this must fail")
+            .to_string();
+        assert!(
+            !err.contains("scheme is not http"),
+            "reqwest has no TLS backend, so https (and therefore JWKS fetch) \
+             cannot work: {err}. Check that the native target still enables \
+             the `rustls-tls` feature on reqwest."
+        );
     }
 }

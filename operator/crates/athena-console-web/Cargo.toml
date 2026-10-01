@@ -49,7 +49,10 @@ panel-kit-core = { git = "https://github.com/olivecasazza/panel-kit", rev = "f59
 wasm-bindgen = "=0.2.121"
 serde = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# Frontend reqwest: no TLS backend, because on wasm32 the browser's fetch does
+# the transport. The native side additionally needs `rustls-tls` (see the
+# target-specific section at the end) or it cannot fetch the Keycloak JWKS.
+reqwest = { version = "0.12", default-features = false, features = [ "json" ] }
 web-sys = { version = "0.3", features = ["Window", "Location", "History", "Url", "UrlSearchParams", "Storage", "Request", "RequestInit", "RequestMode", "Response"] }
 # Browser PKCE (RFC 7636) for the Dioxus frontend: CSPRNG verifier + S256.
 # Both are pure Rust and compile for wasm32 and host, so the contract tests
@@ -70,3 +73,15 @@ jsonwebtoken = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 tower-http = { version = "0.6", features = ["fs"], optional = true }
+
+# NATIVE ONLY — a TLS-capable reqwest. Cargo unions features from the shared
+# `[dependencies]` entry for any target this section matches, so the backend
+# gets rustls while the wasm build still links no TLS stack.
+#
+# Without this the backend compiles with no TLS support and every https request
+# fails at connect with "invalid URL, scheme is not http" — which broke JWKS
+# fetch, and therefore all OIDC validation, outright. The contract tests did not
+# catch it: they validate against a local RSA fixture and never touch the
+# network. `jwks_fetch_reaches_https` in auth.rs now guards it.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = [ "json", "rustls-tls" ] }
