@@ -26,20 +26,29 @@ Experiments have no template ref; it is their campaign's `spec.templateRef`. `st
 
 ## Access: MCP tools and the OpenAPI contract
 
-The console server exposes one API three ways, all generated from a single endpoint registry (`api::ops` in `operator/crates/athena-console-web/src/bin/server.rs`) with schemas derived from the Rust types:
+The console server exposes one API three ways, all generated from a single endpoint registry (`api::ops` in `operator/crates/athena-console-web/src/bin/console-server/main.rs`) with schemas derived from the Rust types:
 
-- **MCP** at `POST /mcp`. Tools: `list_campaigns`, `list_experiments`, `list_reports`, `list_drives`, `get_report`, `get_manifest`, `get_scheduling`, `preview_report`, `create_report`, `update_report`. The project config `.omp/mcp.json` points at `http://127.0.0.1:3999/mcp`.
+- **MCP** at `POST /mcp`. Tools: `list_campaigns`, `list_experiments`, `list_reports`, `list_drives`, `get_report`, `get_manifest`, `get_scheduling`, `preview_report`, `create_report`, `update_report`. The project config `.omp/mcp.json` points at `http://127.0.0.1:3999/mcp`. Write tools need a bearer token — see Authentication below.
 - **OpenAPI 3.0** at `GET /api/openapi.json`.
 - **REST**: the same paths, e.g. `GET /api/experiments?campaign=…&query=…&decision=Keep&limit=20`.
 
-The public host is behind Cloudflare Access, so reach it in-cluster:
+To add an endpoint, add the handler and one `Op` entry. It then appears in OpenAPI and as an MCP tool, and the tests check the document for dangling refs.
+
+The public host is behind Cloudflare Access, so reach it in-cluster. The Service port is **3000** (`spec.config.port` on the MCPServer; the operator does not remap it to 80):
 
 ```bash
-kubectl -n apps port-forward svc/athena-console 3999:80    # then MCP/REST on 127.0.0.1:3999
+kubectl -n apps port-forward svc/athena-console 3999:3000   # then MCP/REST on 127.0.0.1:3999
 curl -s localhost:3999/api/openapi.json | jq '.paths | keys'
 ```
 
-To add an endpoint, add the handler and one `Op` entry. It then appears in OpenAPI and as an MCP tool, and the tests check the document for dangling refs.
+## Authentication: OIDC bearer tokens
+
+Auth is ON in the deployed console. Reads (`GET /api/*`) are open; `POST /mcp` and the report writes (`POST /api/reports`, `PUT /api/reports/:ns/:name`, `POST /api/reports/preview`) require `Authorization: Bearer <jwt>`.
+
+- Tokens are Keycloak access tokens for the `athena-console` **public** client (PKCE, no secret). The browser gets one via Authorization Code + PKCE; agents need one out of band.
+- The backend validates against the realm JWKS and requires exact `aud` membership of `athena-console`, plus a realm role: `admin` (writes) or `viewer` (read-only MCP). No role → 403.
+- Auth is disabled entirely when `OIDC_ISSUER_URL` is unset, so a locally-run image (`ATHENA_CONSOLE_ADDR` without OIDC env) is fully open — that is the supported way to verify UI changes locally.
+- `GET /api/auth/config` and `GET /.well-known/oauth-protected-resource` are the public discovery endpoints.
 
 List results are newest first as `{total, items}`, with the universal fields resolved: template via campaign, objective value, decision, lineage, runtime from the Job window, created dates. Timestamps are epoch-millis strings.
 

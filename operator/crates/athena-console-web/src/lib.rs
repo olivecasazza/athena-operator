@@ -17,6 +17,9 @@
 //! provisioning reassigns them.)
 
 mod curator;
+mod api;
+mod auth;
+mod auth_flow;
 pub mod models;
 mod tables;
 mod workspace;
@@ -501,6 +504,11 @@ pub fn App() -> Element {
     // ExperimentDetail. The breadcrumb bar is the rendered form of this signal.
     let research_nav = use_signal(|| ResearchNav::Global);
 
+    // Sign-in state. Drives the top-bar control and gates the Curator's save
+    // button: reads stay open, so a signed-out visitor browses normally and
+    // only hits auth when it tries to write a ResearchReport.
+    let auth_state = use_resource(|| async { resolve_auth_phase().await });
+
     let body = move |kind: Panel, _maximized: bool| -> Element {
         let snap = snapshot.read();
         let snap = match &*snap {
@@ -535,6 +543,7 @@ pub fn App() -> Element {
                     selected,
                     nav_campaign,
                     EventHandler::new(move |_| snapshot.restart()),
+                    read_phase(&auth_state.read()),
                 )
             }
             Panel::Reports => reports_view(snap, ws_emit, curator_state),
@@ -609,6 +618,7 @@ pub fn App() -> Element {
                 header { class: "topbar",
                     h1 { "Athena Console · Admin" }
                     span { class: "hint", "GPU scheduling · Kueue · inference · Hephaestus — read-only" }
+                    {auth_bar(&read_phase(&auth_state.read()))}
                     button { class: "btn admin-toggle", onclick: move |_| admin.set(false), "← Research" }
                 }
                 div {
@@ -641,6 +651,7 @@ pub fn App() -> Element {
                 header { class: "topbar",
                     h1 { "Athena Console" }
                     {view_bar(&ws, view_draft, view_err)}
+                    {auth_bar(&read_phase(&auth_state.read()))}
                     button { class: "btn admin-toggle", onclick: move |_| admin.set(true), "⚙ Admin" }
                 }
                 div {
@@ -665,6 +676,157 @@ fn restore_panel(emit: EventHandler<WorkspaceEvent<Panel>>, panel: Panel) {
         target: Some(panel),
         command: PanelCommand::Restore,
     });
+}
+
+
+/// Current sign-in state as a plain value. A pending or errored resource read
+/// collapses to `Loading`, so a failed config fetch never claims a session.
+fn read_phase(value: &Option<Result<auth_flow::Phase, String>>) -> auth_flow::Phase {
+    match value {
+        Some(Ok(phase)) => phase.clone(),
+        _ => auth_flow::Phase::Loading,
+    }
+}
+
+/// Resolve the sign-in state on first paint and on every callback return:
+/// finish an `?code=…` exchange, or fall back to a stored token.
+async fn resolve_auth_phase() -> Result<auth_flow::Phase, String> {
+    let config = fetch_auth_config().await?;
+    if !config.enabled {
+        return Ok(auth_flow::Phase::Disabled);
+    }
+
+    if let Some(message) = auth::callback_error() {
+        auth::discard_pending();
+        auth::clear_callback_query();
+        return Ok(failed_phase(&config, message));
+    }
+
+    // Capture the callback before scrubbing the URL: `finish_callback` needs
+    // both parameters, and a reload must not replay the code.
+    let callback = match (auth::callback_code(), auth::callback_state()) {
+        (Some(code), state) => Some((code, state)),
+        _ => None,
+    };
+    auth::clear_callback_query();
+    if let Some((code, state)) = callback {
+        return finish_callback(&config, &code, state.as_deref()).await;
+    }
+    // A token the backend already refused is worse than none: drop it and
+    // offer sign-in rather than retrying it.
+    if auth::take_rejected() {
+        auth::clear_token();
+        return Ok(expired_phase(&config, "your session is no longer valid"));
+    }
+
+    if auth::bearer_token(auth::now_seconds()).is_some() {
+        return Ok(auth_flow::Phase::SignedIn);
+    }
+    Ok(signed_out_phase(&config))
+}
+
+/// Exchange the callback code, then report the resulting phase.
+async fn finish_callback(
+    config: &auth::AuthConfig,
+    code: &str,
+    returned_state: Option<&str>,
+) -> Result<auth_flow::Phase, String> {
+    if let Err(message) = auth_flow::check_state(returned_state.unwrap_or_default()) {
+        return Ok(failed_phase(config, message));
+    }
+    let Some(verifier) = auth::take_verifier() else {
+        return Ok(failed_phase(config, "PKCE verifier was lost; sign in again".into()));
+    };
+    let Some(redirect_uri) = auth::current_url() else {
+        return Ok(failed_phase(config, "cannot determine the redirect URI".into()));
+    };
+    let body = auth::token_request_body(code, &verifier, &redirect_uri, &config.client_id);
+    match exchange_token(config, &body).await {
+        Ok(token) => {
+            auth::store_token(&token);
+            Ok(auth_flow::Phase::SignedIn)
+        }
+        Err(message) => Ok(failed_phase(config, message)),
+    }
+}
+
+async fn exchange_token(
+    config: &auth::AuthConfig,
+    body: &str,
+) -> Result<auth::Token, String> {
+    let url = format!(
+        "{}/protocol/openid-connect/token",
+        config.issuer.trim_end_matches('/')
+    );
+    let resp = reqwest::Client::new()
+        .post(url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(auth_flow::token_error(status, &text));
+    }
+    auth::parse_token(&text, auth::now_seconds())
+}
+
+/// A phase offering a fresh sign-in link for the current page.
+fn signed_out_phase(config: &auth::AuthConfig) -> auth_flow::Phase {
+    let redirect_uri = auth::current_url().unwrap_or_default();
+    auth_flow::Phase::SignedOut { sign_in: auth_flow::begin(config, &redirect_uri) }
+}
+
+/// A failed phase that still offers another attempt when one can be built.
+fn failed_phase(config: &auth::AuthConfig, message: String) -> auth_flow::Phase {
+    let redirect_uri = auth::current_url().unwrap_or_default();
+    auth_flow::Phase::Failed { message, sign_in: auth_flow::begin(config, &redirect_uri) }
+}
+
+/// `GET /api/auth/config` — public OIDC parameters for the public client.
+async fn fetch_auth_config() -> Result<auth::AuthConfig, String> {
+    let url = format!("{}/api/auth/config", api_base());
+    reqwest::get(&url)
+        .await
+        .map_err(|e| e.to_string())?
+        .json::<auth::AuthConfig>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A rejected/expired session that still offers another sign-in attempt.
+fn expired_phase(config: &auth::AuthConfig, message: &str) -> auth_flow::Phase {
+    let redirect_uri = auth::current_url().unwrap_or_default();
+    auth_flow::Phase::Expired {
+        message: message.to_string(),
+        sign_in: auth_flow::begin(config, &redirect_uri),
+    }
+}
+
+/// Top-bar sign-in control: shows session state, and when a flow can start,
+/// navigates to the identity provider. Silent when auth is off or a session is
+/// live, so a working console carries no extra chrome.
+fn auth_bar(phase: &auth_flow::Phase) -> Element {
+    if let Some((label, title)) = phase.notice() {
+        return rsx! {
+            span { class: "hint", title: "{title}",
+                span { class: "cond warn", "{label}" }
+            }
+        };
+    }
+    if let Some(url) = auth_flow::sign_in_url(phase) {
+        return rsx! {
+            button {
+                class: "btn",
+                title: "sign in through the identity provider to save reports",
+                onclick: move |_| auth::navigate_to(&url),
+                "Sign in"
+            }
+        };
+    }
+    rsx! {}
 }
 
 fn restore_detail_panels(emit: EventHandler<WorkspaceEvent<Panel>>) {
@@ -1555,9 +1717,9 @@ fn inference_view(snap: SchedulingSnapshot) -> Element {
         }
     }
 }
-
 // ---------------------------------------------------------------------------
-// Data layer (frontend side): plain reqwest fetches to the axum backend.
+// Data layer (frontend side): reads are plain, writes go through `api` so the
+// bearer token is attached and a 401/403 becomes an actionable message.
 // ---------------------------------------------------------------------------
 
 /// Browser origin (`https://host:port`) for building absolute request URLs;
@@ -1615,21 +1777,15 @@ async fn fetch_template_yaml(namespace: &str, name: &str) -> Result<String, Stri
 /// `POST /api/reports` — persist a ResearchReport spec, returns the summary row.
 pub(crate) async fn create_report(dto: ReportSpecDto) -> Result<ReportDetailDto, String> {
     let url = format!("{}/api/reports", api_base());
-    send_report(reqwest::Client::new().post(&url).json(&dto)).await
+    api::send_json(reqwest::Client::new().post(&url).json(&dto))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// `PUT /api/reports/{ns}/{name}` — replace against the loaded resourceVersion.
 pub(crate) async fn update_report(dto: ReportSpecDto) -> Result<ReportDetailDto, String> {
     let url = format!("{}/api/reports/{}/{}", api_base(), dto.namespace, dto.name);
-    send_report(reqwest::Client::new().put(&url).json(&dto)).await
-}
-
-async fn send_report(req: reqwest::RequestBuilder) -> Result<ReportDetailDto, String> {
-    let resp = req.send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(resp.text().await.unwrap_or_else(|e| e.to_string()));
-    }
-    resp.json::<ReportDetailDto>()
+    api::send_json(reqwest::Client::new().put(&url).json(&dto))
         .await
         .map_err(|e| e.to_string())
 }
@@ -1637,14 +1793,23 @@ async fn send_report(req: reqwest::RequestBuilder) -> Result<ReportDetailDto, St
 /// `POST /api/reports/preview` — compose the dossier Markdown; nothing persisted.
 pub(crate) async fn preview_report(dto: ReportSpecDto) -> Result<String, String> {
     let url = format!("{}/api/reports/preview", api_base());
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .json(&dto)
-        .send()
+    api::send_text(reqwest::Client::new().post(&url).json(&dto))
         .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(resp.text().await.unwrap_or_else(|e| e.to_string()));
-    }
-    resp.text().await.map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())
+}
+
+/// `GET /api/reports/{ns}/{name}` — one report's detail. Reads stay open, so
+/// this needs no token; it is here so the curator shares the data layer's URL
+/// construction with the write paths.
+pub(crate) async fn fetch_report_detail(
+    namespace: &str,
+    name: &str,
+) -> Result<ReportDetailDto, String> {
+    let url = format!("{}/api/reports/{namespace}/{name}", api_base());
+    reqwest::get(&url)
+        .await
+        .map_err(|e| e.to_string())?
+        .json::<ReportDetailDto>()
+        .await
+        .map_err(|e| e.to_string())
 }

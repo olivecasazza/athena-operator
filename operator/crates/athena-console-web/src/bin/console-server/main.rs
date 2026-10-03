@@ -11,6 +11,7 @@
 //! generated from that registry and the same registry is served as MCP tools
 //! at `POST /mcp`. `GET /*` serves the SPA (ATHENA_CONSOLE_DIST, default ./dist).
 
+use axum::extract::FromRequest as _;
 use athena_api::benchmark_run::BenchmarkRun;
 use athena_api::benchmark_suite::BenchmarkSuite;
 use athena_api::dossier::{self, Curation};
@@ -38,6 +39,7 @@ use kube::{Client, ResourceExt};
 use std::collections::HashMap;
 use std::process::Command;
 use tower_http::services::ServeDir;
+mod auth;
 
 /// k8s `Time` → epoch-millis string (for scoping the Grafana embed).
 fn to_ms(t: &Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>) -> Option<String> {
@@ -49,28 +51,45 @@ async fn main() -> anyhow::Result<()> {
     let dist = std::env::var("ATHENA_CONSOLE_DIST").unwrap_or_else(|_| "dist".to_string());
     let addr = std::env::var("ATHENA_CONSOLE_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
+    // OIDC bearer auth: required for /mcp and mutating /api/*; read-only GETs
+    // stay open. Disabled when OIDC_ISSUER_URL is unset (local dev).
+    let auth_state = auth::AuthState::from_env().await?;
+
+    // Mutating surface: report spec writes + preview. Auth runs before the
+    // handler; reads are on the open router below.
+    let write_routes = Router::new()
+        .route("/api/reports/preview", post(preview_report))
+        .route("/api/reports", post(create_report))
+        .route("/api/reports/:namespace/:name", axum::routing::put(replace_report))
+        .route("/mcp", post(api::mcp))
+        .route_layer(axum::middleware::from_fn_with_state(
+            auth_state.clone(),
+            auth::require_auth,
+        ));
+
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/api/auth/config", get(auth::config))
         .route("/api/snapshot", get(snapshot))
         .route("/api/scheduling", get(scheduling))
         .route("/api/manifest/:namespace/:kind/:name", get(manifest))
         .route("/api/template/:namespace/:name", get(template))
-        // Report curation: persist a ResearchReport (spec only) and preview its
-        // composed dossier from an unsaved draft.
-        .route(
-            "/api/reports/:namespace/:name",
-            get(get_report).put(replace_report),
-        )
-        .route("/api/reports/preview", post(preview_report))
+        .route("/api/reports/:namespace/:name", get(get_report))
         // Filtered, newest-first lists (the agent-facing read surface).
         .route("/api/campaigns", get(api::list_campaigns))
         .route("/api/experiments", get(api::list_experiments))
-        .route("/api/reports", get(api::list_reports).post(create_report))
+        .route("/api/reports", get(api::list_reports))
         .route("/api/drives", get(api::list_drives))
         // One registry describes every endpoint: OpenAPI for humans/tools,
         // MCP tools for agents. Neither is hand-written JSON.
         .route("/api/openapi.json", get(api::openapi))
-        .route("/mcp", post(api::mcp).get(api::mcp_get))
+        .route("/mcp", get(api::mcp_get))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(auth::protected_resource_metadata),
+        )
+        .merge(write_routes)
+        .with_state(auth_state)
         .fallback_service(ServeDir::new(dist));
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -1219,11 +1238,31 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
         (StatusCode::METHOD_NOT_ALLOWED, "POST JSON-RPC 2.0 to /mcp")
     }
 
-    pub async fn mcp(Json(req): Json<Value>) -> axum::response::Response {
+    pub async fn mcp(req: axum::extract::Request) -> axum::response::Response {
+        // Role gate: viewers may not call write tools (create_report /
+        // update_report). Reads and protocol methods stay open to any valid
+        // token; when auth is disabled (dev), everything is allowed.
+        let role = crate::auth::request_auth(&req).map(|a| a.role);
+        let auth_hdr = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let Ok(Json(req)) = axum::Json::<Value>::from_request(req, &()).await else {
+            return (
+                StatusCode::BAD_REQUEST,
+                "POST a single JSON-RPC 2.0 object to /mcp",
+            )
+                .into_response();
+        };
         let Some(id) = req.get("id").cloned() else {
             // Notifications get no JSON-RPC response.
             return StatusCode::ACCEPTED.into_response();
         };
+        if id.is_null() {
+            let body = json!({ "jsonrpc": "2.0", "id": Value::Null, "error": { "code": -32600, "message": "request id must not be null" } });
+            return Json(body).into_response();
+        }
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(Value::Null);
         let result = match method {
@@ -1241,7 +1280,17 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
                     "inputSchema": tool_schema(o),
                 })).collect::<Vec<_>>()
             })),
-            "tools/call" => Ok(call(&params).await),
+            "tools/call" => {
+                let tool = params.get("name").and_then(Value::as_str).unwrap_or("");
+                if role == Some(crate::auth::Role::Viewer) && WRITE_TOOLS.contains(&tool) {
+                    Ok(tool_result(
+                        format!("forbidden: tool {tool} requires the admin role"),
+                        true,
+                    ))
+                } else {
+                    Ok(call(&params, auth_hdr.as_deref()).await)
+                }
+            }
             other => {
                 Err(json!({ "code": -32601, "message": format!("method not found: {other}") }))
             }
@@ -1253,12 +1302,18 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
         Json(body).into_response()
     }
 
+    /// Tools that mutate the research record; viewers are denied at
+    /// `tools/call` time (auth middleware already required a valid token).
+    const WRITE_TOOLS: &[&str] = &["create_report", "update_report"];
+
     fn tool_result(text: String, is_error: bool) -> Value {
         json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
     }
 
     /// Execute a tool as the HTTP request it describes, against this server.
-    async fn call(params: &Value) -> Value {
+    /// The caller's bearer token is forwarded so write endpoints stay behind
+    /// the same auth as the rest of the API.
+    async fn call(params: &Value, auth_hdr: Option<&str>) -> Value {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
         let args = params
             .get("arguments")
@@ -1297,6 +1352,9 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
             "put" => client.put(&url),
             _ => return tool_result("unsupported method".into(), true),
         };
+        if let Some(h) = auth_hdr {
+            req = req.header(axum::http::header::AUTHORIZATION, h);
+        }
         if op.query.is_some() {
             let pairs: Vec<(String, String)> = args
                 .as_object()

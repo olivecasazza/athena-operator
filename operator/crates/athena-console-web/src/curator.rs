@@ -216,7 +216,7 @@ impl CuratorState {
 pub fn open_report(mut state: Signal<CuratorState>, namespace: String, name: String) {
     state.write().save = SaveState::Busy("loading…");
     spawn(async move {
-        match fetch_report(&namespace, &name).await {
+        match crate::fetch_report_detail(&namespace, &name).await {
             Ok(detail) => state.write().open(detail),
             Err(e) => state.write().save = SaveState::Failed(format!("load failed: {e}")),
         }
@@ -250,6 +250,7 @@ pub fn curator_view(
     selected: Signal<Option<ResourceSummary>>,
     nav_campaign: Option<String>,
     on_saved: EventHandler<()>,
+    auth: crate::auth_flow::Phase,
 ) -> Element {
     let st = state.read().clone();
     let campaign_name = effective_campaign(&st, selected.read().as_ref(), nav_campaign.as_deref());
@@ -421,7 +422,7 @@ pub fn curator_view(
             {chooser}
             {tabs}
             div { class: "cur-body", {body} }
-            {footer(state, &st, &campaign, on_saved)}
+            {footer(state, &st, &campaign, on_saved, &auth)}
         }
     }
 }
@@ -705,12 +706,15 @@ fn footer(
     st: &CuratorState,
     campaign: &ResourceSummary,
     on_saved: EventHandler<()>,
+    auth: &crate::auth_flow::Phase,
 ) -> Element {
     let is_new = st.loaded.is_none();
-    let problem = st.draft.problem(is_new);
     let dirty = st.dirty();
     let busy = matches!(st.save, SaveState::Busy(_));
-    let can_save = dirty && problem.is_none() && !busy;
+    // Writing a ResearchReport is the research record, so it needs a live
+    // session; reads above are unaffected. The gate lives in `auth_flow` so
+    // its rules are unit-tested rather than re-implemented here.
+    let (can_save, problem) = crate::auth_flow::save_gate(auth, st.draft.problem(is_new), dirty, busy);
     let rv = st
         .loaded
         .as_ref()
@@ -788,14 +792,6 @@ fn footer(
     }
 }
 
-async fn fetch_report(namespace: &str, name: &str) -> Result<ReportDetailDto, String> {
-    let url = format!("{}/api/reports/{namespace}/{name}", crate::api_base());
-    let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(resp.text().await.unwrap_or_else(|e| e.to_string()));
-    }
-    resp.json().await.map_err(|e| e.to_string())
-}
 
 #[cfg(test)]
 mod tests {
