@@ -50,7 +50,10 @@ pub struct AuthState {
 }
 
 struct JwksCache {
-    keys: Vec<(String, jsonwebtoken::DecodingKey)>,
+    /// (kid, alg advertised by the realm, decoding key). Keeping the
+    /// realm's advertised alg lets validation be pinned to what the issuer
+    /// actually publishes instead of to whatever the token claims.
+    keys: Vec<(String, String, jsonwebtoken::DecodingKey)>,
     fetched_at: Option<Instant>,
 }
 
@@ -117,8 +120,9 @@ impl AuthState {
             if jwk["kty"].as_str() != Some("RSA") {
                 continue;
             }
+            let alg = jwk["alg"].as_str().unwrap_or("RS256").to_string();
             if let Ok(key) = jsonwebtoken::DecodingKey::from_rsa_components(n, e) {
-                keys.push((kid.to_string(), key));
+                keys.push((kid.to_string(), alg, key));
             }
         }
         if keys.is_empty() {
@@ -142,23 +146,35 @@ impl AuthState {
             cache
                 .fetched_at
                 .is_none_or(|t| t.elapsed() > Duration::from_secs(3600))
-                || !cache.keys.iter().any(|(k, _)| k == &kid)
+                || !cache.keys.iter().any(|(k, _, _)| k == &kid)
         };
         if needs_refresh {
             let _ = self.refresh_jwks().await;
         }
-        let key = {
+        let (key, advertised_alg) = {
             let cache = self.jwks.read();
             cache
                 .keys
                 .iter()
-                .find(|(k, _)| k == &kid)
-                .map(|(_, k)| k.clone())
+                .find(|(k, _, _)| k == &kid)
+                .map(|(_, a, k)| (k.clone(), a.clone()))
         }
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-        // Keycloak puts audience in `aud`, but tokens for this client may only
-        // carry `account`; accept the client id via `aud` or `azp`.
+        // Pin the algorithm to the one the REALM publishes for this key, not to
+        // the one the token's own header claims. Taking `header.alg` here is
+        // the classic algorithm-confusion flaw: a forged token declaring
+        // `alg: HS256` would build HMAC validation and use the RSA public key
+        // as the shared secret, which is public. Reject any header that does not
+        // parse to exactly the algorithm the issuer advertised for this kid.
+        match advertised_alg.parse::<jsonwebtoken::Algorithm>() {
+            Ok(expected) if expected == header.alg => {}
+            _ => return Err(StatusCode::UNAUTHORIZED),
+        }
+
+        // `aud` is checked by hand just below rather than by jsonwebtoken,
+        // because the check needs EXACT membership of the client id — `azp`
+        // alone does not prove the token was minted for this resource.
         let mut validation = jsonwebtoken::Validation::new(header.alg);
         validation.set_issuer(&[&self.issuer]);
         validation.validate_aud = false;
@@ -348,7 +364,6 @@ mod contract_tests {
 
     const TEST_N_B64: &str = include_str!("fixtures/rsa_n.b64");
     const TEST_KEY_PEM: &str = include_str!("fixtures/rsa_key.pem");
-
     fn test_state() -> AuthState {
         let key =
             jsonwebtoken::DecodingKey::from_rsa_components(TEST_N_B64.trim(), "AQAB").unwrap();
@@ -360,11 +375,61 @@ mod contract_tests {
                 ("viewer".into(), vec!["realm:viewer".into()]),
             ])),
             jwks: Arc::new(RwLock::new(JwksCache {
-                keys: vec![("test-key".into(), key)],
+                keys: vec![("test-key".into(), "RS256".into(), key)],
                 fetched_at: Some(std::time::Instant::now()),
             })),
             http: reqwest::Client::new(),
         }
+    }
+
+    /// Cross-family confusion: a forged token declaring `alg: HS256` must not be
+    /// validated with the realm's RSA public key used as an HMAC secret. The
+    /// pin rejects it; note jsonwebtoken rejects this one on its own too, so
+    /// this test documents the defence rather than proving it — the
+    /// same-family test below is the one that fails without the pin.
+    #[tokio::test]
+    async fn token_declaring_a_different_algorithm_is_unauthorized() {
+        let state = test_state();
+        let mut header = Header::new(jsonwebtoken::Algorithm::HS256);
+        header.kid = Some("test-key".into());
+        // Sign with the same bytes a naive implementation would treat as a
+        // shared secret: the RSA public key in n/e form.
+        let pem = TEST_KEY_PEM.trim();
+        let hmac_key = pem.as_bytes();
+        let forged =
+            jsonwebtoken::encode(&header, &claims_admin(), &EncodingKey::from_secret(hmac_key))
+                .unwrap();
+        assert_eq!(
+            state.validate(&forged).await.unwrap_err(),
+            StatusCode::UNAUTHORIZED,
+            "a token declaring HS256 was accepted against an RS256 realm key"
+        );
+    }
+
+    /// Same-family algorithm substitution. The realm advertises RS256 for this
+    /// key; a token declaring RS512 is signed with the same RSA private key, so
+    /// jsonwebtoken accepts it — the key family matches and the signature is
+    /// valid. That is not a forgery, but it is not the algorithm the issuer
+    /// published, and accepting it means the realm's declared `alg` is advisory
+    /// rather than enforced. This is the case the pin actually catches, and the
+    /// reason the HS256 variant above is not the test to rely on: jsonwebtoken
+    /// already rejects cross-family confusion on its own.
+    #[tokio::test]
+    async fn token_declaring_another_algorithm_in_the_same_family_is_unauthorized() {
+        let state = test_state();
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS512);
+        header.kid = Some("test-key".into());
+        let token = jsonwebtoken::encode(
+            &header,
+            &claims_admin(),
+            &EncodingKey::from_rsa_pem(TEST_KEY_PEM.trim().as_bytes()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.validate(&token).await.unwrap_err(),
+            StatusCode::UNAUTHORIZED,
+            "accepted a token whose alg differs from the one the realm advertises"
+        );
     }
 
     fn sign(claims: Value) -> String {
