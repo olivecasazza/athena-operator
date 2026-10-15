@@ -56,6 +56,7 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::Context;
+use crate::status_guard;
 
 const MANAGER: &str = "athena-drive";
 /// Label marking campaigns a drive owns (queryable DAG edge).
@@ -1688,6 +1689,13 @@ fn phase_label(phase: &DrivePhase) -> String {
     format!("{phase:?}")
 }
 
+/// Write the drive's status unless it is already what the object says.
+///
+/// The drive controller watches ResearchDrive, and every pass rebuilt its
+/// conditions with a fresh timestamp, so an unchanged drive rewrote itself and
+/// woke itself again. Each wake also LISTs every ResearchReport for the
+/// MemoryHealthy check, so the loop was paid for in report bytes. See
+/// `status_guard`.
 async fn write_status(
     ctx: &Arc<Context>,
     ns: &str,
@@ -1700,15 +1708,18 @@ async fn write_status(
     status.phase = Some(phase);
     status.observed_generation = drive.metadata.generation;
     status.controller_version = Some(env!("CARGO_PKG_VERSION").to_string());
-    let mut patch = json!({ "status": status });
+    let mut desired = serde_json::to_value(&status).map_err(kube::Error::SerdeError)?;
     // A merge patch CANNOT clear an optional key: `None` is skipped by serde,
     // so a finished or failed harness Job would leave
     // status.pendingProposalJob pointing at the dead Job forever and the drive
     // would re-reference it instead of starting a new one. An explicit JSON
     // null is what removes the key in a merge patch.
-    if patch["status"].get("pendingProposalJob").is_none() {
-        patch["status"]["pendingProposalJob"] = Value::Null;
+    if desired.get("pendingProposalJob").is_none() {
+        desired["pendingProposalJob"] = Value::Null;
     }
+    let Some(patch) = status_guard::status_patch(drive.status.as_ref(), desired) else {
+        return Ok(());
+    };
     drives
         .patch_status(name, &PatchParams::apply(MANAGER), &Patch::Merge(&patch))
         .await?;
@@ -2180,5 +2191,84 @@ mod tests {
         let long = dns_name(&"x".repeat(200));
         assert!(long.len() <= 63);
         assert!(!long.ends_with('-'));
+    }
+
+    // --- API footprint ------------------------------------------------------
+
+    /// The drive controller watches ResearchDrive and rebuilt its conditions with
+    /// a fresh timestamp every pass, so an unchanged drive rewrote itself and woke
+    /// itself again (each wake also LISTing every ResearchReport).
+    #[tokio::test]
+    async fn an_unchanged_drive_is_not_rewritten_but_a_cleared_job_still_clears() {
+        use crate::test_support::{FakeApi, collection, context, experiment_cache, object};
+        let ns = "apps";
+        let mut drive = ResearchDrive::new("d", drive_spec_with(curriculum_two_stage()));
+        drive.metadata.namespace = Some(ns.into());
+        let api = FakeApi::start(vec![(
+            "PATCH",
+            format!("{}/d/status", collection::<ResearchDrive>(ns)),
+            object(&drive),
+        )])
+        .await;
+        let ctx = context(&api, experiment_cache(vec![]));
+        let writes = || api.calls("PATCH", "/d/status");
+        let body = |i: usize| -> ResearchDriveStatus {
+            serde_json::from_value(writes()[i].body["status"].clone()).expect("status body")
+        };
+        // What a pass observes. `cond()` stamps a new time on every call.
+        let observed = |job: Option<&str>| ResearchDriveStatus {
+            conditions: vec![
+                cond(
+                    "Ready",
+                    ConditionStatus::True,
+                    "LoopActive",
+                    "perpetual loop running",
+                ),
+                cond(
+                    "Progressing",
+                    ConditionStatus::False,
+                    "NoActiveBranches",
+                    "no campaigns in flight",
+                ),
+            ],
+            pending_proposal_job: job.map(String::from),
+            ..Default::default()
+        };
+
+        write_status(&ctx, ns, "d", &drive, observed(None), DrivePhase::Proposing)
+            .await
+            .expect("write");
+        assert_eq!(writes().len(), 1, "the first observation is written");
+        let stored = body(0);
+        let ready_since = stored.conditions[0].last_transition_time.clone();
+
+        // The same observation again: nothing to write.
+        drive.status = Some(stored.clone());
+        write_status(&ctx, ns, "d", &drive, observed(None), DrivePhase::Proposing)
+            .await
+            .expect("write");
+        assert_eq!(
+            writes().len(),
+            1,
+            "an unchanged drive must not be rewritten"
+        );
+
+        // A harness Job that was pending has finished: the key must be cleared
+        // with an explicit null (a merge patch cannot clear an omitted key), and
+        // the unchanged Ready condition keeps its time while the write goes out
+        // for that other reason.
+        drive.status = Some(ResearchDriveStatus {
+            pending_proposal_job: Some("job-1".into()),
+            ..stored
+        });
+        write_status(&ctx, ns, "d", &drive, observed(None), DrivePhase::Proposing)
+            .await
+            .expect("write");
+        assert_eq!(writes().len(), 2);
+        assert_eq!(
+            writes()[1].body["status"].get("pendingProposalJob"),
+            Some(&Value::Null)
+        );
+        assert_eq!(body(1).conditions[0].last_transition_time, ready_since);
     }
 }

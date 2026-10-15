@@ -97,6 +97,8 @@ Curated reference knowledge — appraisals, surveys, feasibility and design stud
 - Use finalizers when active Jobs, artifacts, or terminal status need cleanup or completion before deletion.
 - Emit Kubernetes Events and status conditions for lifecycle transitions, parse failures, budget exhaustion, integrity failures, retries, reconciliation failures, terminal success, and terminal failure.
 - Compute runtime and cost metrics such as `wall_clock_seconds`, `queue_latency_seconds`, and `gpu_hours` from controller-observed state, not self-reported workload values.
+- Status writes must be idempotent. Every controller watches the kind whose status it writes, so a write that changes nothing real wakes the same controller again: a fresh `lastTransitionTime` on every pass looped 68 campaigns at ~19.65 passes/s and drove ~48 MB/s of billed relay egress (2026-10-15). Route every `/status` write through `status_guard::status_patch`: a condition's `lastTransitionTime` moves only when its `status` changes, and a status that would change nothing is not sent.
+- Never LIST per reconcile. Read the controller's own reflector cache (`Context.experiments`) or a label-selected LIST scoped to the object, and rebuild gauges from a cache on a timer. Every controller sets a concurrency cap in `main.rs`; kube-runtime's default is unbounded.
 
 ## Benchmark And Metric Rules
 

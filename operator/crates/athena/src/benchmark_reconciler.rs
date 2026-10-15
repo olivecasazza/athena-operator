@@ -30,12 +30,14 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::ResourceExt;
 use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
+use kube::runtime::reflector::{ObjectRef, Store};
 use serde_json::{Value, json};
 use tracing::warn;
 
 use crate::Context;
 use crate::metrics;
 use crate::reconciler::kueue_tas_annotations;
+use crate::status_guard;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -59,6 +61,7 @@ pub async fn reconcile(run: Arc<BenchmarkRun>, ctx: Arc<Context>) -> Result<Acti
             ctx,
             &ns,
             &name,
+            run.status.as_ref(),
             BenchmarkRunStatus {
                 phase: BenchmarkRunPhase::Skipped,
                 observed_generation: run.metadata.generation,
@@ -100,34 +103,63 @@ pub async fn reconcile(run: Arc<BenchmarkRun>, ctx: Arc<Context>) -> Result<Acti
     {
         promote_experiment(ctx.clone(), &ns, &run, &suite, &status).await?;
     }
-    patch_status(ctx.clone(), &ns, &name, status).await?;
-    update_benchmark_metrics(ctx, &ns).await?;
+    patch_status(ctx, &ns, &name, run.status.as_ref(), status).await?;
 
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
-async fn update_benchmark_metrics(ctx: Arc<Context>, ns: &str) -> Result<(), Error> {
-    let runs: Api<BenchmarkRun> = Api::namespaced(ctx.client.clone(), ns);
-    let mut counts: BTreeMap<(String, String), f64> = BTreeMap::new();
+/// Gauge samples derived from one snapshot of every BenchmarkRun.
+#[derive(Debug, Default, PartialEq)]
+struct BenchmarkGauges {
+    /// `(namespace, suite, phase)` -> runs in that phase.
+    counts: BTreeMap<(String, String, String), f64>,
+}
 
-    for run in runs.list(&ListParams::default()).await? {
+/// Fold a snapshot of the BenchmarkRun cache into gauge samples. Pure, like its
+/// Experiment counterpart; each run is labelled with its OWN namespace.
+fn summarize_benchmark_runs(runs: &[Arc<BenchmarkRun>]) -> BenchmarkGauges {
+    let mut gauges = BenchmarkGauges::default();
+    for run in runs {
+        let ns = run
+            .metadata
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
         let suite = run.spec.suite_ref.name.clone();
         let phase = run
             .status
             .as_ref()
             .map(|status| format!("{:?}", status.phase))
             .unwrap_or_else(|| "Pending".to_string());
-        *counts.entry((suite, phase)).or_insert(0.0) += 1.0;
+        *gauges.counts.entry((ns, suite, phase)).or_insert(0.0) += 1.0;
     }
+    gauges
+}
 
+/// Replace the benchmark gauge with `gauges`, rebuilt from scratch so deleted
+/// runs drop out.
+fn publish_benchmark_gauges(gauges: &BenchmarkGauges) {
     metrics::BENCHMARK_RUNS_TOTAL.reset();
-    for ((suite, phase), count) in counts {
+    for ((ns, suite, phase), count) in &gauges.counts {
         metrics::BENCHMARK_RUNS_TOTAL
-            .with_label_values(&[ns, suite.as_str(), phase.as_str()])
-            .set(count);
+            .with_label_values(&[ns, suite, phase])
+            .set(*count);
     }
+}
 
-    Ok(())
+/// Keep the benchmark gauge current from the shared BenchmarkRun cache. It used
+/// to be a full namespaced LIST inside every BenchmarkRun reconcile.
+pub async fn export_benchmark_metrics(store: Store<BenchmarkRun>) {
+    // Err only when the controller feeding the cache is gone (shutdown).
+    if store.wait_until_ready().await.is_err() {
+        return;
+    }
+    let mut tick = tokio::time::interval(metrics::GAUGE_REFRESH);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        publish_benchmark_gauges(&summarize_benchmark_runs(&store.state()));
+    }
 }
 
 async fn get_suite(
@@ -881,25 +913,40 @@ async fn promote_experiment(
         ExperimentDecision::Discard
     };
 
+    // `lastUpdated` is a stamp the guard ignores when deciding to write, so it
+    // advances when the promoted content does, not on every 30 s pass. Without
+    // this a Succeeded run rewrote its target Experiment every pass, and each
+    // write woke the Experiment controller.
+    let desired = json!({
+        "metrics": metrics,
+        "decision": decision,
+        "metricsDetail": ExperimentMetrics {
+            objective_name: Some(primary),
+            objective_goal: Some(goal.to_string()),
+            latest: Some(latest.clone()),
+            best: Some(latest),
+            metrics_path: run.spec.output.as_ref().and_then(|output| output.workspace_path.clone()),
+            series: status.metric_series.clone(),
+            last_updated: Some(chrono::Utc::now().to_rfc3339()),
+        },
+    });
+    // What the Experiment controller last saw. A stale read can only cost one
+    // redundant write, never a missed one.
+    let target = ObjectRef::<Experiment>::new(&run.spec.target_ref.name).within(namespace);
+    let cached = ctx.experiments.get(&target);
+    let Some(patch) = status_guard::status_patch(
+        cached
+            .as_deref()
+            .and_then(|experiment| experiment.status.as_ref()),
+        desired,
+    ) else {
+        return Ok(());
+    };
     experiments
         .patch_status(
             &run.spec.target_ref.name,
             &PatchParams::apply("athena"),
-            &Patch::Merge(&json!({
-                "status": {
-                    "metrics": metrics,
-                    "decision": decision,
-                    "metricsDetail": ExperimentMetrics {
-                        objective_name: Some(primary),
-                        objective_goal: Some(goal.to_string()),
-                        latest: Some(latest.clone()),
-                        best: Some(latest),
-                        metrics_path: run.spec.output.as_ref().and_then(|output| output.workspace_path.clone()),
-                        series: status.metric_series.clone(),
-                        last_updated: Some(chrono::Utc::now().to_rfc3339()),
-                    },
-                }
-            })),
+            &Patch::Merge(&patch),
         )
         .await?;
     Ok(())
@@ -927,18 +974,23 @@ fn job_condition_is_true(job: &Job, condition_type: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Write `status` to the BenchmarkRun unless it is already what the object says.
+/// The BenchmarkRun controller watches BenchmarkRuns, so an unchanged status
+/// carrying a fresh condition timestamp re-triggered itself every pass. See
+/// `status_guard`.
 async fn patch_status(
     ctx: Arc<Context>,
     ns: &str,
     name: &str,
+    current: Option<&BenchmarkRunStatus>,
     status: BenchmarkRunStatus,
 ) -> Result<(), Error> {
+    let desired = serde_json::to_value(&status).map_err(kube::Error::SerdeError)?;
+    let Some(patch) = status_guard::status_patch(current, desired) else {
+        return Ok(());
+    };
     Api::<BenchmarkRun>::namespaced(ctx.client.clone(), ns)
-        .patch_status(
-            name,
-            &PatchParams::apply("athena"),
-            &Patch::Merge(&json!({ "status": status })),
-        )
+        .patch_status(name, &PatchParams::apply("athena"), &Patch::Merge(&patch))
         .await?;
     Ok(())
 }
@@ -1120,5 +1172,209 @@ mod tests {
         let labels = job.metadata.labels.as_ref().expect("labels");
         assert!(!labels.contains_key("kueue.x-k8s.io/queue-name"));
         assert_eq!(job.spec.as_ref().unwrap().suspend, None);
+    }
+
+    // --- API footprint ------------------------------------------------------
+
+    use crate::test_support::{FakeApi, collection, context, experiment_cache, object};
+    use athena_api::experiment::ExperimentSpec;
+
+    const NS: &str = "apps";
+
+    fn running_status(message: &str) -> BenchmarkRunStatus {
+        BenchmarkRunStatus {
+            phase: BenchmarkRunPhase::Running,
+            conditions: vec![condition(
+                "Ready",
+                ConditionStatus::False,
+                "Running",
+                message,
+            )],
+            controller_version: Some("test".into()),
+            ..Default::default()
+        }
+    }
+
+    /// The BenchmarkRun controller watches BenchmarkRuns, so a status rewritten
+    /// with a fresh condition timestamp woke its own next pass, forever.
+    #[tokio::test]
+    async fn an_unchanged_benchmark_status_is_not_rewritten() {
+        let api = FakeApi::start(vec![(
+            "PATCH",
+            format!("{}/canary/status", collection::<BenchmarkRun>(NS)),
+            object(&test_run()),
+        )])
+        .await;
+        let ctx = context(&api, experiment_cache(vec![]));
+        let writes = || api.calls("PATCH", "/canary/status");
+        let body = |i: usize| -> BenchmarkRunStatus {
+            serde_json::from_value(writes()[i].body["status"].clone()).expect("status body")
+        };
+
+        // The first observation is written.
+        patch_status(ctx.clone(), NS, "canary", None, running_status("running"))
+            .await
+            .expect("write");
+        assert_eq!(writes().len(), 1);
+        let stored = body(0);
+        let ready_since = stored.conditions[0].last_transition_time.clone();
+
+        // The same observation again. `condition()` stamps a new time, which the
+        // guard must see through.
+        patch_status(
+            ctx.clone(),
+            NS,
+            "canary",
+            Some(&stored),
+            running_status("running"),
+        )
+        .await
+        .expect("write");
+        assert_eq!(writes().len(), 1, "an unchanged status must not be written");
+
+        // A new message with the same Ready status is written, time unchanged.
+        patch_status(
+            ctx.clone(),
+            NS,
+            "canary",
+            Some(&stored),
+            running_status("2 tasks running"),
+        )
+        .await
+        .expect("write");
+        assert_eq!(writes().len(), 2);
+        let moved = body(1);
+        assert_eq!(
+            moved.conditions[0].message.as_deref(),
+            Some("2 tasks running")
+        );
+        assert_eq!(moved.conditions[0].last_transition_time, ready_since);
+
+        // Ready flips: written, and the time moves.
+        let mut done = running_status("done");
+        done.conditions = vec![condition(
+            "Ready",
+            ConditionStatus::True,
+            "Succeeded",
+            "done",
+        )];
+        patch_status(ctx, NS, "canary", Some(&moved), done)
+            .await
+            .expect("write");
+        assert_eq!(writes().len(), 3);
+        assert_ne!(body(2).conditions[0].last_transition_time, ready_since);
+    }
+
+    /// A Succeeded run used to rewrite its target Experiment's status every 30 s
+    /// pass (`metricsDetail.lastUpdated` was always new), and each write woke the
+    /// Experiment controller.
+    #[tokio::test]
+    async fn promotion_is_written_once_not_on_every_pass() {
+        let run = test_run();
+        let (suite, _task) = test_suite_and_task();
+        let observed = BenchmarkRunStatus {
+            phase: BenchmarkRunPhase::Succeeded,
+            aggregate_metrics: BTreeMap::from([(
+                "reward_mean".to_string(),
+                MetricAggregate {
+                    mean: Some(1.0),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let mut target = Experiment::new(
+            "exp",
+            ExperimentSpec {
+                lineage: None,
+                campaign_ref: "c".into(),
+                hypothesis: "h".into(),
+                parameters: BTreeMap::new(),
+                patch: None,
+                checkpoint_policy: None,
+                env: Vec::new(),
+            },
+        );
+        target.metadata.namespace = Some(NS.into());
+        let api = FakeApi::start(vec![(
+            "PATCH",
+            format!("{}/exp/status", collection::<Experiment>(NS)),
+            object(&target),
+        )])
+        .await;
+        let writes = || api.calls("PATCH", "/exp/status");
+
+        // The target holds no promotion yet: written.
+        let cache = experiment_cache(vec![target.clone()]);
+        promote_experiment(context(&api, cache), NS, &run, &suite, &observed)
+            .await
+            .expect("promote");
+        assert_eq!(writes().len(), 1);
+
+        // The apiserver now holds it (lastUpdated included) merged onto the
+        // experiment's own status, and the cache has caught up. The next pass
+        // re-derives the same promotion with a new lastUpdated, which alone must
+        // not trigger another write.
+        let mut held = writes()[0].body["status"].clone();
+        held["phase"] = json!("succeeded");
+        target.status = Some(serde_json::from_value(held).expect("status body"));
+        let cache = experiment_cache(vec![target.clone()]);
+        promote_experiment(context(&api, cache), NS, &run, &suite, &observed)
+            .await
+            .expect("promote");
+        assert_eq!(writes().len(), 1, "the promotion is already on the target");
+    }
+
+    // --- gauges from the cache --------------------------------------------
+
+    fn run_in(ns: &str, suite: &str, phase: Option<BenchmarkRunPhase>) -> Arc<BenchmarkRun> {
+        let mut run = test_run();
+        run.metadata.namespace = Some(ns.into());
+        run.spec.suite_ref.name = suite.into();
+        run.status = phase.map(|phase| BenchmarkRunStatus {
+            phase,
+            ..Default::default()
+        });
+        Arc::new(run)
+    }
+
+    #[test]
+    fn benchmark_gauges_are_folded_per_runs_own_namespace() {
+        let gauges = summarize_benchmark_runs(&[
+            run_in("apps", "s1", Some(BenchmarkRunPhase::Running)),
+            run_in("apps", "s1", Some(BenchmarkRunPhase::Running)),
+            // No status yet is Pending, as before.
+            run_in("apps", "s1", None),
+            run_in("lab", "s2", Some(BenchmarkRunPhase::Succeeded)),
+        ]);
+        let count = |ns: &str, suite: &str, phase: &str| {
+            gauges
+                .counts
+                .get(&(ns.to_string(), suite.to_string(), phase.to_string()))
+                .copied()
+        };
+        assert_eq!(count("apps", "s1", "Running"), Some(2.0));
+        assert_eq!(count("apps", "s1", "Pending"), Some(1.0));
+        assert_eq!(count("lab", "s2", "Succeeded"), Some(1.0));
+        assert_eq!(gauges.counts.len(), 3);
+    }
+
+    #[test]
+    fn republishing_drops_series_for_runs_that_are_gone() {
+        use prometheus::core::Collector;
+        let series = || -> usize {
+            metrics::BENCHMARK_RUNS_TOTAL
+                .collect()
+                .iter()
+                .map(|family| family.get_metric().len())
+                .sum()
+        };
+        let a = run_in("apps", "s1", Some(BenchmarkRunPhase::Running));
+        let b = run_in("apps", "s2", Some(BenchmarkRunPhase::Failed));
+
+        publish_benchmark_gauges(&summarize_benchmark_runs(&[a.clone(), b]));
+        assert_eq!(series(), 2);
+        publish_benchmark_gauges(&summarize_benchmark_runs(&[a]));
+        assert_eq!(series(), 1, "a deleted run's series must not linger");
     }
 }

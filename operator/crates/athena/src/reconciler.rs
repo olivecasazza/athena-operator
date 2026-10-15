@@ -24,11 +24,13 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::ResourceExt;
 use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
+use kube::runtime::reflector::Store;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::Context;
 use crate::metrics;
+use crate::status_guard;
 use crate::telemetry;
 
 #[derive(Debug, thiserror::Error)]
@@ -105,19 +107,34 @@ pub async fn reconcile(experiment: Arc<Experiment>, ctx: Arc<Context>) -> Result
     }
     reconcile_experiment_status(&experiment, ctx.clone(), ns, name).await?;
 
-    update_experiment_metrics(ctx.clone(), ns).await?;
     telemetry::record_reconcile(ns, campaign, &phase_label, "ok", started_at.elapsed());
 
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
-async fn update_experiment_metrics(ctx: Arc<Context>, ns: &str) -> Result<(), Error> {
-    let experiments: Api<Experiment> = Api::namespaced(ctx.client.clone(), ns);
-    let mut counts: BTreeMap<(String, String), f64> = BTreeMap::new();
+/// Gauge samples derived from one snapshot of every Experiment.
+#[derive(Debug, Default, PartialEq)]
+struct ExperimentGauges {
+    /// `(namespace, campaign, phase)` -> experiments in that phase.
+    counts: BTreeMap<(String, String, String), f64>,
+    /// `(namespace, experiment, campaign, metric)` -> latest reported value.
+    values: BTreeMap<(String, String, String, String), f64>,
+}
 
-    // Rebuild both gauges from scratch each pass so removed experiments drop out.
-    metrics::EXPERIMENT_METRIC.reset();
-    for experiment in experiments.list(&ListParams::default()).await? {
+/// Fold a snapshot of the Experiment cache into gauge samples.
+///
+/// Pure, so it can be tested without touching the process-global gauges. Each
+/// experiment is labelled with its OWN namespace: the per-reconcile version took
+/// the reconciling object's namespace and `reset()` every gauge, so with two
+/// namespaces the series flapped between them.
+fn summarize_experiments(experiments: &[Arc<Experiment>]) -> ExperimentGauges {
+    let mut gauges = ExperimentGauges::default();
+    for experiment in experiments {
+        let ns = experiment
+            .metadata
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
         let campaign = experiment.spec.campaign_ref.clone();
         let phase = experiment
             .status
@@ -136,24 +153,60 @@ async fn update_experiment_metrics(ctx: Arc<Context>, ns: &str) -> Result<(), Er
                     _ => None,
                 };
                 if let Some(v) = v {
-                    metrics::EXPERIMENT_METRIC
-                        .with_label_values(&[ns, exp_name.as_str(), campaign.as_str(), metric])
-                        .set(v);
+                    gauges.values.insert(
+                        (
+                            ns.clone(),
+                            exp_name.clone(),
+                            campaign.clone(),
+                            metric.clone(),
+                        ),
+                        v,
+                    );
                 }
             }
         }
 
-        *counts.entry((campaign, phase)).or_insert(0.0) += 1.0;
+        *gauges.counts.entry((ns, campaign, phase)).or_insert(0.0) += 1.0;
+    }
+    gauges
+}
+
+/// Replace the experiment gauges with `gauges`. Both are rebuilt from scratch so
+/// experiments that were deleted drop out.
+fn publish_experiment_gauges(gauges: &ExperimentGauges) {
+    metrics::EXPERIMENT_METRIC.reset();
+    for ((ns, experiment, campaign, metric), value) in &gauges.values {
+        metrics::EXPERIMENT_METRIC
+            .with_label_values(&[ns, experiment, campaign, metric])
+            .set(*value);
     }
 
     metrics::EXPERIMENTS_TOTAL.reset();
-    for ((campaign, phase), count) in counts {
+    for ((ns, campaign, phase), count) in &gauges.counts {
         metrics::EXPERIMENTS_TOTAL
-            .with_label_values(&[ns, campaign.as_str(), phase.as_str()])
-            .set(count);
+            .with_label_values(&[ns, campaign, phase])
+            .set(*count);
     }
+}
 
-    Ok(())
+/// Keep the experiment gauges current from the shared Experiment cache.
+///
+/// This used to run inside every Experiment reconcile as a full namespaced LIST
+/// (~2.67 MB), and every one of the 402 experiments reconciled every 30 s plus
+/// once per status write: ~36 MB/s of the relay's egress for numbers that only
+/// need refreshing once per scrape.
+pub async fn export_experiment_metrics(store: Store<Experiment>) {
+    // Err only when the controller that feeds the cache has been dropped, i.e.
+    // the operator is shutting down.
+    if store.wait_until_ready().await.is_err() {
+        return;
+    }
+    let mut tick = tokio::time::interval(metrics::GAUGE_REFRESH);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        publish_experiment_gauges(&summarize_experiments(&store.state()));
+    }
 }
 
 async fn ensure_experiment_job(
@@ -296,7 +349,7 @@ async fn ensure_experiment_job(
         conditions: Some(vec![workspace_claim.condition]),
         ..Default::default()
     };
-    patch_experiment_status(ctx, ns, name, status).await?;
+    patch_experiment_status(ctx, ns, name, experiment.status.as_ref(), status).await?;
 
     Ok(())
 }
@@ -478,6 +531,7 @@ async fn reconcile_experiment_status(
                 ctx,
                 ns,
                 name,
+                experiment.status.as_ref(),
                 ExperimentStatus {
                     phase: ExperimentPhase::Error,
                     job_name: Some(job_name.clone()),
@@ -542,6 +596,7 @@ async fn reconcile_experiment_status(
         ctx,
         ns,
         name,
+        experiment.status.as_ref(),
         ExperimentStatus {
             phase,
             job_name: Some(job_name),
@@ -950,19 +1005,27 @@ fn condition(
     }
 }
 
+/// Write `status` to the Experiment unless it is already what the object says.
+///
+/// `current` is the status of the object this pass reconciled. The Experiment
+/// controller watches Experiments, so a write whose only change is a fresh
+/// condition timestamp wakes the next pass immediately: every non-terminal
+/// experiment re-reconciled in a loop, each pass costing a LIST. See
+/// `status_guard` for the rules.
 async fn patch_experiment_status(
     ctx: Arc<Context>,
     ns: &str,
     name: &str,
+    current: Option<&ExperimentStatus>,
     status: ExperimentStatus,
 ) -> Result<(), Error> {
+    let desired = serde_json::to_value(&status).map_err(kube::Error::SerdeError)?;
+    let Some(patch) = status_guard::status_patch(current, desired) else {
+        return Ok(());
+    };
     let experiments: Api<Experiment> = Api::namespaced(ctx.client.clone(), ns);
     experiments
-        .patch_status(
-            name,
-            &PatchParams::apply("athena"),
-            &Patch::Merge(&json!({ "status": status })),
-        )
+        .patch_status(name, &PatchParams::apply("athena"), &Patch::Merge(&patch))
         .await?;
     Ok(())
 }
@@ -2160,5 +2223,218 @@ mod tests {
             merge_terminal_metrics(BTreeMap::new(), None, None, None, None, Some(&raw));
         assert_eq!(metrics.get("val_bpb"), Some(&json!(2.34)));
         assert_eq!(detail.unwrap().objective_name.as_deref(), Some("val_bpb"));
+    }
+
+    // --- API footprint of a reconcile pass ---------------------------------
+
+    use crate::test_support::{FakeApi, collection, context, experiment_cache, list_of, object};
+
+    const NS: &str = "apps";
+
+    /// Experiment `e1`, Running, whose Job `exp-e1` exists with one Running pod.
+    fn running_experiment() -> Experiment {
+        let mut experiment = test_experiment("e1");
+        experiment.metadata.namespace = Some(NS.into());
+        experiment.status = Some(ExperimentStatus {
+            phase: ExperimentPhase::Running,
+            job_name: Some("exp-e1".into()),
+            ..Default::default()
+        });
+        experiment
+    }
+
+    /// Run one pass over `experiment` against that world.
+    async fn reconcile_once(experiment: &Experiment) -> FakeApi {
+        let job: Job = serde_json::from_value(json!({
+            "metadata": { "name": "exp-e1", "namespace": NS },
+            "status": { "active": 1 },
+        }))
+        .expect("job");
+        let pod: Pod = serde_json::from_value(json!({
+            "metadata": { "name": "exp-e1-abc", "namespace": NS },
+            "status": { "phase": "Running" },
+        }))
+        .expect("pod");
+        let api = FakeApi::start(vec![
+            (
+                "GET",
+                format!("{}/exp-e1", collection::<Job>(NS)),
+                object(&job),
+            ),
+            ("GET", collection::<Pod>(NS), list_of(&[pod])),
+            // Only reachable if a pass LISTs Experiments, which these tests
+            // assert it must not. Served so a regression fails on that
+            // assertion instead of on a 404.
+            (
+                "GET",
+                collection::<Experiment>(NS),
+                list_of::<Experiment>(&[]),
+            ),
+            (
+                "PATCH",
+                format!("{}/e1/status", collection::<Experiment>(NS)),
+                object(experiment),
+            ),
+        ])
+        .await;
+        let cache = experiment_cache(vec![experiment.clone()]);
+        reconcile(Arc::new(experiment.clone()), context(&api, cache))
+            .await
+            .expect("reconcile pass");
+        api
+    }
+
+    /// Every Experiment reconcile used to LIST every Experiment (~2.67 MB) to
+    /// refresh gauges: 402 experiments x every 30 s, plus once per status write.
+    #[tokio::test]
+    async fn an_experiment_pass_never_lists_experiments() {
+        let api = reconcile_once(&running_experiment()).await;
+        let lists = api.calls("GET", "/experiments");
+        assert!(
+            lists.is_empty(),
+            "an Experiment pass must not LIST Experiments, did {lists:?}"
+        );
+    }
+
+    /// A non-terminal experiment used to rewrite its status (fresh condition
+    /// timestamp) on every pass, and each write woke the next pass.
+    #[tokio::test]
+    async fn an_experiment_whose_state_is_unchanged_is_not_rewritten() {
+        let experiment = running_experiment();
+        let first = reconcile_once(&experiment).await;
+        let written = first.calls("PATCH", "/e1/status");
+        assert_eq!(written.len(), 1, "the first observation is written");
+
+        let mut settled = experiment.clone();
+        settled.status =
+            Some(serde_json::from_value(written[0].body["status"].clone()).expect("status"));
+        let second = reconcile_once(&settled).await;
+        let rewrites = second.calls("PATCH", "/e1/status");
+        assert!(
+            rewrites.is_empty(),
+            "an unchanged experiment must not be rewritten, wrote {rewrites:?}"
+        );
+    }
+
+    // --- gauges from the cache --------------------------------------------
+
+    fn experiment_in(
+        ns: &str,
+        name: &str,
+        campaign: &str,
+        phase: Option<ExperimentPhase>,
+        metrics: &[(&str, Value)],
+    ) -> Arc<Experiment> {
+        let mut experiment = Experiment::new(
+            name,
+            ExperimentSpec {
+                lineage: None,
+                campaign_ref: campaign.to_string(),
+                hypothesis: "h".to_string(),
+                parameters: BTreeMap::new(),
+                patch: None,
+                checkpoint_policy: None,
+                env: Vec::new(),
+            },
+        );
+        experiment.metadata.namespace = Some(ns.to_string());
+        experiment.status = phase.map(|phase| ExperimentStatus {
+            phase,
+            metrics: metrics
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            ..Default::default()
+        });
+        Arc::new(experiment)
+    }
+
+    #[test]
+    fn gauges_are_folded_per_experiments_own_namespace() {
+        let snapshot = vec![
+            experiment_in(
+                "apps",
+                "a-0",
+                "a",
+                Some(ExperimentPhase::Running),
+                &[
+                    ("reward", json!(1.5)),
+                    ("loss", json!("0.25")),
+                    ("note", json!("n/a")),
+                    ("flag", json!(true)),
+                ],
+            ),
+            experiment_in("apps", "a-1", "a", Some(ExperimentPhase::Running), &[]),
+            // No status yet is Pending, as before.
+            experiment_in("apps", "a-2", "a", None, &[]),
+            experiment_in(
+                "lab",
+                "b-0",
+                "b",
+                Some(ExperimentPhase::Succeeded),
+                &[("reward", json!(2))],
+            ),
+        ];
+        let gauges = summarize_experiments(&snapshot);
+
+        let count = |ns: &str, campaign: &str, phase: &str| {
+            gauges
+                .counts
+                .get(&(ns.to_string(), campaign.to_string(), phase.to_string()))
+                .copied()
+        };
+        assert_eq!(count("apps", "a", "Running"), Some(2.0));
+        assert_eq!(count("apps", "a", "Pending"), Some(1.0));
+        assert_eq!(count("lab", "b", "Succeeded"), Some(1.0));
+        assert_eq!(gauges.counts.len(), 3);
+
+        let value = |ns: &str, exp: &str, campaign: &str, metric: &str| {
+            gauges
+                .values
+                .get(&(
+                    ns.to_string(),
+                    exp.to_string(),
+                    campaign.to_string(),
+                    metric.to_string(),
+                ))
+                .copied()
+        };
+        assert_eq!(value("apps", "a-0", "a", "reward"), Some(1.5));
+        assert_eq!(
+            value("apps", "a-0", "a", "loss"),
+            Some(0.25),
+            "numeric strings parse"
+        );
+        assert_eq!(
+            value("apps", "a-0", "a", "note"),
+            None,
+            "non-numeric is skipped"
+        );
+        assert_eq!(
+            value("apps", "a-0", "a", "flag"),
+            None,
+            "booleans are skipped"
+        );
+        assert_eq!(value("lab", "b-0", "b", "reward"), Some(2.0));
+        assert_eq!(gauges.values.len(), 3);
+    }
+
+    #[test]
+    fn republishing_drops_series_for_experiments_that_are_gone() {
+        use prometheus::core::Collector;
+        let series = || -> usize {
+            metrics::EXPERIMENTS_TOTAL
+                .collect()
+                .iter()
+                .map(|family| family.get_metric().len())
+                .sum()
+        };
+        let a = experiment_in("apps", "a-0", "a", Some(ExperimentPhase::Running), &[]);
+        let b = experiment_in("apps", "b-0", "b", Some(ExperimentPhase::Failed), &[]);
+
+        publish_experiment_gauges(&summarize_experiments(&[a.clone(), b]));
+        assert_eq!(series(), 2);
+        publish_experiment_gauges(&summarize_experiments(&[a]));
+        assert_eq!(series(), 1, "a deleted experiment's series must not linger");
     }
 }
