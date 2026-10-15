@@ -486,15 +486,14 @@ fn resolve_metrics_path(workspace_path: &str, metrics_path: &str) -> String {
 /// running? `error` + reason `JobMissing` is the exact fingerprint the
 /// status reconciler stamps when `get_opt` finds no Job.
 fn job_vanished(experiment: &Experiment) -> bool {
-    experiment
-        .status
-        .as_ref()
-        .is_some_and(|s| {
-            s.phase == ExperimentPhase::Error
-                && s.conditions.as_ref().is_some_and(|conds| {
-                    conds.iter().any(|c| c.reason.as_deref() == Some("JobMissing"))
-                })
-        })
+    experiment.status.as_ref().is_some_and(|s| {
+        s.phase == ExperimentPhase::Error
+            && s.conditions.as_ref().is_some_and(|conds| {
+                conds
+                    .iter()
+                    .any(|c| c.reason.as_deref() == Some("JobMissing"))
+            })
+    })
 }
 
 /// Whether this pass should (re)create the experiment's Job: a fresh
@@ -1129,9 +1128,7 @@ fn experiment_labels(
 /// admitted by `cpu-any`, which has no topology, so asking for one would only
 /// narrow its options. Same rule as the campaign path, where CPU-only meshes
 /// bypass Kueue entirely (`research_campaign.rs:239-240`).
-pub(crate) fn kueue_tas_annotations(
-    profile: &RuntimeProfile,
-) -> Option<BTreeMap<String, String>> {
+pub(crate) fn kueue_tas_annotations(profile: &RuntimeProfile) -> Option<BTreeMap<String, String>> {
     profile.spec.scheduling.queue_name.as_ref()?;
     let requests_gpu = profile
         .spec
@@ -1301,12 +1298,7 @@ fn experiment_deadline_override(experiment: &Experiment) -> Option<i64> {
 /// experiment: a bad duration string must not wedge a research run.
 fn experiment_deadline_seconds(profile: &RuntimeProfile) -> i64 {
     const DEFAULT_SECONDS: i64 = 8 * 3600;
-    let Some(raw) = profile
-        .spec
-        .scheduling
-        .experiment_deadline
-        .as_deref()
-    else {
+    let Some(raw) = profile.spec.scheduling.experiment_deadline.as_deref() else {
         return DEFAULT_SECONDS;
     };
     parse_go_duration(raw).filter(|s| *s > 0).unwrap_or_else(|| {
@@ -1866,7 +1858,12 @@ mod tests {
 
         e.status = Some(ExperimentStatus {
             phase: ExperimentPhase::Error,
-            conditions: Some(vec![condition("JobObserved", "False", "JobMissing", "gone")]),
+            conditions: Some(vec![condition(
+                "JobObserved",
+                "False",
+                "JobMissing",
+                "gone",
+            )]),
             ..Default::default()
         });
         assert!(job_vanished(&e), "error + JobMissing is a vanished job");
@@ -1874,10 +1871,18 @@ mod tests {
         // A genuine error carries a different reason and stays terminal.
         e.status = Some(ExperimentStatus {
             phase: ExperimentPhase::Error,
-            conditions: Some(vec![condition("JobObserved", "False", "JobFailed", "crashed")]),
+            conditions: Some(vec![condition(
+                "JobObserved",
+                "False",
+                "JobFailed",
+                "crashed",
+            )]),
             ..Default::default()
         });
-        assert!(!job_vanished(&e), "a real failure must not be retried forever");
+        assert!(
+            !job_vanished(&e),
+            "a real failure must not be retried forever"
+        );
     }
 
     /// Go duration strings the deadline parser must accept. These are

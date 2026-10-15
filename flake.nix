@@ -160,6 +160,9 @@
             src = operatorSrc;
             cargoArtifacts = operatorCargoArtifacts;
             cargoExtraArgs = "-p athena";
+            # The reconciler tests build a kube client against a loopback fake
+            # apiserver; rustls loads native roots when the client is built.
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           };
           athenaOperatorImage = pkgs.dockerTools.buildLayeredImage {
             name = "ghcr.io/olivecasazza/athena-operator";
