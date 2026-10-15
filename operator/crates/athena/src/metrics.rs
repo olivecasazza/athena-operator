@@ -7,6 +7,14 @@ use tracing::{error, info};
 
 pub static REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 
+/// How often the experiment and benchmark gauges are rebuilt from their
+/// controllers' caches.
+///
+/// Shorter than the chart's 15 s ServiceMonitor scrape interval, so a scrape
+/// never reads data more than one refresh old. A rebuild is an in-memory pass
+/// over the cache, so its cost does not depend on this value.
+pub const GAUGE_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub static EXPERIMENTS_TOTAL: Lazy<GaugeVec> = Lazy::new(|| {
     let opts =
         Opts::new("experiments_total", "Count of Athena experiments by phase").namespace("athena");

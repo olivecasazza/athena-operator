@@ -63,6 +63,7 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::Context;
+use crate::status_guard;
 
 const MANAGER: &str = "athena-campaign";
 const CAMPAIGN_LABEL: &str = "athena.nixlab.io/campaign";
@@ -177,6 +178,32 @@ pub fn error_policy(campaign: Arc<ResearchCampaign>, err: &Error, _ctx: Arc<Cont
     Action::requeue(Duration::from_secs(30))
 }
 
+/// Selector for the experiments this controller stamped (or adopted) for `campaign`.
+/// The one LIST a pass makes, and it is scoped: it never reads another campaign's
+/// experiments.
+fn campaign_list_params(campaign: &str) -> ListParams {
+    ListParams::default().labels(&format!("{CAMPAIGN_LABEL}={campaign}"))
+}
+
+/// Experiments in `ns` that declare `campaign` through `spec.campaignRef` but are
+/// not in `labelled`, the set the label selector returned. A label selector cannot
+/// find these by definition (their label is missing, or names another campaign),
+/// so they come from the operator's Experiment cache instead of from LISTing every
+/// Experiment in the namespace on every pass of every campaign.
+fn unlabeled_members(
+    cache: &[Arc<Experiment>],
+    ns: &str,
+    campaign: &str,
+    labelled: &std::collections::HashSet<String>,
+) -> Vec<Experiment> {
+    cache
+        .iter()
+        .filter(|e| e.namespace().as_deref().unwrap_or("default") == ns)
+        .filter(|e| e.spec.campaign_ref == campaign && !labelled.contains(&e.name_any()))
+        .map(|e| (**e).clone())
+        .collect()
+}
+
 #[tracing::instrument(skip(campaign, ctx), fields(
     campaign.name = %campaign.name_any(),
     campaign.namespace = %campaign.namespace().unwrap_or_default(),
@@ -225,21 +252,17 @@ pub async fn reconcile(
     // ADOPT rather than merely tolerate: stamp the label on anything that
     // declares this campaign, so every downstream selector, the console, and
     // GC all agree with the API-declared relationship.
+    //
+    // The counting LIST is label-scoped and read fresh (generation decisions
+    // depend on it). The sweep for experiments that LIST cannot see reads the
+    // Experiment cache: it used to LIST every Experiment in the namespace
+    // (~2.67 MB) on every pass of every campaign.
     let experiments: Api<Experiment> = Api::namespaced(ctx.client.clone(), &ns);
-    let mut exps = experiments
-        .list(&ListParams::default().labels(&format!("{CAMPAIGN_LABEL}={name}")))
-        .await?;
+    let mut exps = experiments.list(&campaign_list_params(&name)).await?;
     {
         let known: std::collections::HashSet<String> =
             exps.items.iter().map(|e| e.name_any()).collect();
-        let orphans: Vec<Experiment> = experiments
-            .list(&ListParams::default())
-            .await?
-            .items
-            .into_iter()
-            .filter(|e| e.spec.campaign_ref == name && !known.contains(&e.name_any()))
-            .collect();
-        for o in orphans {
+        for o in unlabeled_members(&ctx.experiments.state(), &ns, &name, &known) {
             let on = o.name_any();
             let patch = json!({ "metadata": { "labels": { CAMPAIGN_LABEL: name } } });
             match experiments
@@ -247,6 +270,13 @@ pub async fn reconcile(
                 .await
             {
                 Ok(_) => info!(campaign = %name, experiment = %on, "adopted experiment"),
+                // Deleted since the cache last saw it. A LIST can never return an
+                // experiment that is gone; a cache can, and counting one would
+                // inflate running/total and could suppress a real create.
+                Err(kube::Error::Api(e)) if e.code == 404 => {
+                    info!(campaign = %name, experiment = %on, "experiment vanished before adoption; not counted");
+                    continue;
+                }
                 // Adoption is best-effort: counting it this pass is what matters,
                 // and a failed label write must not stall the campaign loop.
                 Err(e) => warn!(campaign = %name, experiment = %on, %e, "adoption failed"),
@@ -943,7 +973,7 @@ pub async fn reconcile(
             "lastTransitionTime": chrono::Utc::now().to_rfc3339(),
         }));
     }
-    let mut status = json!({ "status": {
+    let mut status = json!({
         "runningExperiments": running + new,
         "succeededExperiments": succeeded,
         "failedExperiments": failed,
@@ -959,17 +989,24 @@ pub async fn reconcile(
         "observedGeneration": campaign.metadata.generation,
         "controllerVersion": env!("CARGO_PKG_VERSION"),
         "conditions": conditions,
-    }});
+    });
     // Canary status is only ever written for canary campaigns, so existing CRs
     // are untouched (merge-patch: keys we don't send are left alone).
     if campaign.spec.canary.is_some() && (canary_exp.is_some() || canary_created) {
-        status["status"]["canaryExperiment"] = json!(canary_name);
-        status["status"]["canaryState"] = json!(canary_state(gate, canary_phase.as_ref()));
+        status["canaryExperiment"] = json!(canary_name);
+        status["canaryState"] = json!(canary_state(gate, canary_phase.as_ref()));
     }
     let campaigns: Api<ResearchCampaign> = Api::namespaced(ctx.client.clone(), &ns);
-    campaigns
-        .patch_status(&name, &PatchParams::apply(MANAGER), &Patch::Merge(&status))
-        .await?;
+    // This controller watches ResearchCampaign, so a status write wakes the loop
+    // again at once. Rewriting an unchanged status (the conditions used to carry
+    // a fresh timestamp every pass) therefore re-triggered it forever, ~19.65
+    // passes/s fleet-wide. Write only when something real moved; see
+    // `status_guard`.
+    if let Some(patch) = status_guard::status_patch(campaign.status.as_ref(), status) {
+        campaigns
+            .patch_status(&name, &PatchParams::apply(MANAGER), &Patch::Merge(&patch))
+            .await?;
+    }
 
     // Author this campaign's write-up once it is terminal. Drive-owned
     // campaigns are written up by the drive when it folds them; this covers
@@ -3507,5 +3544,305 @@ mod tests {
         let all_done = [&done, &failed, &child];
         let open = all_done.iter().any(|e| is_cold_start(e) && !is_terminal(e));
         assert!(!open, "cohort closes once every cold start is terminal");
+    }
+
+    // --- API footprint of a reconcile pass ---------------------------------
+    //
+    // These run the real `reconcile` against a recording fake apiserver and
+    // assert on what it was asked. The storm was a bug in that footprint, which
+    // no pure-function test can observe.
+
+    use crate::test_support::{FakeApi, collection, context, experiment_cache, list_of, object};
+    use athena_api::research_campaign::ResearchCampaignStatus;
+
+    const NS: &str = "apps";
+    const SELECTOR: &str = "athena.nixlab.io/campaign=c";
+
+    /// An experiment of `campaign` in `ns`; `label` is the campaign label it carries.
+    fn member(
+        name: &str,
+        campaign: &str,
+        ns: &str,
+        label: Option<&str>,
+        phase: Option<ExperimentPhase>,
+    ) -> Experiment {
+        Experiment {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                namespace: Some(ns.into()),
+                labels: label
+                    .map(|l| BTreeMap::from([(CAMPAIGN_LABEL.to_string(), l.to_string())])),
+                ..Default::default()
+            },
+            spec: ExperimentSpec {
+                lineage: None,
+                campaign_ref: campaign.into(),
+                hypothesis: String::new(),
+                parameters: BTreeMap::new(),
+                patch: None,
+                checkpoint_policy: None,
+                env: vec![],
+            },
+            status: phase.map(|phase| ExperimentStatus {
+                phase,
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// Campaign `c` in `apps`, budgeted at exactly the three experiments the
+    /// scenarios hold, so a pass never has anything to generate.
+    fn footprint_campaign() -> ResearchCampaign {
+        let mut campaign = campaign_pbt(None, None);
+        campaign.metadata.namespace = Some(NS.into());
+        campaign.spec.strategy.strategy_type = "heuristic".into();
+        campaign.spec.concurrency = 2;
+        campaign.spec.budget.max_experiments = 3;
+        campaign
+    }
+
+    /// Run one pass of `campaign` against a world where the label-selected LIST
+    /// returns `labelled` and the Experiment cache holds `cache`.
+    async fn reconcile_once(
+        campaign: &ResearchCampaign,
+        labelled: &[Experiment],
+        cache: Vec<Experiment>,
+    ) -> FakeApi {
+        let mut template = template_with_default_lr(0.1);
+        template.metadata.name = Some("t".into());
+        template.metadata.namespace = Some(NS.into());
+        let api = FakeApi::start(vec![
+            (
+                "GET",
+                format!("{}/t", collection::<ExperimentTemplate>(NS)),
+                object(&template),
+            ),
+            ("GET", collection::<Experiment>(NS), list_of(labelled)),
+            (
+                "PATCH",
+                format!("{}/hand-1", collection::<Experiment>(NS)),
+                object(&member("hand-1", "c", NS, Some("c"), None)),
+            ),
+            (
+                "PATCH",
+                format!("{}/c/status", collection::<ResearchCampaign>(NS)),
+                object(campaign),
+            ),
+        ])
+        .await;
+        reconcile(
+            Arc::new(campaign.clone()),
+            context(&api, experiment_cache(cache)),
+        )
+        .await
+        .expect("reconcile pass");
+        api
+    }
+
+    /// The status a pass wrote, as the apiserver would now hold it.
+    fn written_status(api: &FakeApi) -> Option<ResearchCampaignStatus> {
+        api.calls("PATCH", "/researchcampaigns/c/status")
+            .first()
+            .map(|r| serde_json::from_value(r.body["status"].clone()).expect("status body"))
+    }
+
+    fn healthy_time(status: &ResearchCampaignStatus) -> String {
+        status
+            .conditions
+            .as_ref()
+            .and_then(|cs| {
+                cs.iter()
+                    .find(|c| c.condition_type.as_deref() == Some("ExperimentsHealthy"))
+            })
+            .and_then(|c| c.last_transition_time.clone())
+            .expect("ExperimentsHealthy carries a lastTransitionTime")
+    }
+
+    /// The campaign's own experiments, carrying its label.
+    fn own(phases: [ExperimentPhase; 3]) -> Vec<Experiment> {
+        ["c-000", "c-001", "hand-1"]
+            .into_iter()
+            .zip(phases)
+            .map(|(name, phase)| member(name, "c", NS, Some("c"), Some(phase)))
+            .collect()
+    }
+
+    #[test]
+    fn campaign_list_is_scoped_by_label_selector() {
+        assert_eq!(
+            campaign_list_params("c").label_selector.as_deref(),
+            Some(SELECTOR)
+        );
+    }
+
+    #[test]
+    fn unlabeled_members_are_found_by_declared_membership_in_their_own_namespace() {
+        let cache: Vec<Arc<Experiment>> = vec![
+            // Labelled and listed: not an orphan.
+            member("c-000", "c", NS, Some("c"), None),
+            // Declares c, no label: the orphan.
+            member("hand-1", "c", NS, None, None),
+            // Declares c, label names ANOTHER campaign (copied from its yaml): also c's.
+            member("copied", "c", NS, Some("other"), None),
+            // Another campaign's, unlabeled.
+            member("stray", "other", NS, None, None),
+            // c's name, wrong namespace.
+            member("elsewhere", "c", "other-ns", None, None),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+        let listed: std::collections::HashSet<String> = ["c-000".to_string()].into();
+        let mut found: Vec<String> = unlabeled_members(&cache, NS, "c", &listed)
+            .iter()
+            .map(|e| e.name_any())
+            .collect();
+        found.sort();
+        assert_eq!(found, ["copied", "hand-1"]);
+    }
+
+    /// The storm's two halves, observed on the wire: a pass LISTs only its own
+    /// campaign (never the whole namespace) and adopts from the cache.
+    #[tokio::test]
+    async fn a_pass_lists_only_its_own_experiments_and_adopts_from_the_cache() {
+        let labelled = own([
+            ExperimentPhase::Running,
+            ExperimentPhase::Running,
+            ExperimentPhase::Running,
+        ]);
+        let mut hand = labelled[2].clone();
+        hand.metadata.labels = None; // as hand-authored: no label yet
+        let cache = vec![
+            labelled[0].clone(),
+            labelled[1].clone(),
+            hand,
+            member("other-000", "other", NS, Some("other"), None),
+            member("stray", "other", NS, None, None),
+            member("elsewhere", "c", "other-ns", None, None),
+        ];
+        let api = reconcile_once(&footprint_campaign(), &labelled[..2], cache).await;
+
+        let lists = api.calls("GET", "/experiments");
+        assert_eq!(lists.len(), 1, "one LIST per pass, got {lists:?}");
+        assert_eq!(
+            lists[0].label_selector(),
+            Some(SELECTOR),
+            "the pass must never LIST every Experiment in the namespace"
+        );
+
+        let adopted: Vec<_> = api
+            .requests()
+            .into_iter()
+            .filter(|r| r.method == "PATCH" && r.path.contains("/experiments/"))
+            .collect();
+        assert_eq!(
+            adopted.len(),
+            1,
+            "only c's own orphan is adopted: {adopted:?}"
+        );
+        assert!(adopted[0].path.ends_with("/experiments/hand-1"));
+        assert_eq!(
+            adopted[0].body["metadata"]["labels"][CAMPAIGN_LABEL],
+            json!("c")
+        );
+
+        // The adopted orphan is counted this pass, not next.
+        let status = written_status(&api).expect("first pass writes status");
+        assert_eq!(status.total_experiments, 3);
+        assert_eq!(status.running_experiments, 3);
+    }
+
+    /// An orphan the cache still holds but the apiserver no longer does is a
+    /// ghost: counting it would inflate the tally and suppress a real create.
+    #[tokio::test]
+    async fn an_orphan_deleted_since_the_cache_saw_it_is_not_counted() {
+        let labelled = own([
+            ExperimentPhase::Running,
+            ExperimentPhase::Running,
+            ExperimentPhase::Running,
+        ]);
+        let cache = vec![
+            labelled[0].clone(),
+            labelled[1].clone(),
+            // No PATCH route for it: the fake answers 404, as a deleted object would.
+            member("ghost", "c", NS, None, None),
+        ];
+        let api = reconcile_once(&footprint_campaign(), &labelled[..2], cache).await;
+        let status = written_status(&api).expect("first pass writes status");
+        assert_eq!(status.total_experiments, 2, "the ghost must not be counted");
+    }
+
+    /// The storm itself: a pass over an unchanged world must not write status.
+    /// Before the guard the condition carried a fresh timestamp every pass, so the
+    /// write always differed, always came back as a watch event, and always woke
+    /// the next pass.
+    #[tokio::test]
+    async fn an_unchanged_world_writes_no_status() {
+        let world = own([
+            ExperimentPhase::Running,
+            ExperimentPhase::Running,
+            ExperimentPhase::Running,
+        ]);
+        let campaign = footprint_campaign();
+
+        let first = reconcile_once(&campaign, &world, world.clone()).await;
+        let written = written_status(&first).expect("a first status is written");
+
+        let mut settled = campaign.clone();
+        settled.status = Some(written);
+        let second = reconcile_once(&settled, &world, world.clone()).await;
+        let writes: Vec<_> = second
+            .requests()
+            .into_iter()
+            .filter(|r| r.method != "GET")
+            .collect();
+        assert!(
+            writes.is_empty(),
+            "a pass over an unchanged world must write nothing, wrote {writes:?}"
+        );
+    }
+
+    /// A condition's `lastTransitionTime` moves when its status flips, not when
+    /// its message does.
+    #[tokio::test]
+    async fn last_transition_time_moves_only_when_the_condition_status_flips() {
+        use ExperimentPhase::{Failed, Running};
+        let campaign = footprint_campaign();
+
+        let world = own([Running, Running, Running]);
+        let first = reconcile_once(&campaign, &world, world.clone()).await;
+        let t0 = healthy_time(&written_status(&first).expect("first write"));
+        let mut current = campaign.clone();
+        current.status = written_status(&first);
+
+        // One experiment failed: the message changes ("1 failed"), Healthy stays True.
+        let world = own([Failed, Running, Running]);
+        let second = reconcile_once(&current, &world, world.clone()).await;
+        let status = written_status(&second).expect("a changed message is written");
+        let message = status
+            .conditions
+            .as_ref()
+            .and_then(|c| c[0].message.clone());
+        assert_eq!(message.as_deref(), Some("0 succeeded, 1 failed, 2 running"));
+        assert_eq!(
+            healthy_time(&status),
+            t0,
+            "Healthy is still True, so its transition time must not move"
+        );
+        current.status = Some(status);
+
+        // Every finished experiment failed: Healthy flips to False.
+        let world = own([Failed, Failed, Failed]);
+        let third = reconcile_once(&current, &world, world.clone()).await;
+        let status = written_status(&third).expect("a flip is written");
+        assert_eq!(
+            status.conditions.as_ref().and_then(|c| c[0].status.clone()),
+            Some("False".to_string())
+        );
+        assert_ne!(
+            healthy_time(&status),
+            t0,
+            "the status flipped, so the transition time must move"
+        );
     }
 }

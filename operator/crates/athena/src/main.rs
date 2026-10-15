@@ -8,7 +8,10 @@ mod panathenaia;
 mod proposer_harness;
 mod reconciler;
 mod report_reconciler;
+mod status_guard;
 mod telemetry;
+#[cfg(test)]
+mod test_support;
 
 use std::sync::Arc;
 
@@ -20,12 +23,35 @@ use athena_api::research_report::ResearchReport;
 use futures::StreamExt;
 use kube::{
     Api, Client,
-    runtime::{Controller, watcher::Config},
+    runtime::{Controller, controller, reflector::Store, watcher::Config},
 };
 use tracing::{error, info};
 
 pub struct Context {
     pub client: Client,
+    /// The Experiment controller's own watch cache. Reading it costs no API
+    /// traffic, so whatever needs "all Experiments" (the campaign's orphan
+    /// adoption, the benchmark's promote check) reads this instead of LISTing.
+    pub experiments: Store<Experiment>,
+}
+
+/// Concurrent reconciles per controller.
+///
+/// kube-runtime's default is `0`, which means *unbounded*: every object that
+/// is due reconciles at once. Under the status hot loop that was 108-179
+/// simultaneous connections to the apiserver, all crossing the WireGuard hub.
+/// A bound turns a surge into a queue. These are caps, not targets: a pass is
+/// a handful of small requests, so steady state needs a fraction of them. The
+/// campaign and drive caps leave headroom for a pass that waits on the LLM
+/// proposer (up to `timeout_seconds`) without starving the rest.
+const EXPERIMENT_CONCURRENCY: u16 = 16;
+const BENCHMARK_CONCURRENCY: u16 = 8;
+const CAMPAIGN_CONCURRENCY: u16 = 16;
+const REPORT_CONCURRENCY: u16 = 4;
+const DRIVE_CONCURRENCY: u16 = 4;
+
+fn bounded(concurrency: u16) -> controller::Config {
+    controller::Config::default().concurrency(concurrency)
 }
 
 #[tokio::main]
@@ -108,16 +134,37 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(metrics::serve(metrics_port));
 
     let client = Client::try_default().await?;
-    let ctx = Arc::new(Context {
-        client: client.clone(),
-    });
     let experiments: Api<Experiment> = Api::all(client.clone());
     let benchmark_runs: Api<BenchmarkRun> = Api::all(client.clone());
     let campaigns: Api<ResearchCampaign> = Api::all(client.clone());
     let drives: Api<ResearchDrive> = Api::all(client.clone());
-    let reports: Api<ResearchReport> = Api::all(client);
+    let reports: Api<ResearchReport> = Api::all(client.clone());
 
+    // The Experiment and BenchmarkRun controllers are built first because their
+    // reflector caches are shared: one LIST+WATCH per kind, already maintained
+    // for the controller itself, replaces a full LIST on every reconcile.
     let experiment_controller = Controller::new(experiments, Config::default())
+        .with_config(bounded(EXPERIMENT_CONCURRENCY));
+    let experiment_store = experiment_controller.store();
+    let benchmark_controller = Controller::new(benchmark_runs, Config::default())
+        .with_config(bounded(BENCHMARK_CONCURRENCY));
+    let benchmark_store = benchmark_controller.store();
+
+    let ctx = Arc::new(Context {
+        client,
+        experiments: experiment_store.clone(),
+    });
+
+    // Gauges are rebuilt from the caches on a timer, not from a LIST inside each
+    // object's reconcile (which re-listed everything once per object per pass).
+    tokio::spawn(reconciler::export_experiment_metrics(
+        experiment_store.clone(),
+    ));
+    tokio::spawn(benchmark_reconciler::export_benchmark_metrics(
+        benchmark_store,
+    ));
+
+    let experiment_controller = experiment_controller
         .shutdown_on_signal()
         .run(reconciler::reconcile, reconciler::error_policy, ctx.clone())
         .for_each(|res| async move {
@@ -127,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-    let benchmark_controller = Controller::new(benchmark_runs, Config::default())
+    let benchmark_controller = benchmark_controller
         .shutdown_on_signal()
         .run(
             benchmark_reconciler::reconcile,
@@ -142,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         });
 
     let campaign_controller = Controller::new(campaigns, Config::default())
+        .with_config(bounded(CAMPAIGN_CONCURRENCY))
         .shutdown_on_signal()
         .run(
             campaign_reconciler::reconcile,
@@ -154,8 +202,16 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => error!(%e, "ResearchCampaign reconcile error"),
             }
         });
+    // The campaign loop adopts from the Experiment cache. Counting before that
+    // cache has had its first LIST would under-count members and could
+    // over-generate, so the loop does not start until the cache is primed.
+    let campaign_controller = async move {
+        let _ = experiment_store.wait_until_ready().await;
+        campaign_controller.await
+    };
 
     let report_controller = Controller::new(reports, Config::default())
+        .with_config(bounded(REPORT_CONCURRENCY))
         .shutdown_on_signal()
         .run(
             report_reconciler::reconcile,
@@ -170,6 +226,7 @@ async fn main() -> anyhow::Result<()> {
         });
 
     let drive_controller = Controller::new(drives, Config::default())
+        .with_config(bounded(DRIVE_CONCURRENCY))
         .shutdown_on_signal()
         .run(
             drive_reconciler::reconcile,
@@ -199,4 +256,30 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// kube-runtime reads a concurrency of 0 as "unbounded". Every controller
+    /// must set a real cap, or one surge puts every due object in flight at once.
+    #[test]
+    fn every_controller_has_a_real_concurrency_cap() {
+        for (controller, cap) in [
+            ("experiment", EXPERIMENT_CONCURRENCY),
+            ("benchmark", BENCHMARK_CONCURRENCY),
+            ("campaign", CAMPAIGN_CONCURRENCY),
+            ("report", REPORT_CONCURRENCY),
+            ("drive", DRIVE_CONCURRENCY),
+        ] {
+            assert!(cap > 0, "{controller} controller would be unbounded");
+        }
+    }
+
+    #[test]
+    fn bounded_sets_the_cap_the_default_leaves_open() {
+        assert!(format!("{:?}", controller::Config::default()).contains("concurrency: 0"));
+        assert!(format!("{:?}", bounded(7)).contains("concurrency: 7"));
+    }
 }
