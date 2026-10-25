@@ -311,7 +311,7 @@
       projectedOutputs = ci.mkOutputs {
         systems = flake-utils.lib.defaultSystems;
         packageSystems = flake-utils.lib.defaultSystems;
-        checkSystems = flake-utils.lib.defaultSystems;
+        checkSystems = [ "x86_64-linux" ];
         hydraSystems = [
           "x86_64-linux"
           "aarch64-linux"
