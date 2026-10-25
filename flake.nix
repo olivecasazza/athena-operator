@@ -5,6 +5,10 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     crane.url = "github:ipetkov/crane";
+    hydra-src = {
+      url = "github:olivecasazza/hydra/4060fb888f85b3c273ac56cae665e7c99e99fe1c";
+      flake = false;
+    };
   };
 
   outputs =
@@ -12,11 +16,13 @@
       nixpkgs,
       flake-utils,
       crane,
+      hydra-src,
       ...
     }:
     let
       mkDeployment = lib: import ./nix/athena/deployment.nix { inherit lib; };
-      outputs = flake-utils.lib.eachDefaultSystem (
+      ci = import (hydra-src + "/lib/ci.nix") { lib = nixpkgs.lib; };
+      buildFor =
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
@@ -300,19 +306,25 @@
               '';
             };
           };
-        }
-      );
+        };
+      ordinaryOutputs = flake-utils.lib.eachDefaultSystem buildFor;
+      projectedOutputs = ci.mkOutputs {
+        systems = flake-utils.lib.defaultSystems;
+        packageSystems = flake-utils.lib.defaultSystems;
+        checkSystems = flake-utils.lib.defaultSystems;
+        hydraSystems = [
+          "x86_64-linux"
+          "aarch64-linux"
+        ];
+        inherit buildFor;
+      };
     in
-    outputs
+    ordinaryOutputs
+    // projectedOutputs
     // {
       lib.athena = mkDeployment nixpkgs.lib;
-
-      hydraJobs = {
-        x86_64-linux = outputs.packages.x86_64-linux;
-        aarch64-linux = outputs.packages.aarch64-linux;
-      };
-
       formatter.x86_64-linux = nixpkgs.legacyPackages.x86_64-linux.nixfmt-rfc-style;
       formatter.aarch64-linux = nixpkgs.legacyPackages.aarch64-linux.nixfmt-rfc-style;
     };
 }
+

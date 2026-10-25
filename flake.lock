@@ -33,6 +33,23 @@
         "type": "github"
       }
     },
+    "hydra-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792956539,
+        "narHash": "sha256-uGKavEWcqdgBPKLUp8W6lzzO+ffSDdotgFjTSU+2JiQ=",
+        "owner": "olivecasazza",
+        "repo": "hydra",
+        "rev": "4060fb888f85b3c273ac56cae665e7c99e99fe1c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "olivecasazza",
+        "repo": "hydra",
+        "rev": "4060fb888f85b3c273ac56cae665e7c99e99fe1c",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1778869304,
@@ -53,6 +70,7 @@
       "inputs": {
         "crane": "crane",
         "flake-utils": "flake-utils",
+        "hydra-src": "hydra-src",
         "nixpkgs": "nixpkgs"
       }
     },
