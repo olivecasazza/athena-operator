@@ -26,3 +26,10 @@ uv sync                            # sync workload-only Python deps
 uv run experiments/train.py        # local workload smoke run
 uv run pytest tests/               # smoke/manifest/observability checks
 ```
+
+## Nix CI outputs
+
+The flake pins the shared `hydra-src` projection helper and reuses the
+caller-owned package and deployment checks for ordinary CI outputs. Linux
+Hydra projections are explicit; enabling or changing a Hydra jobset remains a
+separate deployment decision.
