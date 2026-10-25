@@ -312,10 +312,9 @@
         systems = flake-utils.lib.defaultSystems;
         packageSystems = flake-utils.lib.defaultSystems;
         checkSystems = [ "x86_64-linux" ];
-        hydraSystems = [
-          "x86_64-linux"
-          "aarch64-linux"
-        ];
+        # Hydra's deployed machine pool is x86_64-linux; package systems
+        # remain multi-system for native consumers.
+        hydraSystems = [ "x86_64-linux" ];
         inherit buildFor;
       };
     in
