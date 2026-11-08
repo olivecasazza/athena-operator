@@ -26,11 +26,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use dioxus::prelude::*;
-use panel_kit::widgets::{DataColumnSpec, DataRow, DataTable, SortKey};
-use panel_kit_core::widgets::data_table::{SortDir, TableQuery};
+use panel_kit::widgets::DataColumnSpec;
+use panel_kit::widgets::data_table::SortSpec;
+use panel_kit_core::widgets::data_table::SortDir;
 
 use crate::models::{ClusterSnapshot, ReportDetailDto, ReportSpecDto, ResourceSummary};
-use crate::tables::{campaign_columns, campaign_row, experiment_cells, experiment_columns, fmt_ms};
+use crate::tables::{
+    ConsoleTable, DataRow, SortKey, campaign_columns, campaign_row, experiment_cells,
+    experiment_columns, fmt_ms,
+};
 
 /// Section names offered as one-click additions (the drive's write-up uses
 /// the first four; the rest are common paper sections).
@@ -310,7 +314,7 @@ pub fn curator_view(
                 let shown = label.clone();
                 campaign_row(
                     c,
-                    rsx! { td { title: "{c.name}",
+                    rsx! { span { title: "{c.name}",
                         button {
                             class: "row-link",
                             onclick: move |_| {
@@ -328,12 +332,13 @@ pub fn curator_view(
             .collect();
         return rsx! {
             {subject}
-            DataTable {
+            ConsoleTable {
+                id: "athena-curator-campaigns",
                 columns: campaign_columns(),
                 rows,
-                initial: TableQuery::sorted("created", SortDir::Desc),
-                storage_key: Some("athena.table.curator.campaigns".to_string()),
-                placeholder: "filter campaigns…",
+                sort: SortSpec::new("created", SortDir::Desc),
+                storage_key: "athena.table.curator.campaigns".to_string(),
+                placeholder: "filter campaigns…".to_string(),
             }
         };
     }
@@ -480,7 +485,7 @@ fn dataset_tab(
             let name = e.name.clone();
             let on = !st.draft.excluded.contains(&e.name);
             let lead = DataRow::new(e.name.clone()).cell(
-                rsx! { td {
+                rsx! { span {
                     input {
                         r#type: "checkbox",
                         checked: on,
@@ -494,10 +499,9 @@ fn dataset_tab(
                     }
                 } },
                 SortKey::num(if on { 1.0 } else { 0.0 }),
-                "",
             );
             let shown = e.name.clone();
-            experiment_cells(lead, e, rsx! { td { "{shown}" } }, false)
+            experiment_cells(lead, e, rsx! { span { "{shown}" } }, false)
         })
         .collect();
 
@@ -518,13 +522,14 @@ fn dataset_tab(
                 "only Keep"
             }
         }
-        DataTable {
+        ConsoleTable {
+            id: "athena-curator-dataset",
             columns,
             rows,
-            initial: TableQuery::sorted("created", SortDir::Desc),
-            storage_key: Some("athena.table.curator.dataset".to_string()),
-            empty: "No experiments in this campaign.",
-            placeholder: "filter experiments…",
+            sort: SortSpec::new("created", SortDir::Desc),
+            storage_key: "athena.table.curator.dataset".to_string(),
+            empty: "No experiments in this campaign.".to_string(),
+            placeholder: "filter experiments…".to_string(),
         }
     }
 }

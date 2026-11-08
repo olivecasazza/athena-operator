@@ -6,10 +6,164 @@
 //! only in which columns start visible; users can toggle the rest from the
 //! table's columns menu, and the choice persists per table.
 
+use std::rc::Rc;
+
 use dioxus::prelude::*;
-use panel_kit::widgets::{DataColumnSpec, DataRow, SortKey};
+use panel_kit::widgets::data_table::{SortSpec, TableDefaults};
+use panel_kit::widgets::{DataColumnSpec, DataTable, TableDataBuilder, Value};
 
 use crate::models::ResourceSummary;
+
+/// A cell's sort and filter value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SortKey {
+    Text(String),
+    Number(f64),
+    Missing,
+}
+
+impl SortKey {
+    pub fn text(value: impl Into<String>) -> Self {
+        Self::Text(value.into())
+    }
+
+    pub fn num(value: f64) -> Self {
+        Self::Number(value)
+    }
+
+    pub fn opt_num(value: Option<f64>) -> Self {
+        value.map_or(Self::Missing, Self::Number)
+    }
+
+    fn value(&self) -> Value<'_> {
+        match self {
+            Self::Text(text) => Value::Text(text),
+            Self::Number(number) => Value::Number(*number),
+            Self::Missing => Value::Missing,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RowCell {
+    key: SortKey,
+    view: Element,
+}
+
+/// One console table row: an id and one cell per declared column. A cell's
+/// view renders inside the table's own `td`.
+#[derive(Clone)]
+pub struct DataRow {
+    id: String,
+    cells: Vec<RowCell>,
+    selected: bool,
+}
+
+impl PartialEq for DataRow {
+    // Cell views capture event handlers; never skip a render on a false "equal".
+    fn eq(&self, _: &Self) -> bool {
+        false
+    }
+}
+
+impl DataRow {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            cells: Vec::new(),
+            selected: false,
+        }
+    }
+
+    /// Mark as the current selection.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    /// Arbitrary cell view with an explicit sort and filter value.
+    pub fn cell(mut self, view: Element, key: SortKey) -> Self {
+        self.cells.push(RowCell { key, view });
+        self
+    }
+
+    /// Plain text cell: shown, sorted, and filtered by the same string.
+    pub fn text(self, value: impl Into<String>) -> Self {
+        let value = value.into();
+        self.cell(
+            rsx! { span { title: "{value}", "{value}" } },
+            SortKey::Text(value),
+        )
+    }
+
+    /// Text cell with an extra CSS class (e.g. `"muted"`).
+    pub fn text_class(self, value: impl Into<String>, class: &'static str) -> Self {
+        let value = value.into();
+        self.cell(
+            rsx! { span { class: "{class}", title: "{value}", "{value}" } },
+            SortKey::Text(value),
+        )
+    }
+
+    /// Numeric cell shown as `display`, sorted by `value`.
+    pub fn num(self, value: Option<f64>, display: impl Into<String>) -> Self {
+        let display = display.into();
+        self.cell(
+            rsx! { span { title: "{display}", "{display}" } },
+            SortKey::opt_num(value),
+        )
+    }
+}
+
+/// The console's table: panel-kit's [`DataTable`] over rows of [`DataRow`].
+#[component]
+pub fn ConsoleTable(
+    id: String,
+    columns: Vec<DataColumnSpec>,
+    rows: Vec<DataRow>,
+    sort: SortSpec,
+    #[props(default)] storage_key: Option<String>,
+    #[props(default)] empty: Option<String>,
+    #[props(default)] placeholder: Option<String>,
+) -> Element {
+    let mut builder = TableDataBuilder::with_capacity(&columns, rows.len());
+    for row in &rows {
+        builder.row(&row.id, row.cells.iter().map(|cell| cell.key.value()));
+    }
+    let data = builder.build();
+    let chosen: Vec<String> = rows
+        .iter()
+        .filter(|row| row.selected)
+        .map(|row| row.id.clone())
+        .collect();
+    let selected = (!chosen.is_empty()).then_some(chosen);
+    let rows = Rc::new(rows);
+    let cell = Callback::new(move |(row, column): (usize, usize)| {
+        rows[row]
+            .cells
+            .get(column)
+            .map(|cell| cell.view.clone())
+            .unwrap_or_else(|| rsx! {})
+    });
+    let defaults = TableDefaults {
+        sort: vec![sort],
+        ..TableDefaults::default()
+    };
+    let empty = empty.map(|text| rsx! { "{text}" });
+    rsx! {
+        DataTable {
+            id,
+            columns,
+            data,
+            cell,
+            defaults,
+            storage_key,
+            empty,
+            selected,
+            placeholder: placeholder.unwrap_or_else(|| "filter rows".to_string()),
+        }
+    }
+}
 
 /// Epoch-millis string → `YYYY-MM-DD HH:MM` UTC, or an em dash.
 pub fn fmt_ms(ms: &Option<String>) -> String {
@@ -73,25 +227,20 @@ fn fmt_objective(value: Option<f64>, goal: Option<&str>) -> String {
     }
 }
 
-/// Row helpers shared by every console table.
-pub trait RowExt {
-    fn date(self, ms: &Option<String>) -> Self;
-    fn opt_text(self, value: Option<String>) -> Self;
-}
-
-impl RowExt for DataRow {
-    fn date(self, ms: &Option<String>) -> Self {
+impl DataRow {
+    /// Created timestamp: sorted by epoch millis, shown as UTC.
+    pub fn date(self, ms: &Option<String>) -> Self {
         let shown = fmt_ms(ms);
-        self.cell(rsx! { td { class: "date", "{shown}" } }, ms_key(ms), &shown)
+        self.cell(rsx! { span { class: "date", "{shown}" } }, ms_key(ms))
     }
 
-    fn opt_text(self, value: Option<String>) -> Self {
+    /// Text cell, or a muted dash that sorts last when absent.
+    pub fn opt_text(self, value: Option<String>) -> Self {
         match value {
             Some(v) => self.text(v),
             None => self.cell(
-                rsx! { td { class: "muted", "{DASH}" } },
+                rsx! { span { class: "muted", "{DASH}" } },
                 SortKey::Missing,
-                "",
             ),
         }
     }
@@ -108,13 +257,13 @@ pub fn experiment_columns(with_campaign: bool) -> Vec<DataColumnSpec> {
         DataColumnSpec::new("template", "Template"),
         DataColumnSpec::new("phase", "Phase"),
         DataColumnSpec::new("decision", "Decision"),
-        DataColumnSpec::new("objective", "Objective"),
+        DataColumnSpec::new("objective", "Objective").number(),
         DataColumnSpec::new("metric", "Metric").hidden(),
         DataColumnSpec::new("parent", "Parent"),
-        DataColumnSpec::new("gen", "Gen"),
-        DataColumnSpec::new("runtime", "Runtime"),
-        DataColumnSpec::new("gpu_hours", "GPU-h").hidden(),
-        DataColumnSpec::new("created", "Created"),
+        DataColumnSpec::new("gen", "Gen").number(),
+        DataColumnSpec::new("runtime", "Runtime").number(),
+        DataColumnSpec::new("gpu_hours", "GPU-h").number().hidden(),
+        DataColumnSpec::new("created", "Created").number(),
         DataColumnSpec::new("hypothesis", "Hypothesis").hidden(),
         DataColumnSpec::new("workspace", "Workspace").hidden(),
     ]);
@@ -122,7 +271,7 @@ pub fn experiment_columns(with_campaign: bool) -> Vec<DataColumnSpec> {
 }
 
 /// One experiment row; `name_cell` is the caller's (usually clickable) first
-/// cell and must render a `td`.
+/// cell.
 pub fn experiment_row(e: &ResourceSummary, name_cell: Element, with_campaign: bool) -> DataRow {
     experiment_cells(DataRow::new(e.name.clone()), e, name_cell, with_campaign)
 }
@@ -135,7 +284,7 @@ pub fn experiment_cells(
     name_cell: Element,
     with_campaign: bool,
 ) -> DataRow {
-    let mut row = row.cell(name_cell, SortKey::text(&e.name), &e.name);
+    let mut row = row.cell(name_cell, SortKey::text(&e.name));
     if with_campaign {
         row = row.opt_text(e.campaign.clone());
     }
@@ -178,12 +327,12 @@ pub fn campaign_columns() -> Vec<DataColumnSpec> {
         DataColumnSpec::new("strategy", "Strategy"),
         DataColumnSpec::new("phase", "Phase"),
         DataColumnSpec::new("best", "Best experiment"),
-        DataColumnSpec::new("objective", "Best objective"),
+        DataColumnSpec::new("objective", "Best objective").number(),
         DataColumnSpec::new("metric", "Metric").hidden(),
-        DataColumnSpec::new("succeeded", "OK"),
-        DataColumnSpec::new("failed", "Failed"),
-        DataColumnSpec::new("running", "Running").hidden(),
-        DataColumnSpec::new("created", "Created"),
+        DataColumnSpec::new("succeeded", "OK").number(),
+        DataColumnSpec::new("failed", "Failed").number(),
+        DataColumnSpec::new("running", "Running").number().hidden(),
+        DataColumnSpec::new("created", "Created").number(),
     ]
 }
 
@@ -194,18 +343,14 @@ fn count(n: Option<u32>) -> (Option<f64>, String) {
     )
 }
 
-/// One campaign row; `name_cell` renders the (clickable) display name `td`,
+/// One campaign row; `name_cell` renders the (clickable) display name,
 /// sorted and searched by both `label` and the full CR name.
 pub fn campaign_row(c: &ResourceSummary, name_cell: Element, label: &str) -> DataRow {
     let (ok, ok_s) = count(c.succeeded);
     let (bad, bad_s) = count(c.failed);
     let (run, run_s) = count(c.running);
     DataRow::new(c.name.clone())
-        .cell(
-            name_cell,
-            SortKey::text(label),
-            &format!("{label} {}", c.name),
-        )
+        .cell(name_cell, SortKey::text(format!("{label} {}", c.name)))
         .opt_text(c.drive.clone())
         .opt_text(c.template.clone())
         .opt_text(c.strategy.clone())
@@ -251,11 +396,10 @@ mod tests {
     fn row_cells_match_declared_columns() {
         let e = ResourceSummary::default();
         for with_campaign in [true, false] {
-            let row = experiment_row(&e, rsx! { td {} }, with_campaign);
+            let row = experiment_row(&e, rsx! { span {} }, with_campaign);
             assert_eq!(row.cells.len(), experiment_columns(with_campaign).len());
-            assert_eq!(row.keys.len(), row.cells.len());
         }
-        let row = campaign_row(&e, rsx! { td {} }, "x");
+        let row = campaign_row(&e, rsx! { span {} }, "x");
         assert_eq!(row.cells.len(), campaign_columns().len());
     }
 }

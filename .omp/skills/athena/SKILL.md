@@ -154,4 +154,4 @@ cargo test -p athena
    kubectl rollout status deploy/athena-console -n apps; kubectl rollout status deploy/athena -n apps
    ```
 
-panel-kit (the console's UI kit) is the fork `olivecasazza/panel-kit`, pinned by rev in `operator/crates/athena-console-web/Cargo.toml`. Upstream is `ocasazza/panel-kit`. Its design rules are in `~/Repositories/panel-kit/.impeccable/design.json`: graphite surfaces, the accent only for live state, tracked caps for small labels, no shadows on resting surfaces.
+panel-kit (the console's UI kit) is `ocasazza/panel-kit`, pinned by rev in `operator/crates/athena-console-web/Cargo.toml`. Its design rules are in `~/Repositories/panel-kit/.impeccable/design.json`: graphite surfaces, the accent only for live state, tracked caps for small labels, no shadows on resting surfaces.
