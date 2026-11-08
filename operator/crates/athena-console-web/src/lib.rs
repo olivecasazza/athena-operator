@@ -32,19 +32,23 @@ use models::{
 };
 use panel_kit::grafana::GrafanaDashboard;
 use panel_kit::ide::IdePanel;
-use panel_kit::widgets::{DataColumnSpec, DataRow as Row, DataTable, SortKey as Key};
+use panel_kit::widgets::DataColumnSpec;
+use panel_kit::widgets::data_table::SortSpec;
 use panel_kit::{LayoutBuilder, PanelKind, PanelWin};
 use panel_kit_core::Mode;
 use panel_kit_core::PanelCommand;
 use panel_kit_core::reducer::WorkspaceEvent;
-use panel_kit_core::widgets::data_table::{SortDir, TableQuery};
+use panel_kit_core::widgets::data_table::SortDir;
 use serde::{Deserialize, Serialize};
-use tables::{RowExt, campaign_columns, campaign_row, experiment_columns, experiment_row, fmt_ms};
+use tables::{
+    ConsoleTable, DataRow as Row, SortKey as Key, campaign_columns, campaign_row,
+    experiment_columns, experiment_row, fmt_ms,
+};
 use workspace::{PanelWorkspace, ViewPreset, ViewsSpec};
 use workspace::{
-    handle_key, handle_pointer_move, handle_pointer_up, handle_wheel, mount_viewport_observer,
-    project_workspace, use_panel_workspace, workspace_area_class, workspace_contents,
-    workspace_event_handler,
+    handle_key, handle_pointer_cancel, handle_pointer_move, handle_pointer_up, handle_wheel,
+    mount_viewport_observer, project_workspace, use_panel_workspace, workspace_area_class,
+    workspace_contents, workspace_event_handler,
 };
 
 /// Grafana base URL for the embedded learning-metric dashboards.
@@ -338,12 +342,12 @@ fn admin_layout() -> Vec<PanelWin<AdminPanel>> {
 const APP_CSS: &str = "
 :root { --accent: #f472b6; --pink: #f472b6; --blue: #93c5fd; }
 .topbar { display:flex; align-items:baseline; gap:1rem; padding:.5rem .9rem;
-  border-bottom:1px solid var(--line); }
+  border-bottom:1px solid var(--color-border); }
 .topbar h1 { font-size:1rem; color:var(--pink); margin:0; }
-.topbar .hint { color:var(--dim); font-size:.72rem; }
+.topbar .hint { color:var(--color-text-muted); font-size:.72rem; }
 .views { display:flex; align-items:center; gap:.3rem; flex:1; min-width:0; flex-wrap:wrap; }
 .view-tab { display:inline-flex; }
-.view-btn.active-view { background:var(--inv-bg); color:var(--inv-fg); border-color:var(--inv-bg); }
+.view-btn.active-view { background:var(--color-inverse-background); color:var(--color-inverse-text); border-color:var(--color-inverse-background); }
 .view-del { padding:0 .3rem; border-left:0; }
 .views .view-name { width:8rem; flex:0 0 8rem; }
 /* Report Curator. Follows panel-kit's design rules: labels are tracked caps,
@@ -352,17 +356,17 @@ const APP_CSS: &str = "
 .cur-subject, .cur-reports, .cur-bulk, .cur-add, .cur-footer {
   display:flex; align-items:center; gap:.4rem; flex-wrap:wrap; }
 .cur-label { font-size:.68rem; text-transform:uppercase; letter-spacing:.06em;
-  color:var(--dim); min-width:5.5rem; }
-.cur-value { color:var(--fg); font-weight:600; }
+  color:var(--color-text-muted); min-width:5.5rem; }
+.cur-value { color:var(--color-text); font-weight:600; }
 .cur-hint { font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; }
 .cur-report { max-width:22ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.cur-report.active, .cur-tab.active { color:var(--fg); border-color:var(--fg); }
-.cur-tabs { display:flex; gap:0; border-bottom:1px solid var(--line); }
+.cur-report.active, .cur-tab.active { color:var(--color-text); border-color:var(--color-text); }
+.cur-tabs { display:flex; gap:0; border-bottom:1px solid var(--color-border); }
 .cur-tab { background:transparent; border:0; border-bottom:2px solid transparent;
-  color:var(--dim); font-family:var(--mono); font-size:.68rem; text-transform:uppercase;
+  color:var(--color-text-muted); font-family:var(--mono); font-size:.68rem; text-transform:uppercase;
   letter-spacing:.06em; padding:.3rem .6rem; cursor:pointer; margin-bottom:-1px; }
-.cur-tab:hover { color:var(--fg); }
-.cur-count { margin-left:.35rem; color:var(--dim); }
+.cur-tab:hover { color:var(--color-text); }
+.cur-count { margin-left:.35rem; color:var(--color-text-muted); }
 .cur-body { flex:1; min-height:0; display:flex; flex-direction:column; gap:.4rem; }
 .cur-section { border:1px solid var(--line2); padding:.35rem; display:flex;
   flex-direction:column; gap:.3rem; }
@@ -370,41 +374,41 @@ const APP_CSS: &str = "
 .cur-heading { font-weight:600; }
 .cur-text { min-height:7rem; resize:vertical; }
 .cur-text.tall { min-height:16rem; }
-.cur-footer { position:sticky; bottom:0; background:var(--panel);
-  border-top:1px solid var(--line); padding:.35rem 0 .1rem; margin-top:auto; }
+.cur-footer { position:sticky; bottom:0; background:var(--color-surface);
+  border-top:1px solid var(--color-border); padding:.35rem 0 .1rem; margin-top:auto; }
 .cur-name { width:18ch; flex:0 0 18ch; }
 .cur-title { flex:1; min-width:12ch; width:auto; }
-.cur-dirty { color:var(--yellow); font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; }
-.btn.primary:not(:disabled) { border-color:var(--fg); color:var(--fg); }
-.btn:disabled { color:var(--dim); border-color:var(--line); cursor:not-allowed; }
-.ok { color:var(--green); font-size:.74rem; }
+.cur-dirty { color:var(--color-warning); font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; }
+.btn.primary:not(:disabled) { border-color:var(--color-text); color:var(--color-text); }
+.btn:disabled { color:var(--color-text-muted); border-color:var(--color-border); cursor:not-allowed; }
+.ok { color:var(--color-success); font-size:.74rem; }
 .views { flex-wrap:nowrap; overflow-x:auto; }
 .pk-dt td .row-link { font-size:inherit; }
 .tbl { width:100%; border-collapse:collapse; font-size:.74rem; }
-.tbl th { text-align:left; color:var(--dim); font-weight:normal;
+.tbl th { text-align:left; color:var(--color-text-muted); font-weight:normal;
   border-bottom:1px solid var(--line2); padding:.25rem .4rem; }
-.tbl td { padding:.25rem .4rem; border-bottom:1px solid var(--line);
-  color:var(--fg); vertical-align:top; }
+.tbl td { padding:.25rem .4rem; border-bottom:1px solid var(--color-border);
+  color:var(--color-text); vertical-align:top; }
 .tbl .phase { color:var(--blue); }
 .row-link { background:none; border:none; color:var(--pink); cursor:pointer;
   font-family:var(--mono); font-size:.74rem; padding:0; text-align:left; }
 .row-link:hover { text-decoration:underline; }
-.muted { color:var(--dim); }
+.muted { color:var(--color-text-muted); }
 .view-head { margin:.1rem 0 .6rem; }
 .scroll-tbl { max-height:340px; overflow-y:auto; }
-.scroll-tbl .tbl thead th { position:sticky; top:0; background:var(--bg); z-index:1; }
-.view-head h2 { font-size:.92rem; color:var(--fg); margin:0 0 .2rem; }
-.view-head p { font-size:.72rem; color:var(--dim); margin:0; }
+.scroll-tbl .tbl thead th { position:sticky; top:0; background:var(--color-background); z-index:1; }
+.view-head h2 { font-size:.92rem; color:var(--color-text); margin:0 0 .2rem; }
+.view-head p { font-size:.72rem; color:var(--color-text-muted); margin:0; }
 .detail-grid { display:grid; grid-template-columns:auto 1fr; gap:.2rem .8rem;
   font-size:.74rem; margin-bottom:.6rem; }
-.detail-grid dt { color:var(--dim); }
-.detail-grid dd { color:var(--fg); margin:0; word-break:break-all; }
-.btn { background:var(--bg); color:var(--fg); border:1px solid var(--line2);
+.detail-grid dt { color:var(--color-text-muted); }
+.detail-grid dd { color:var(--color-text); margin:0; word-break:break-all; }
+.btn { background:var(--color-background); color:var(--color-text); border:1px solid var(--line2);
   border-radius:3px; padding:.1rem .45rem; font-size:.7rem; cursor:pointer;
   font-family:var(--mono); }
 .admin-toggle { margin-left:auto; color:var(--pink); border-color:var(--pink); }
 .btn:hover { border-color:var(--pink); }
-.section-label { font-size:.78rem; color:var(--fg); margin:.5rem 0 .25rem; }
+.section-label { font-size:.78rem; color:var(--color-text); margin:.5rem 0 .25rem; }
 /* The Grafana embed tracks the panel's height instead of a fixed 340px, so
    resizing/maximizing the panel actually gives the dashboard more room (it is
    ~1400px tall and scrolls internally otherwise). 100% resolves against
@@ -412,36 +416,36 @@ const APP_CSS: &str = "
    floor is panel-kit's own .grafana-panel min-height. */
 .embed-block { height:100%; margin:0; }
 .ide-block { height:260px; margin:.4rem 0; }
-.todo { color:var(--yellow); font-size:.74rem; }
-.err { color:var(--red); font-size:.76rem; }
+.todo { color:var(--color-warning); font-size:.74rem; }
+.err { color:var(--color-error); font-size:.76rem; }
 .preview { max-height:300px; overflow:auto; white-space:pre-wrap;
-  font-family:var(--mono); font-size:.7rem; background:var(--bg);
-  border:1px solid var(--line); padding:.4rem; margin:.4rem 0; }
-.rc-select { background:var(--bg); color:var(--fg); border:1px solid var(--line2);
+  font-family:var(--mono); font-size:.7rem; background:var(--color-background);
+  border:1px solid var(--color-border); padding:.4rem; margin:.4rem 0; }
+.rc-select { background:var(--color-background); color:var(--color-text); border:1px solid var(--line2);
   font-family:var(--mono); font-size:.74rem; padding:.15rem .3rem; width:100%; }
-.rc-input { background:var(--bg); color:var(--fg); border:1px solid var(--line2);
+.rc-input { background:var(--color-background); color:var(--color-text); border:1px solid var(--line2);
   font-family:var(--mono); font-size:.74rem; padding:.15rem .3rem; width:100%;
   box-sizing:border-box; }
-.rc-textarea { background:var(--bg); color:var(--fg); border:1px solid var(--line2);
+.rc-textarea { background:var(--color-background); color:var(--color-text); border:1px solid var(--line2);
   font-family:var(--mono); font-size:.72rem; padding:.2rem .3rem; width:100%;
   box-sizing:border-box; height:4rem; resize:vertical; }
 /* Research drill-down: breadcrumbs are the navigation record; chips mark
    leaf kinds (experiment vs report); condition badges colour by status. */
 .crumbs { display:flex; align-items:baseline; gap:.3rem; font-size:.74rem;
   font-family:var(--mono); margin:.1rem 0 .6rem; }
-.crumbs .sep { color:var(--dim); }
+.crumbs .sep { color:var(--color-text-muted); }
 .chip { display:inline-block; margin-left:.35rem; border:1px solid var(--blue); color:var(--blue);
   border-radius:3px; padding:0 .25rem; font-size:.66rem; margin-left:.3rem; }
 .cond { display:inline-block; border-radius:3px; padding:0 .25rem;
   font-size:.66rem; margin:0 .15rem .15rem 0; border:1px solid var(--line2);
-  color:var(--dim); }
-.cond.True, .cond.ok, .cond.ready { border-color:var(--green); color:var(--green); }
-.cond.warn { border-color:var(--yellow); color:var(--yellow); }
-.cond.bad, .cond.err { border-color:var(--red); color:var(--red); }
-.pk-dt td.date { white-space:nowrap; color:var(--dim); }
+  color:var(--color-text-muted); }
+.cond.True, .cond.ok, .cond.ready { border-color:var(--color-success); color:var(--color-success); }
+.cond.warn { border-color:var(--color-warning); color:var(--color-warning); }
+.cond.bad, .cond.err { border-color:var(--color-error); color:var(--color-error); }
+.pk-dt .date { white-space:nowrap; color:var(--color-text-muted); }
 .pk-dt td .row-link { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:bottom; }
-.filmstrip { width:100%; margin:.2rem 0; border:1px solid var(--line); }
-.crumb-current { color:var(--fg); }
+.filmstrip { width:100%; margin:.2rem 0; border:1px solid var(--color-border); }
+.crumb-current { color:var(--color-text); }
 ";
 
 /// Research drill-down depth. The hierarchy mirrors CRD ownership
@@ -612,7 +616,7 @@ pub fn App() -> Element {
                     handle_pointer_up(&admin_pointer_up_workspace, &event)
                 },
                 onpointercancel: move |event: DioxusPointerEvent| {
-                    handle_pointer_up(&admin_pointer_cancel_workspace, &event)
+                    handle_pointer_cancel(&admin_pointer_cancel_workspace, &event)
                 },
                 onkeydown: move |event| handle_key(&admin_key_workspace, &event),
                 header { class: "topbar",
@@ -645,7 +649,7 @@ pub fn App() -> Element {
                     handle_pointer_up(&pointer_up_workspace, &event)
                 },
                 onpointercancel: move |event: DioxusPointerEvent| {
-                    handle_pointer_up(&pointer_cancel_workspace, &event)
+                    handle_pointer_cancel(&pointer_cancel_workspace, &event)
                 },
                 onkeydown: move |event| handle_key(&key_workspace, &event),
                 header { class: "topbar",
@@ -855,7 +859,7 @@ fn experiments_view(
             let name = exp.name.clone();
             experiment_row(
                 &exp,
-                rsx! { td {
+                rsx! { span {
                     button {
                         class: "row-link",
                         onclick: move |_| select_resource(selected, manifest_doc, emit, pick.clone()),
@@ -872,13 +876,14 @@ fn experiments_view(
             h2 { "Experiments" }
             p { "Kubernetes-native experiment resources, phases, and workspace refs." }
         }
-        DataTable {
+        ConsoleTable {
+            id: "athena-experiments",
             columns: experiment_columns(true),
             rows,
-            initial: TableQuery::sorted("created", SortDir::Desc),
-            storage_key: Some("athena.table.experiments".to_string()),
-            empty: "No experiments found.",
-            placeholder: "filter experiments…",
+            sort: SortSpec::new("created", SortDir::Desc),
+            storage_key: "athena.table.experiments".to_string(),
+            empty: "No experiments found.".to_string(),
+            placeholder: "filter experiments…".to_string(),
         }
     }
 }
@@ -1027,7 +1032,7 @@ fn campaigns_view(
             let label = shown.clone();
             campaign_row(
                 &c,
-                rsx! { td { title: "{full}",
+                rsx! { span { title: "{full}",
                     button {
                         class: "row-link",
                         onclick: move |_| select_resource(selected, manifest_doc, emit, pick.clone()),
@@ -1044,13 +1049,14 @@ fn campaigns_view(
             h2 { "Campaigns" }
             p { "Click a campaign to load its metrics (all member experiments, over the campaign window) into the Metrics panel." }
         }
-        DataTable {
+        ConsoleTable {
+            id: "athena-campaigns",
             columns: campaign_columns(),
             rows,
-            initial: TableQuery::sorted("created", SortDir::Desc),
-            storage_key: Some("athena.table.campaigns".to_string()),
-            empty: "No campaigns found.",
-            placeholder: "filter campaigns…",
+            sort: SortSpec::new("created", SortDir::Desc),
+            storage_key: "athena.table.campaigns".to_string(),
+            empty: "No campaigns found.".to_string(),
+            placeholder: "filter campaigns…".to_string(),
         }
     }
 }
@@ -1093,7 +1099,7 @@ fn templates_view(snap: ClusterSnapshot, mut template_doc: Signal<String>) -> El
                 .date(&tpl.created_at)
                 .text_class(tpl.detail.clone(), "muted")
                 .cell(
-                    rsx! { td {
+                    rsx! { span {
                         button {
                             class: "btn",
                             onclick: move |_| {
@@ -1109,7 +1115,6 @@ fn templates_view(snap: ClusterSnapshot, mut template_doc: Signal<String>) -> El
                         }
                     } },
                     Key::Missing,
-                    "",
                 )
         })
         .collect();
@@ -1118,19 +1123,20 @@ fn templates_view(snap: ClusterSnapshot, mut template_doc: Signal<String>) -> El
             h2 { "Experiment Templates" }
             p { "Load Kubernetes-owned template YAML and inspect objectives + sources." }
         }
-        DataTable {
+        ConsoleTable {
+            id: "athena-templates",
             columns: vec![
                 DataColumnSpec::new("name", "Template").pinned(),
                 DataColumnSpec::new("objective", "Objective"),
-                DataColumnSpec::new("created", "Created"),
+                DataColumnSpec::new("created", "Created").number(),
                 DataColumnSpec::new("source", "Source"),
                 DataColumnSpec::new("load", "").pinned().unsorted(),
             ],
             rows,
-            initial: TableQuery::sorted("name", SortDir::Asc),
-            storage_key: Some("athena.table.templates".to_string()),
-            empty: "No templates found.",
-            placeholder: "filter templates…",
+            sort: SortSpec::new("name", SortDir::Asc),
+            storage_key: "athena.table.templates".to_string(),
+            empty: "No templates found.".to_string(),
+            placeholder: "filter templates…".to_string(),
         }
         div { class: "section-label", "Template YAML" }
         div { class: "ide-block",
@@ -1185,16 +1191,17 @@ fn resource_table(
         })
         .collect();
     rsx! {
-        DataTable {
+        ConsoleTable {
+            id: format!("athena-{}", name_col.to_lowercase()),
             columns: vec![
                 DataColumnSpec::new("name", name_col).pinned(),
                 DataColumnSpec::new("phase", "Phase"),
-                DataColumnSpec::new("created", "Created"),
+                DataColumnSpec::new("created", "Created").number(),
                 DataColumnSpec::new("detail", detail_col),
             ],
             rows,
-            initial: TableQuery::sorted("created", SortDir::Desc),
-            storage_key: Some(format!("athena.table.{}", name_col.to_lowercase())),
+            sort: SortSpec::new("created", SortDir::Desc),
+            storage_key: format!("athena.table.{}", name_col.to_lowercase()),
         }
     }
 }
@@ -1292,7 +1299,7 @@ fn research_view(
                     let label = shown.clone();
                     campaign_row(
                         c,
-                        rsx! { td { title: "{full}",
+                        rsx! { span { title: "{full}",
                             button {
                                 class: "row-link",
                                 onclick: move |_| nav.set(ResearchNav::Campaign(name.clone())),
@@ -1352,13 +1359,14 @@ fn research_view(
                     }
                 }
                 h3 { "Campaigns" }
-                DataTable {
+                ConsoleTable {
+                    id: "athena-research-campaigns",
                     columns: campaign_columns(),
                     rows: campaign_rows,
-                    initial: TableQuery::sorted("created", SortDir::Desc),
-                    storage_key: Some("athena.table.research.campaigns".to_string()),
-                    empty: "No campaigns found.",
-                    placeholder: "filter campaigns…",
+                    sort: SortSpec::new("created", SortDir::Desc),
+                    storage_key: "athena.table.research.campaigns".to_string(),
+                    empty: "No campaigns found.".to_string(),
+                    placeholder: "filter campaigns…".to_string(),
                 }
             }
         }
@@ -1384,7 +1392,7 @@ fn research_view(
                     let name = e.name.clone();
                     experiment_row(
                         &e,
-                        rsx! { td {
+                        rsx! { span {
                             button {
                                 class: "row-link",
                                 onclick: move |_| nav.set(ResearchNav::Experiment {
@@ -1405,7 +1413,7 @@ fn research_view(
                     let pick = r.clone();
                     Row::new(r.name.clone())
                         .cell(
-                            rsx! { td {
+                            rsx! { span {
                                 button {
                                     class: "row-link",
                                     onclick: move |_| nav.set(ResearchNav::Report {
@@ -1416,7 +1424,6 @@ fn research_view(
                                 }
                             } },
                             Key::text(r.name.clone()),
-                            &r.name,
                         )
                         .text(r.title.clone())
                         .text_class(r.phase.clone(), "phase")
@@ -1438,25 +1445,27 @@ fn research_view(
                     }
                 }
                 h3 { "Experiments" }
-                DataTable {
+                ConsoleTable {
+                    id: "athena-research-experiments",
                     columns: experiment_columns(false),
                     rows: exp_rows,
-                    initial: TableQuery::sorted("created", SortDir::Desc),
-                    storage_key: Some("athena.table.research.experiments".to_string()),
-                    empty: "No experiments in this campaign.",
-                    placeholder: "filter experiments…",
+                    sort: SortSpec::new("created", SortDir::Desc),
+                    storage_key: "athena.table.research.experiments".to_string(),
+                    empty: "No experiments in this campaign.".to_string(),
+                    placeholder: "filter experiments…".to_string(),
                 }
                 if !report_rows.is_empty() {
                     h3 { "Reports" }
-                    DataTable {
+                    ConsoleTable {
+                        id: "athena-research-reports",
                         columns: vec![
                             DataColumnSpec::new("name", "Report").pinned(),
                             DataColumnSpec::new("title", "Title"),
                             DataColumnSpec::new("phase", "Phase"),
-                            DataColumnSpec::new("created", "Created"),
+                            DataColumnSpec::new("created", "Created").number(),
                         ],
                         rows: report_rows,
-                        initial: TableQuery::sorted("created", SortDir::Desc),
+                        sort: SortSpec::new("created", SortDir::Desc),
                     }
                 }
             }
@@ -1555,12 +1564,11 @@ fn reports_view(
                 .text_class(r.phase.clone(), "phase")
                 .date(&r.created_at)
                 .cell(
-                    rsx! { td { "{r.excluded_count}" } },
+                    rsx! { span { "{r.excluded_count}" } },
                     Key::num(r.excluded_count as f64),
-                    "",
                 )
                 .cell(
-                    rsx! { td {
+                    rsx! { span {
                         button {
                             class: "btn",
                             onclick: move |_| {
@@ -1571,7 +1579,6 @@ fn reports_view(
                         }
                     } },
                     Key::Missing,
-                    "",
                 )
         })
         .collect();
@@ -1580,21 +1587,22 @@ fn reports_view(
             h2 { "Reports" }
             p { "Published ResearchReport resources. Open one to review or edit it in the Report Curator." }
         }
-        DataTable {
+        ConsoleTable {
+            id: "athena-reports",
             columns: vec![
                 DataColumnSpec::new("name", "Report").pinned(),
                 DataColumnSpec::new("campaign", "Campaign"),
                 DataColumnSpec::new("title", "Title"),
                 DataColumnSpec::new("phase", "Phase"),
-                DataColumnSpec::new("created", "Created"),
-                DataColumnSpec::new("excluded", "Excluded"),
+                DataColumnSpec::new("created", "Created").number(),
+                DataColumnSpec::new("excluded", "Excluded").number(),
                 DataColumnSpec::new("load", "").pinned().unsorted(),
             ],
             rows,
-            initial: TableQuery::sorted("created", SortDir::Desc),
-            storage_key: Some("athena.table.reports".to_string()),
-            empty: "No reports found.",
-            placeholder: "filter reports…",
+            sort: SortSpec::new("created", SortDir::Desc),
+            storage_key: "athena.table.reports".to_string(),
+            empty: "No reports found.".to_string(),
+            placeholder: "filter reports…".to_string(),
         }
     }
 }
@@ -1621,16 +1629,18 @@ fn gpu_pools_view(snap: SchedulingSnapshot) -> Element {
                 dd { "{p.admitted_workloads} admitted · {p.pending_workloads} pending" }
             }
         }
-        DataTable {
+        ConsoleTable {
+            id: "athena-workloads",
             columns: vec![
                 DataColumnSpec::new("name", "Workload").pinned(),
                 DataColumnSpec::new("ns", "NS"),
                 DataColumnSpec::new("queue", "Queue"),
                 DataColumnSpec::new("priority", "Priority"),
                 DataColumnSpec::new("state", "State"),
-                DataColumnSpec::new("gpu", "GPU"),
+                DataColumnSpec::new("gpu", "GPU").number(),
             ],
-            storage_key: Some("athena.table.workloads".to_string()),
+            sort: SortSpec::new("name", SortDir::Asc),
+            storage_key: "athena.table.workloads".to_string(),
             rows: snap
                 .workloads
                 .iter()
@@ -1643,11 +1653,11 @@ fn gpu_pools_view(snap: SchedulingSnapshot) -> Element {
                         .text(w.queue.clone())
                         .text_class(prio, "phase")
                         .text(w.state.clone())
-                        .cell(rsx! { td { "{w.gpus}" } }, Key::num(w.gpus as f64), "")
+                        .cell(rsx! { span { "{w.gpus}" } }, Key::num(w.gpus as f64))
                 })
                 .collect::<Vec<Row>>(),
-            empty: "No active workloads.",
-            placeholder: "filter workloads…",
+            empty: "No active workloads.".to_string(),
+            placeholder: "filter workloads…".to_string(),
         }
     }
 }

@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use panel_kit::store::LocalStorageLayoutStore;
+use panel_kit::input::use_tile_drag_frames;
 use panel_kit::surface::{observe_viewport, surface_profile, viewport_size};
 use panel_kit::{PanelKind, PanelWin};
 use panel_kit_core::frame::{
@@ -99,7 +100,7 @@ pub(crate) fn use_panel_workspace<K: PanelKind + 'static>(
         }
     });
 
-    PanelWorkspace {
+    let workspace = PanelWorkspace {
         store_key,
         snapshot,
         catalog,
@@ -109,7 +110,14 @@ pub(crate) fn use_panel_workspace<K: PanelKind + 'static>(
         views,
         registry,
         defaults: default_panels,
-    }
+    };
+    // Core reads no clock: a landing or flying tile advances only on Tick.
+    let animating = snapshot
+        .read()
+        .tile_drag
+        .is_some_and(|tile| tile.animating());
+    use_tile_drag_frames(animating, workspace_event_handler(&workspace));
+    workspace
 }
 
 /// Default snapshot for `view` (its preset) or the plain defaults.

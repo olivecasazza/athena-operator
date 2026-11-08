@@ -11,7 +11,8 @@ use panel_kit_core::reducer::WorkspaceEvent;
 use panel_kit_core::{PanelCatalog, PanelKind};
 
 pub(crate) use events::{
-    handle_key, handle_pointer_move, handle_pointer_up, handle_wheel, workspace_event_handler,
+    handle_key, handle_pointer_cancel, handle_pointer_move, handle_pointer_up, handle_wheel,
+    workspace_event_handler,
 };
 pub(crate) use state::PanelWorkspace;
 pub(crate) use state::{

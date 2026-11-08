@@ -3,7 +3,8 @@
 use dioxus::events::{KeyboardEvent, PointerEvent as DioxusPointerEvent, WheelEvent};
 use dioxus::prelude::*;
 use panel_kit::input::{
-    clear_selection, keyboard_event, pointer_event, release_pointer, wheel_event,
+    clear_selection, keyboard_event, pointer_event, release_pointer, tile_drag_pointer_event,
+    wheel_event,
 };
 use panel_kit_core::persist::apply_save_decision;
 use panel_kit_core::reducer::{HitTarget, ReduceContext, WorkspaceEvent, reduce};
@@ -12,7 +13,7 @@ use panel_kit_core::{
     TileMetrics,
 };
 
-use super::state::{PanelWorkspace, enforce_tile_minimums, log_layout_error};
+use super::state::{PanelWorkspace, enforce_tile_minimums, log_layout_error, project_workspace};
 
 /// Build an event handler that reduces into one workspace and applies persistence.
 pub(crate) fn workspace_event_handler<K: PanelKind>(
@@ -42,17 +43,29 @@ pub(crate) fn handle_key<K: PanelKind>(workspace: &PanelWorkspace<K>, event: &Ke
     }
 }
 
-/// Reduce in-flight workspace pointer motion.
+/// Reduce in-flight workspace pointer motion. A held or lifted tile drag
+/// resolves its swap target against the painted frame.
 pub(crate) fn handle_pointer_move<K: PanelKind>(
     workspace: &PanelWorkspace<K>,
     event: &DioxusPointerEvent,
 ) {
-    let kind = if workspace.snapshot.read().drag.is_some() {
-        PointerEventKind::Drag(PointerButton::Primary)
-    } else {
-        PointerEventKind::Moved
+    let workspace_event = {
+        let snapshot = workspace.snapshot.read();
+        if snapshot.tile_drag.is_some_and(|tile| tile.tracks_pointer()) {
+            let mut scratch = workspace.scratch.borrow_mut();
+            let frame = project_workspace(&snapshot, &mut scratch);
+            tile_drag_pointer_event(&frame, event)
+        } else if snapshot.drag.is_some() {
+            pointer_event(
+                HitTarget::Workspace,
+                event,
+                PointerEventKind::Drag(PointerButton::Primary),
+            )
+        } else {
+            pointer_event(HitTarget::Workspace, event, PointerEventKind::Moved)
+        }
     };
-    reduce_and_persist_workspace_event(workspace, pointer_event(HitTarget::Workspace, event, kind));
+    reduce_and_persist_workspace_event(workspace, workspace_event);
 }
 
 /// Settle a pointer gesture and persist the settled layout.
@@ -60,14 +73,30 @@ pub(crate) fn handle_pointer_up<K: PanelKind>(
     workspace: &PanelWorkspace<K>,
     event: &DioxusPointerEvent,
 ) {
+    settle_pointer(
+        workspace,
+        event,
+        PointerEventKind::Up(PointerButton::Primary),
+    );
+}
+
+/// Abandon a pointer gesture the browser cancelled: a lifted tile flies home.
+pub(crate) fn handle_pointer_cancel<K: PanelKind>(
+    workspace: &PanelWorkspace<K>,
+    event: &DioxusPointerEvent,
+) {
+    settle_pointer(workspace, event, PointerEventKind::Cancel);
+}
+
+fn settle_pointer<K: PanelKind>(
+    workspace: &PanelWorkspace<K>,
+    event: &DioxusPointerEvent,
+    kind: PointerEventKind,
+) {
     release_pointer(event);
     let changed = reduce_and_persist_workspace_event(
         workspace,
-        pointer_event(
-            HitTarget::Workspace,
-            event,
-            PointerEventKind::Up(PointerButton::Primary),
-        ),
+        pointer_event(HitTarget::Workspace, event, kind),
     );
     if changed {
         clear_selection();
