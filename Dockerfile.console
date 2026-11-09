@@ -2,7 +2,9 @@
 # Builds the SPA with a version-matched dioxus-cli (0.6, matching the dioxus 0.6
 # lib), the console-server binary, and packages both with kubectl (the server
 # proxies manifest YAML via kubectl using the in-cluster ServiceAccount).
-FROM rust:1.88-slim AS builder
+# panel-kit's pinned serde-saphyr requires Rust 1.89. Match the runtime's
+# Debian release so the native server does not link against a newer glibc.
+FROM rust:1.89.0-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config libssl-dev git curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
