@@ -16,22 +16,24 @@ of the root flake's native console package/dev command. It does not consume
 panel-kit and is not the deployed browser console; this change does not remove
 that separate application or change its behavior.
 
-The web package pins both panel-kit crates to
-`ocasazza/panel-kit@72b0510a7b9dee1416d78555d87a313cc4127614` in its Cargo.toml.
-**No dependency bump is required.** This revision already contains the current
-web trace, chip, typed-table and shared panel-composition contracts used here.
-The later upstream commits mainly extend Bevy/canary behavior, not this app's
-required web APIs. Dioxus CLI must remain 0.6.x; wasm-bindgen CLI must match
-0.2.121. No new dependency is introduced.
+The web package pins both panel-kit crates to canonical
+`ocasazza/panel-kit@321a7a40b73ae92a0941396551fc16f5c93af1ea` in its Cargo.toml,
+matching upstream `main` checked on 2026-11-09. The former `72b0510` pin was not
+current. The update includes the table's keyboard-cursor/ring state and newer
+windowed-table entry point, alongside Bevy/canary changes. Both direct crates
+and the transitive grammar crate resolve to the same revision in Cargo.lock.
+Dioxus CLI remains 0.6.x and wasm-bindgen CLI 0.2.121; no dependency is added.
 
 The panel-kit checkout has two remotes: `origin` is the olivecasazza fork,
 `upstream` is ocasazza, the actual Cargo source. Both were fetched before the
-inventory. The fork's `origin/main` ends at `8e4de76` (195 reachable commits);
-canonical `upstream/main` ends at `321a7a4` (281 reachable commits). The complete
-canonical log was read newest first through the initial `7940325` commit,
-including merged branch histories, not just the latest release notes. Inspecting
-only the fork would incorrectly recommend downgrading Athena and remove its
-lift/swap tile-drag APIs.
+inventory. The personal fork is still at `8e4de76` (195 reachable commits),
+86 commits behind canonical `321a7a4` (281 reachable commits), with no unique
+main commits. Fork synchronization is proposed in
+[panel-kit PR #5](https://github.com/olivecasazza/panel-kit/pull/5), left
+unmerged for review without touching the separate CI/Hydra PR #4.
+The consumer does not resolve through that stale fork. The complete canonical
+log was read newest first through `7940325`, including merged histories;
+checking only the personal fork would incorrectly recommend a downgrade.
 
 ## User stories and canonical homes
 
@@ -46,6 +48,29 @@ lift/swap tile-drag APIs.
 | O1 | Operator: inspect templates, benchmark suites/runs and execution profiles. | Catalog view | `DataTable` for each list and `IdePanel` template YAML. No imperative deployment controls. |
 | O2 | Operator: distinguish queue admission from node power and inference readiness. | Admin → GPU Pools & Queues / Node Power / Inference Backends | `DataTable` for workloads, nodes and endpoints; literal power/serving chips. Pool quota/usage summary remains separate from individual workload rows. Read-only scheduling API. |
 | W1 | Any user: arrange/minimize/maximize panels, switch task views, reset or save a custom layout. | Research / Experiments / Reports / Catalog, dock and frame controls | Shared reducer/frame/dock/chrome and `workspace::panel_element`; host-owned named view persistence. The catalog change uses new v5 layout keys, so removed panels are not restored from older layouts. |
+
+### Identity and panel sizing
+
+- Preserve Athena's pink and blue through panel-kit's `secondary` and `primary`
+  theme roles. Do not flatten all brand, live-state and status roles into grey.
+  Conditions still display literal type/status rather than interpreting every
+  `True` as healthy.
+- Keep panel-kit's pointer-dependent hit-target and density contract. A blanket
+  44px minimum on every fine-pointer control inflates table rows and spends
+  scarce panel space on chrome; coarse-pointer geometry belongs to the kit.
+- Manifest editors fill the panel body's remaining height. Template panels split
+  the available space between the bounded, internally scrolling catalog and its
+  editor; the editor fills the lower region. Neither uses a fixed 260px wrapper.
+  Verify ordinary, maximized, narrow and coarse-pointer surfaces.
+- Resource names may wrap instead of hiding every distinguishing suffix behind
+  an ellipsis. Detail copy uses the shared body size, not a smaller caption size.
+- Tiny gate-evidence tables show search and a tally, not the complete nine-control
+  power-user toolbar. Catalog tables retain search, columns and tally; experiment
+  and campaign comparison tables keep the full shared controls.
+- Standalone tables and trace overviews take the space left after their headings,
+  not 100% of the body plus the heading again. Benchmark tables split one panel;
+  research/curator tables remain content-sized. The overview/rail switch must
+  not duplicate the inner trace component's Graph/Lanes/Collab mode labels.
 
 ### Stories with no data-backed home
 
@@ -103,10 +128,10 @@ Additional conflicting conventions:
 - `lib.rs:1213-1235` and `curator.rs:698`: every `True` condition was green,
   every other value red. Conditions have positive and negative polarity;
   literal type/status/reason must be shown without asserting health.
-- `lib.rs:343,392-410,437-444`: pink row links, blue phases, rounded app
-  chips/buttons and three ad-hoc condition treatments conflicted with the
-  square shared chrome. Removed old `.tbl`, `.chip`, `.cond` renderers/styles;
-  use shared badges, role tokens, square controls and explicit status text.
+- `lib.rs:343,392-410,437-444`: ad-hoc hue aliases and rounded app chips/buttons
+  bypassed the square shared chrome and theme roles. Pink is Athena's identity,
+  not the defect: preserve it through `secondary`, with blue through `primary`.
+  Use shared badges and explicit status text rather than bespoke condition CSS.
 - `tables.rs:276,352` and generic/template/report rows keyed only by name.
   The table's stable-ID contract requires namespace identity. Resource rows
   now use manifest paths; namespaced catalog/report rows use namespace/name.
@@ -163,7 +188,7 @@ Public web components are Dioxus painters; neutral models live in
 | Component / source | Purpose and current props/data contract | Status / replacement |
 | --- | --- | --- |
 | `widgets::DataTable`, `src/widgets/data_table/mod.rs` | `id`, typed `Vec<DataColumnSpec>`, shared `TableData`; optional custom cell callback, TableDefaults, storage_key, accessible label, empty Element, placeholder, row activation, host selection/state and event/query callbacks, tags/ribbon, toolbar, footer, exports, virtual window/max_height. | Current unified table. ColumnKind Text/Enum/Number controls filtering, sorting and storage; `.enumerated()` and `.number()` are the declaration seam. Host-owned state and server query mode are supported. |
-| `widgets::table::{table,bound_table}`, `src/widgets/table.rs:153` | Borrowed TableView or binding + TableModel and optional row-ID callback; adapts authored/provider table content to the unified table. | Current spec-content adapter, not a rival interactive table implementation. |
+| `widgets::table::{table,bound_table,windowed_table}`, `src/widgets/table.rs` | Borrowed TableView or binding + TableModel and optional row-ID callback; adapts authored/provider table content to the unified table. `windowed_table(name, view, cursor)` seeds a keyboard cursor/ring and mounts a virtual row window. | Current spec-content adapters, not rival interactive table implementations. |
 | `table::Table`, `src/table.rs:38` | Earlier text-only columns/row matrices, row-index selection, dense/class, optional index click. | Historical module remains on disk but is **not exported** by current lib.rs; do not adopt it. Stateful DataTable supersedes it for consumers. |
 | `badge::Badge`, `src/badge.rs:212` | BadgeSpec(kind, field/value, active, x/plus, small, tint/accent, click/hover semantics, tone/variant), optional web CSS accent; emits BadgeAction. | Current metadata/filter/navigation chip. `widgets::badge::strip` paints a borrowed list. Square tone variants replace ad-hoc `.chip/.cond` markup in Athena. Metadata activation copies its value. |
 | `widgets::Button`, `src/widgets/button.rs:17` | pressed Option<bool>, compact, forwarded global/button attributes, on_press, children. | Current square content action; separate from header controls. |
@@ -225,8 +250,8 @@ Public web components are Dioxus painters; neutral models live in
 
 ### Replacement chronology (newest first)
 
-- `321a7a4` / `d3acf03`: named target-camera Bevy input/rendering; no required
-  Dioxus migration after the console's existing 72b0510 pin.
+- `321a7a4` / `2f418e8` / `d3acf03`: named target-camera Bevy input/rendering
+  and seeded keyboard cursor/ring behavior; Athena now consumes this revision.
 - `3abc237`, `af4e0ae`, `fb1af12`: shared selection/forms/hints/build/pills/
   frontmatter models and painters, and example-host glue promoted into library.
 - `9b271d7`, `36d4588`, `807e911`: Monaco wrap, bound read-only updates, Nix
@@ -305,3 +330,25 @@ be made without their missing data contract.
   writes were not exercised. No Kubernetes resources or report specs were
   mutated for verification. Agent tool/model tracing remains the explicitly
   homeless story described above, not a claimed integration.
+
+### Current-kit identity and viewport correction
+
+The original achromatic override and fixed editor wrappers were regressions,
+not panel-kit defaults. The correction restores pink/blue roles, the kit's
+fine/coarse-pointer sizing, available-height editor/table/trace hosts, and
+content-sized flow tables. Wide resource tables use the shared title-column
+class so identity receives spare width; names wrap only when the space is
+actually constrained.
+
+With the canonical `321a7a4` pin, all 70 console package tests pass. Nineteen
+direct browser checks cover pink role values, ordinary/maximized template and
+manifest editor fill, tablet resize, coarse-pointer compact behavior, bounded
+table and trace viewports, resource-name width, and the current keyboard ring.
+The inspected 1440×1100 maximized manifest editor uses 996px and the maximized
+template editor uses 549px, rather than a fixed 260px wrapper. These are observed
+viewport examples, not new fixed dimensions.
+
+Review evidence is manual source/browser inspection plus the mechanical layout
+scan. The delegated reviewer returned an unsupported-provider notice instead
+of findings, and the remaining stalled assessment was cancelled; no independent
+review approval is claimed.

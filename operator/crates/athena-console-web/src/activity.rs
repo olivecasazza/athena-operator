@@ -130,7 +130,7 @@ fn ActivityBody(resource: ResourceSummary, resources: Vec<ResourceSummary>) -> E
         } else {
             if resource.kind == "experiment" {
                 div { class: "activity-modes",
-                    Button { pressed: !rail(), on_press: move |_| rail.set(false), "Graph" }
+                    Button { pressed: !rail(), on_press: move |_| rail.set(false), "Overview" }
                     Button { pressed: rail(), on_press: move |_| rail.set(true), "Trace rail" }
                 }
             }
