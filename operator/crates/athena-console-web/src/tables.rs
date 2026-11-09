@@ -99,10 +99,12 @@ impl DataRow {
     /// Text cell with an extra CSS class (e.g. `"muted"`).
     pub fn text_class(self, value: impl Into<String>, class: &'static str) -> Self {
         let value = value.into();
-        self.cell(
-            rsx! { span { class: "{class}", title: "{value}", "{value}" } },
-            SortKey::Text(value),
-        )
+        let view = if class == "phase" {
+            rsx! { crate::MetadataChip { field: "Phase", value: value.clone(), labeled: false } }
+        } else {
+            rsx! { span { class: "{class}", title: "{value}", "{value}" } }
+        };
+        self.cell(view, SortKey::Text(value))
     }
 
     /// Numeric cell shown as `display`, sorted by `value`.
@@ -152,10 +154,12 @@ pub fn ConsoleTable(
     let empty = empty.map(|text| rsx! { "{text}" });
     rsx! {
         DataTable {
-            id,
+            id: id.clone(),
             columns,
             data,
             cell,
+            label: id.clone(),
+            ribbon: false,
             defaults,
             storage_key,
             empty,
@@ -238,10 +242,7 @@ impl DataRow {
     pub fn opt_text(self, value: Option<String>) -> Self {
         match value {
             Some(v) => self.text(v),
-            None => self.cell(
-                rsx! { span { class: "muted", "{DASH}" } },
-                SortKey::Missing,
-            ),
+            None => self.cell(rsx! { span { class: "muted", "{DASH}" } }, SortKey::Missing),
         }
     }
 }
@@ -249,21 +250,27 @@ impl DataRow {
 /// Universal experiment columns. `with_campaign` adds the Campaign column for
 /// lists that span campaigns.
 pub fn experiment_columns(with_campaign: bool) -> Vec<DataColumnSpec> {
-    let mut cols = vec![DataColumnSpec::new("name", "Experiment").pinned()];
+    let mut cols = vec![
+        DataColumnSpec::new("name", "Experiment")
+            .pinned()
+            .width("28ch"),
+    ];
     if with_campaign {
-        cols.push(DataColumnSpec::new("campaign", "Campaign"));
+        cols.push(DataColumnSpec::new("campaign", "Campaign").hidden());
     }
     cols.extend([
-        DataColumnSpec::new("template", "Template"),
-        DataColumnSpec::new("phase", "Phase"),
-        DataColumnSpec::new("decision", "Decision"),
+        DataColumnSpec::new("template", "Template").hidden(),
+        DataColumnSpec::new("phase", "Phase")
+            .enumerated()
+            .width("16ch"),
+        DataColumnSpec::new("decision", "Decision").enumerated(),
         DataColumnSpec::new("objective", "Objective").number(),
         DataColumnSpec::new("metric", "Metric").hidden(),
-        DataColumnSpec::new("parent", "Parent"),
-        DataColumnSpec::new("gen", "Gen").number(),
-        DataColumnSpec::new("runtime", "Runtime").number(),
+        DataColumnSpec::new("parent", "Parent").hidden(),
+        DataColumnSpec::new("gen", "Gen").number().hidden(),
+        DataColumnSpec::new("runtime", "Runtime").number().hidden(),
         DataColumnSpec::new("gpu_hours", "GPU-h").number().hidden(),
-        DataColumnSpec::new("created", "Created").number(),
+        DataColumnSpec::new("created", "Created").number().hidden(),
         DataColumnSpec::new("hypothesis", "Hypothesis").hidden(),
         DataColumnSpec::new("workspace", "Workspace").hidden(),
     ]);
@@ -273,7 +280,7 @@ pub fn experiment_columns(with_campaign: bool) -> Vec<DataColumnSpec> {
 /// One experiment row; `name_cell` is the caller's (usually clickable) first
 /// cell.
 pub fn experiment_row(e: &ResourceSummary, name_cell: Element, with_campaign: bool) -> DataRow {
-    experiment_cells(DataRow::new(e.name.clone()), e, name_cell, with_campaign)
+    experiment_cells(DataRow::new(e.manifest_path()), e, name_cell, with_campaign)
 }
 
 /// Append the universal experiment cells to `row` (for tables that prepend
@@ -321,18 +328,20 @@ pub fn experiment_cells(
 /// Universal campaign columns.
 pub fn campaign_columns() -> Vec<DataColumnSpec> {
     vec![
-        DataColumnSpec::new("name", "Campaign").pinned(),
-        DataColumnSpec::new("drive", "Drive"),
-        DataColumnSpec::new("template", "Template"),
-        DataColumnSpec::new("strategy", "Strategy"),
-        DataColumnSpec::new("phase", "Phase"),
-        DataColumnSpec::new("best", "Best experiment"),
+        DataColumnSpec::new("name", "Campaign")
+            .pinned()
+            .width("28ch"),
+        DataColumnSpec::new("drive", "Drive").hidden(),
+        DataColumnSpec::new("template", "Template").hidden(),
+        DataColumnSpec::new("strategy", "Strategy").hidden(),
+        DataColumnSpec::new("phase", "Phase").enumerated(),
+        DataColumnSpec::new("best", "Best experiment").hidden(),
         DataColumnSpec::new("objective", "Best objective").number(),
         DataColumnSpec::new("metric", "Metric").hidden(),
-        DataColumnSpec::new("succeeded", "OK").number(),
+        DataColumnSpec::new("succeeded", "Succeeded").number(),
         DataColumnSpec::new("failed", "Failed").number(),
         DataColumnSpec::new("running", "Running").number().hidden(),
-        DataColumnSpec::new("created", "Created").number(),
+        DataColumnSpec::new("created", "Created").number().hidden(),
     ]
 }
 
@@ -349,7 +358,7 @@ pub fn campaign_row(c: &ResourceSummary, name_cell: Element, label: &str) -> Dat
     let (ok, ok_s) = count(c.succeeded);
     let (bad, bad_s) = count(c.failed);
     let (run, run_s) = count(c.running);
-    DataRow::new(c.name.clone())
+    DataRow::new(c.manifest_path())
         .cell(name_cell, SortKey::text(format!("{label} {}", c.name)))
         .opt_text(c.drive.clone())
         .opt_text(c.template.clone())

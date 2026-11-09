@@ -3,7 +3,7 @@
 //! User stories it serves, in the order a scientist meets them:
 //!
 //! 1. **Find the report for what I'm looking at.** The curator follows the
-//!    global selection (the campaign selected in Research/Campaigns, or the
+//!    global selection (the campaign selected in Research, or the
 //!    selected experiment's campaign) and lists that campaign's reports.
 //!    "Change" opens a campaign table to pick another one explicitly.
 //! 2. **Review it.** Opening a report loads its full spec and the
@@ -346,7 +346,7 @@ pub fn curator_view(
     let Some(campaign) = campaign else {
         return rsx! {
             {subject}
-            p { class: "muted", "Select a campaign in Research or Campaigns, or use change." }
+            p { class: "muted", "Select a campaign in Research, or use change." }
         };
     };
 
@@ -484,7 +484,7 @@ fn dataset_tab(
         .map(|e| {
             let name = e.name.clone();
             let on = !st.draft.excluded.contains(&e.name);
-            let lead = DataRow::new(e.name.clone()).cell(
+            let lead = DataRow::new(e.manifest_path()).cell(
                 rsx! { span {
                     input {
                         r#type: "checkbox",
@@ -614,35 +614,36 @@ fn hypotheses_tab(mut state: Signal<CuratorState>, st: &CuratorState) -> Element
 }
 
 fn references_tab(st: &CuratorState) -> Element {
-    let refs: Vec<serde_json::Value> = st.draft.references.as_array().cloned().unwrap_or_default();
-    if refs.is_empty() {
-        return rsx! { p { class: "muted", "No references. Cite in section text as [@key]; define references in the manifest." } };
-    }
+    let refs = st.draft.references.as_array().cloned().unwrap_or_default();
     let field = |r: &serde_json::Value, k: &str| {
         r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
     };
+    let rows = refs
+        .iter()
+        .enumerate()
+        .map(|(index, r)| {
+            let key = field(r, "key");
+            let url = field(r, "url");
+            let link = if url.is_empty() { field(r, "doi") } else { url };
+            DataRow::new(format!("{key}-{index}"))
+                .text(format!("[@{key}]"))
+                .text(field(r, "title"))
+                .text(link)
+                .text(field(r, "supports"))
+        })
+        .collect::<Vec<_>>();
     rsx! {
-        p { class: "muted", "Read-only here; kept unchanged on save." }
-        table { class: "tbl",
-            thead { tr { th { "Key" } th { "Title" } th { "Link" } th { "Supports" } } }
-            tbody {
-                for r in refs {
-                    {
-                        let link = {
-                            let url = field(&r, "url");
-                            if url.is_empty() { field(&r, "doi") } else { url }
-                        };
-                        rsx! {
-                            tr {
-                                td { "[@{field(&r, \"key\")}]" }
-                                td { "{field(&r, \"title\")}" }
-                                td { class: "muted", "{link}" }
-                                td { class: "muted", "{field(&r, \"supports\")}" }
-                            }
-                        }
-                    }
-                }
-            }
+        p { class: "muted", "Read-only here; kept unchanged on save. Cite in section text as [@key]." }
+        ConsoleTable {
+            id: "athena-report-references",
+            columns: vec![
+                DataColumnSpec::new("key", "Key").pinned(),
+                DataColumnSpec::new("title", "Title"),
+                DataColumnSpec::new("link", "Link"),
+                DataColumnSpec::new("supports", "Supports"),
+            ],
+            rows, sort: SortSpec::new("key", SortDir::Asc),
+            empty: "No references; define references in the manifest.".to_string(),
         }
     }
 }
@@ -682,26 +683,27 @@ fn status_tab(st: &CuratorState) -> Element {
     rsx! {
         dl { class: "detail-grid",
             dt { "Name" } dd { "{r.spec.namespace}/{r.spec.name}" }
-            dt { "Phase" } dd { class: "phase", {r.phase.clone().unwrap_or_else(|| dash.clone())} }
+            dt { "Phase" } dd { {crate::metadata_chip("Phase", r.phase.as_deref().unwrap_or("—"))} }
             dt { "Included" } dd { {r.included_count.map(|n| n.to_string()).unwrap_or_else(|| dash.clone())} }
             dt { "Dataset" } dd { {r.dataset_uri.clone().unwrap_or_else(|| dash.clone())} }
             dt { "Assembled" } dd { {r.last_assembled_time.clone().unwrap_or_else(|| dash.clone())} }
             dt { "Created" } dd { "{fmt_ms(&r.created_at)}" }
         }
-        if !r.conditions.is_empty() {
-            table { class: "tbl",
-                thead { tr { th { "Condition" } th { "Status" } th { "Reason" } th { "Message" } } }
-                tbody {
-                    for c in r.conditions.clone() {
-                        tr {
-                            td { "{c.ctype}" }
-                            td { class: if c.status == "True" { "cond ok" } else { "cond bad" }, "{c.status}" }
-                            td { "{c.reason}" }
-                            td { class: "muted", "{c.message}" }
-                        }
-                    }
-                }
-            }
+        ConsoleTable {
+            id: "athena-report-conditions",
+            columns: vec![
+                DataColumnSpec::new("type", "Condition").pinned(),
+                DataColumnSpec::new("status", "Status").enumerated(),
+                DataColumnSpec::new("reason", "Reason"),
+                DataColumnSpec::new("message", "Message"),
+            ],
+            rows: r.conditions.iter().map(|c| {
+                DataRow::new(&c.ctype).text(&c.ctype)
+                    .cell(crate::metadata_chip(&c.ctype, &c.status), SortKey::text(&c.status))
+                    .text(&c.reason).text(&c.message)
+            }).collect::<Vec<_>>(),
+            sort: SortSpec::new("type", SortDir::Asc),
+            empty: "No conditions reported.".to_string(),
         }
     }
 }
@@ -719,7 +721,8 @@ fn footer(
     // Writing a ResearchReport is the research record, so it needs a live
     // session; reads above are unaffected. The gate lives in `auth_flow` so
     // its rules are unit-tested rather than re-implemented here.
-    let (can_save, problem) = crate::auth_flow::save_gate(auth, st.draft.problem(is_new), dirty, busy);
+    let (can_save, problem) =
+        crate::auth_flow::save_gate(auth, st.draft.problem(is_new), dirty, busy);
     let rv = st
         .loaded
         .as_ref()
@@ -796,7 +799,6 @@ fn footer(
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
