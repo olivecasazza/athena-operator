@@ -34,7 +34,7 @@ use models::{
 use panel_kit::grafana::GrafanaDashboard;
 use panel_kit::ide::IdePanel;
 use panel_kit::widgets::DataColumnSpec;
-use panel_kit::widgets::data_table::SortSpec;
+use panel_kit::widgets::data_table::{Control, SortSpec};
 use panel_kit::{LayoutBuilder, PanelKind, PanelWin};
 use panel_kit_core::Mode;
 use panel_kit_core::PanelCommand;
@@ -317,46 +317,29 @@ fn admin_layout() -> Vec<PanelWin<AdminPanel>> {
     wins
 }
 
-/// Story-owned layout and shared achromatic panel-kit tokens.
+/// Preserve Athena's pink/blue identity through the shared theme roles.
+/// Component geometry and pointer-dependent hit targets remain panel-kit's.
 const APP_CSS: &str = "
 :root {
-  --gray-0:#101010; --gray-1:#181818; --gray-2:#242424;
-  --gray-3:#363636; --gray-4:#525252; --gray-5:#737373;
-  --gray-6:#bdbdbd; --gray-7:#dedede; --gray-8:#fafafa;
-  --color-background:var(--gray-0); --color-surface:var(--gray-1);
-  --color-text:var(--gray-8); --color-text-muted:var(--gray-6);
-  --color-border:var(--gray-4); --color-divider:var(--gray-3);
-  --color-inverse-background:var(--gray-8); --color-inverse-text:var(--gray-0);
-  --color-primary:var(--gray-8); --color-secondary:var(--gray-7);
-  --color-tertiary:var(--gray-6); --color-highlight:var(--gray-8);
-  --color-success:var(--gray-8); --color-error:var(--gray-8);
-  --color-warning:var(--gray-7); --color-failure:var(--gray-8);
-  --color-info:var(--gray-7); --color-focus-ring:var(--gray-8);
-  --panel-radius:0; --badge-radius:0;
-  --hit-min:44px;
+  --color-primary:#93c5fd; --color-secondary:#f472b6;
+  --color-text-muted:#bdbdbd; --panel-radius:0; --badge-radius:0;
 }
-button, input, select, textarea, a { min-height:44px; border-radius:0; box-sizing:border-box; }
-button, input[type=checkbox] { min-width:44px; }
-:focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:2px; }
+.ws-root :focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:2px; }
 ::selection { background:var(--color-inverse-background); color:var(--color-inverse-text); }
 input, textarea { caret-color:var(--color-text); }
-a { color:var(--color-text); display:inline-flex; align-items:center; padding:0 .3rem; }
-.panel-body { scrollbar-color:var(--gray-6) var(--gray-1); }
+a { color:var(--color-secondary); }
+.panel-body { scrollbar-color:var(--color-text-muted) var(--color-surface); }
 .pk-dt { font-variant-numeric:tabular-nums; }
-.metadata-chip { display:inline-flex; align-items:center; min-height:44px; }
-.metadata-chip .badge-main { margin:0; min-height:44px; min-width:44px; }
-.pk-dt button { min-height:44px; min-width:44px; }
+.metadata-chip { display:inline-flex; align-items:center; max-width:100%; vertical-align:middle; }
 .pk-tr-legend-means, .pk-tr-faint, .pk-tr-rail-meta { color:var(--color-text-muted); }
-.panel-body button.pk-tr-rail-hit { min-height:0; }
-.dock { height:52px; flex-basis:52px; }
 .activity-modes { display:flex; flex-wrap:wrap; gap:.5rem; margin:.5rem 0; }
-.topbar { display:flex; align-items:center; gap:1rem; padding:.5rem .9rem;
-  height:auto; min-height:52px; flex:0 0 auto; border-bottom:1px solid var(--color-border); }
-.topbar h1 { font-size:1rem; color:var(--color-text); margin:0; flex-shrink:0; }
+.topbar { display:flex; align-items:center; gap:1rem; padding:.4rem .75rem;
+  height:auto; min-height:36px; flex:0 0 auto; border-bottom:1px solid var(--color-divider); }
+.topbar h1 { font-size:1rem; color:var(--color-secondary); margin:0; flex-shrink:0; }
 .topbar .hint { color:var(--color-text-muted); font-size:.72rem; }
 .views { display:flex; align-items:center; gap:.3rem; flex:1; min-width:0; flex-wrap:wrap; }
 .view-tab { display:inline-flex; }
-.view-btn.active-view { background:var(--color-inverse-background); color:var(--color-inverse-text); border-color:var(--color-inverse-background); }
+.view-btn.active-view { background:var(--color-background); color:var(--color-secondary); border-color:var(--color-secondary); }
 .view-del { padding:0 .3rem; border-left:0; }
 .views .view-name { width:8rem; flex:0 0 8rem; }
 /* Report Curator. Follows panel-kit's design rules: labels are tracked caps,
@@ -369,7 +352,7 @@ a { color:var(--color-text); display:inline-flex; align-items:center; padding:0 
 .cur-value { color:var(--color-text); font-weight:600; }
 .cur-hint { font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; }
 .cur-report { max-width:22ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.cur-report.active, .cur-tab.active { color:var(--color-text); border-color:var(--color-text); }
+.cur-report.active, .cur-tab.active { color:var(--color-secondary); border-color:var(--color-secondary); }
 .cur-tabs { display:flex; gap:0; border-bottom:1px solid var(--color-border); }
 .cur-tab { background:transparent; border:0; border-bottom:2px solid transparent;
   color:var(--color-text-muted); font-family:var(--mono); font-size:.68rem; text-transform:uppercase;
@@ -391,49 +374,70 @@ a { color:var(--color-text); display:inline-flex; align-items:center; padding:0 
 .btn.primary:not(:disabled) { border-color:var(--color-text); color:var(--color-text); }
 .btn:disabled { color:var(--color-text-muted); border-color:var(--color-border); cursor:not-allowed; }
 .ok { color:var(--color-success); font-size:.74rem; }
-.views { flex-wrap:nowrap; overflow-x:auto; }
 .pk-dt td .row-link { font-size:inherit; }
-.row-link { background:none; border:none; color:var(--color-text); cursor:pointer;
-  font-family:var(--mono); font-size:.74rem; padding:.2rem .3rem; text-align:left; text-decoration:underline; text-underline-offset:3px; }
+.row-link { background:none; border:none; color:var(--color-secondary); cursor:pointer;
+  font-family:var(--mono); font-size:inherit; min-height:var(--hit-min); padding:.1rem .2rem; text-align:left; text-decoration:underline; text-underline-offset:3px; }
 .row-link:hover { text-decoration:underline; }
 .muted { color:var(--color-text-muted); }
 .view-head { margin:.1rem 0 .6rem; }
-.view-head h2 { font-size:.92rem; color:var(--color-text); margin:0 0 .2rem; }
-.view-head p { font-size:.72rem; color:var(--color-text-muted); margin:0; }
-.detail-grid { display:grid; grid-template-columns:auto 1fr; gap:.2rem .8rem;
-  font-size:.74rem; margin-bottom:.6rem; }
+.view-head h2 { font-size:1rem; color:var(--color-text); margin:0 0 .25rem; }
+.view-head p { font-size:var(--body-size); color:var(--color-text-muted); margin:0; line-height:1.5; }
+.detail-grid { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:.3rem .8rem;
+  font-size:var(--body-size); margin-bottom:.6rem; }
 .detail-grid dt { color:var(--color-text-muted); }
-.detail-grid dd { color:var(--color-text); margin:0; word-break:break-all; }
-.btn { background:var(--color-background); color:var(--color-text); border:1px solid var(--color-divider);
-  border-radius:0; padding:.3rem .5rem; font-size:.7rem; cursor:pointer; font-family:var(--mono); }
+.detail-grid dd { color:var(--color-text); margin:0; min-width:0; overflow-wrap:anywhere; }
+.btn { background:var(--color-background); color:var(--color-text); border:1px solid var(--color-border);
+  border-radius:0; min-height:var(--hit-min); padding:.1rem .45rem; font-size:var(--label-size); cursor:pointer; font-family:var(--mono); }
 .admin-toggle { margin-left:auto; }
-.btn:hover { border-color:var(--color-text); }
-.section-label { font-size:.78rem; color:var(--color-text); margin:.5rem 0 .25rem; }
+.btn:hover { border-color:var(--color-secondary); }
+.section-label { font-size:var(--body-size); color:var(--color-text); margin:.5rem 0 .25rem; }
 /* The Grafana embed tracks the panel's height instead of a fixed 340px, so
    resizing/maximizing the panel actually gives the dashboard more room (it is
    ~1400px tall and scrolls internally otherwise). 100% resolves against
    .panel-body's CONTENT box, so its padding is already excluded; the collapse
    floor is panel-kit's own .grafana-panel min-height. */
 .embed-block { height:100%; margin:0; }
-.ide-block { height:260px; margin:.4rem 0; }
+.grafana-open { opacity:1; color:var(--color-secondary); }
+/* A table's 100% height cannot be added after its panel heading. Let the host
+   allocate the remainder; multi-table research/curation views stay in flow. */
+.panel-experiments .panel-body, .panel-reports .panel-body,
+.panel-runtime-profiles .panel-body, .panel-node-power---hephaestus .panel-body,
+.panel-inference-backends .panel-body { display:flex; flex-direction:column; overflow:hidden; }
+.panel-body > .view-head, .panel-body > .detail-grid { flex:0 0 auto; }
+.panel-body > .pk-dt { flex:1; min-height:0; height:auto; }
+.panel-body > .pk-dt > .pk-dt-scroll { flex:1; min-height:0; max-height:none; }
+.cur .pk-dt { height:auto; }
+.panel-benchmarks .panel-body { display:grid; grid-template-rows:auto auto minmax(110px,1fr) auto minmax(110px,1fr); overflow:auto; }
+.panel-gpu-pools---queues .panel-body { display:flex; flex-direction:column; overflow:auto; }
+.panel-gpu-pools---queues .pk-dt { flex:1 0 140px; min-height:140px; }
+.panel-run-activity .panel-body { display:flex; flex-direction:column; overflow:auto; }
+.panel-run-activity .activity-modes { flex:0 0 auto; }
+.panel-run-activity .pk-tr { flex:1; min-height:0; height:auto; }
+.panel-experiment-manifest .panel-body { display:flex; flex-direction:column; overflow:hidden; }
+.panel-templates .panel-body { display:grid; grid-template-rows:auto minmax(100px,2fr) auto minmax(140px,3fr); overflow:auto; }
+.panel-templates .pk-dt { min-width:0; min-height:0; }
+.panel-templates .pk-dt-scroll { flex:1; min-height:0; max-height:none; }
+.ide-block { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; }
+.ide-block > .ide-panel { flex:1; min-height:0; }
+.ide-block .ide-textarea { min-height:0; }
 .todo { color:var(--color-warning); font-size:.74rem; }
 .err { color:var(--color-error); font-size:.76rem; }
 .preview { max-height:300px; overflow:auto; white-space:pre-wrap;
   font-family:var(--mono); font-size:.7rem; background:var(--color-background);
   border:1px solid var(--color-border); padding:.4rem; margin:.4rem 0; }
 .rc-select { background:var(--color-background); color:var(--color-text); border:1px solid var(--color-divider);
-  font-family:var(--mono); font-size:.74rem; padding:.15rem .3rem; width:100%; }
+  font-family:var(--mono); font-size:var(--body-size); min-height:var(--hit-min); padding:.15rem .3rem; width:100%; }
 .rc-input { background:var(--color-background); color:var(--color-text); border:1px solid var(--color-divider);
-  font-family:var(--mono); font-size:.74rem; padding:.15rem .3rem; width:100%;
+  font-family:var(--mono); font-size:var(--body-size); min-height:var(--hit-min); padding:.15rem .3rem; width:100%;
   box-sizing:border-box; }
 .rc-textarea { background:var(--color-background); color:var(--color-text); border:1px solid var(--color-divider);
-  font-family:var(--mono); font-size:.72rem; padding:.2rem .3rem; width:100%;
+  font-family:var(--mono); font-size:var(--body-size); padding:.2rem .3rem; width:100%;
   box-sizing:border-box; height:4rem; resize:vertical; }
 /* Breadcrumbs lead back to the one campaign browser. */
 .crumbs { display:flex; align-items:baseline; gap:.3rem; font-size:.74rem;
   font-family:var(--mono); margin:.1rem 0 .6rem; }
 .pk-dt .date { white-space:nowrap; color:var(--color-text-muted); }
-.pk-dt td .row-link { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:bottom; }
+.pk-dt td .row-link { max-width:100%; white-space:normal; overflow-wrap:anywhere; display:inline-block; vertical-align:middle; }
 .filmstrip { width:100%; margin:.2rem 0; border:1px solid var(--color-border); }
 .crumb-current { color:var(--color-text); }
 @media(max-width:700px) {
@@ -1089,6 +1093,7 @@ fn templates_view(snap: ClusterSnapshot, mut template_doc: Signal<String>) -> El
         }
         ConsoleTable {
             id: "athena-templates",
+            toolbar: vec![Control::Quick, Control::Columns, Control::Tally],
             columns: vec![
                 DataColumnSpec::new("name", "Template").pinned(),
                 DataColumnSpec::new("objective", "Objective"),
@@ -1157,6 +1162,7 @@ fn resource_table(
     rsx! {
         ConsoleTable {
             id: format!("athena-{}", name_col.to_lowercase()),
+            toolbar: vec![Control::Quick, Control::Columns, Control::Tally],
             columns: vec![
                 DataColumnSpec::new("name", name_col).pinned(),
                 DataColumnSpec::new("phase", "Phase").enumerated(),
@@ -1274,6 +1280,7 @@ fn research_view(
                                     if let Some(at) = &st.promoted_at { p { class: "muted", "Promoted {fmt_rfc3339(at)} UTC" } }
                                     ConsoleTable {
                                         id: format!("athena-stage-{}-{}-{}", d.namespace, d.name, st.name),
+                                        toolbar: vec![Control::Quick, Control::Tally],
                                         columns: vec![
                                             DataColumnSpec::new("template", "Template").pinned(),
                                             DataColumnSpec::new("best", "Best").number(),

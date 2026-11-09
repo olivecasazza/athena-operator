@@ -9,7 +9,7 @@
 use std::rc::Rc;
 
 use dioxus::prelude::*;
-use panel_kit::widgets::data_table::{SortSpec, TableDefaults};
+use panel_kit::widgets::data_table::{Control, SortSpec, TableDefaults};
 use panel_kit::widgets::{DataColumnSpec, DataTable, TableDataBuilder, Value};
 
 use crate::models::ResourceSummary;
@@ -127,6 +127,7 @@ pub fn ConsoleTable(
     #[props(default)] storage_key: Option<String>,
     #[props(default)] empty: Option<String>,
     #[props(default)] placeholder: Option<String>,
+    #[props(default)] toolbar: Option<Vec<Control>>,
 ) -> Element {
     let mut builder = TableDataBuilder::with_capacity(&columns, rows.len());
     for row in &rows {
@@ -161,6 +162,7 @@ pub fn ConsoleTable(
             label: id.clone(),
             ribbon: false,
             defaults,
+            toolbar,
             storage_key,
             empty,
             selected,
@@ -253,7 +255,7 @@ pub fn experiment_columns(with_campaign: bool) -> Vec<DataColumnSpec> {
     let mut cols = vec![
         DataColumnSpec::new("name", "Experiment")
             .pinned()
-            .width("28ch"),
+            .class("pk-dt-col-title"),
     ];
     if with_campaign {
         cols.push(DataColumnSpec::new("campaign", "Campaign").hidden());
@@ -263,8 +265,12 @@ pub fn experiment_columns(with_campaign: bool) -> Vec<DataColumnSpec> {
         DataColumnSpec::new("phase", "Phase")
             .enumerated()
             .width("16ch"),
-        DataColumnSpec::new("decision", "Decision").enumerated(),
-        DataColumnSpec::new("objective", "Objective").number(),
+        DataColumnSpec::new("decision", "Decision")
+            .enumerated()
+            .width("14ch"),
+        DataColumnSpec::new("objective", "Objective")
+            .number()
+            .width("16ch"),
         DataColumnSpec::new("metric", "Metric").hidden(),
         DataColumnSpec::new("parent", "Parent").hidden(),
         DataColumnSpec::new("gen", "Gen").number().hidden(),
@@ -330,16 +336,24 @@ pub fn campaign_columns() -> Vec<DataColumnSpec> {
     vec![
         DataColumnSpec::new("name", "Campaign")
             .pinned()
-            .width("28ch"),
+            .class("pk-dt-col-title"),
         DataColumnSpec::new("drive", "Drive").hidden(),
         DataColumnSpec::new("template", "Template").hidden(),
         DataColumnSpec::new("strategy", "Strategy").hidden(),
-        DataColumnSpec::new("phase", "Phase").enumerated(),
+        DataColumnSpec::new("phase", "Phase")
+            .enumerated()
+            .width("16ch"),
         DataColumnSpec::new("best", "Best experiment").hidden(),
-        DataColumnSpec::new("objective", "Best objective").number(),
+        DataColumnSpec::new("objective", "Best objective")
+            .number()
+            .width("16ch"),
         DataColumnSpec::new("metric", "Metric").hidden(),
-        DataColumnSpec::new("succeeded", "Succeeded").number(),
-        DataColumnSpec::new("failed", "Failed").number(),
+        DataColumnSpec::new("succeeded", "Succeeded")
+            .number()
+            .width("11ch"),
+        DataColumnSpec::new("failed", "Failed")
+            .number()
+            .width("9ch"),
         DataColumnSpec::new("running", "Running").number().hidden(),
         DataColumnSpec::new("created", "Created").number().hidden(),
     ]
