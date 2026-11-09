@@ -16,10 +16,11 @@
 //! here until the dashboard's panel ids are pinned in nixlab, since
 //! provisioning reassigns them.)
 
-mod curator;
+mod activity;
 mod api;
 mod auth;
 mod auth_flow;
+mod curator;
 pub mod models;
 mod tables;
 mod workspace;
@@ -27,7 +28,7 @@ mod workspace;
 use dioxus::events::PointerEvent as DioxusPointerEvent;
 use dioxus::prelude::*;
 use models::{
-    ClusterSnapshot, ConditionDto, ReportDetailDto, ReportSpecDto, ReportSummary, ResourceSummary,
+    ClusterSnapshot, ConditionDto, ReportDetailDto, ReportSpecDto, ResourceSummary,
     SchedulingSnapshot, TemplateSummary,
 };
 use panel_kit::grafana::GrafanaDashboard;
@@ -72,8 +73,8 @@ pub enum Panel {
     ExperimentMetrics,
     /// Manifest IDE for the selected experiment.
     ExperimentManifest,
-    /// ResearchCampaign list.
-    Campaigns,
+    /// Observed run milestones, as a graph or an expandable trace rail.
+    RunActivity,
     /// ExperimentTemplate list + template-YAML editor.
     Templates,
     /// RuntimeProfile list.
@@ -99,7 +100,7 @@ impl PanelKind for Panel {
             Panel::ExperimentDetail => "Experiment Detail",
             Panel::ExperimentMetrics => "Experiment Metrics",
             Panel::ExperimentManifest => "Experiment Manifest",
-            Panel::Campaigns => "Campaigns",
+            Panel::RunActivity => "Run Activity",
             Panel::Templates => "Templates",
             Panel::RuntimeProfiles => "Runtime Profiles",
             Panel::Benchmarks => "Benchmarks",
@@ -136,42 +137,28 @@ fn column<K: Copy>(
         .collect()
 }
 
-/// Two columns: browse/curate on the left, the selected experiment on the right.
+/// Register every story's panel; named views decide which are visible.
 fn default_layout() -> Vec<PanelWin<Panel>> {
-    const BROWSE_W: f64 = 640.0;
-    const DETAIL_W: f64 = 620.0;
     let mut b = LayoutBuilder::new();
-    let mut wins = column(
+    column(
         &mut b,
         GUTTER,
-        BROWSE_W,
-        2,
+        960.0,
+        4,
         &[
+            (Panel::Research, 640.0),
             (Panel::Experiments, 460.0),
-            (Panel::Templates, 320.0),
-            (Panel::Campaigns, 260.0),
-            (Panel::RuntimeProfiles, 260.0),
-            (Panel::ReportCurator, 520.0),
-            (Panel::Reports, 260.0),
-        ],
-    );
-    wins.extend(column(
-        &mut b,
-        GUTTER + BROWSE_W + GUTTER,
-        DETAIL_W,
-        2,
-        &[
-            (Panel::ExperimentDetail, 200.0),
-            // Tall by default: this hosts a whole Grafana dashboard, not one chart.
+            (Panel::ExperimentDetail, 360.0),
+            (Panel::RunActivity, 440.0),
             (Panel::ExperimentMetrics, 560.0),
             (Panel::ExperimentManifest, 360.0),
+            (Panel::Reports, 320.0),
+            (Panel::ReportCurator, 520.0),
+            (Panel::Templates, 480.0),
             (Panel::Benchmarks, 320.0),
-            // The drill-down surface is tall: the global level stacks drive
-            // cards (with per-stage template tables) above the campaign table.
-            (Panel::Research, 640.0),
+            (Panel::RuntimeProfiles, 260.0),
         ],
-    ));
-    wins
+    )
 }
 
 /// Named views over the research workspace: which panels are visible, their
@@ -179,7 +166,7 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
 /// is minimized to the dock. Spans are relative: tiles stretch to fill the
 /// viewport, so shelf heights set proportions, not pixels.
 static RESEARCH_VIEWS: ViewsSpec<Panel> = ViewsSpec {
-    base: "athena_console_web_v4",
+    base: "athena_console_web_v5",
     presets: &[
         ViewPreset {
             name: "Research",
@@ -187,7 +174,8 @@ static RESEARCH_VIEWS: ViewsSpec<Panel> = ViewsSpec {
             panels: &[
                 (Panel::Research, 2, 4),
                 (Panel::ExperimentMetrics, 2, 4),
-                (Panel::ExperimentDetail, 4, 1),
+                (Panel::ExperimentDetail, 2, 3),
+                (Panel::RunActivity, 2, 3),
             ],
         },
         ViewPreset {
@@ -196,17 +184,9 @@ static RESEARCH_VIEWS: ViewsSpec<Panel> = ViewsSpec {
             panels: &[
                 (Panel::Experiments, 2, 4),
                 (Panel::ExperimentMetrics, 2, 4),
-                (Panel::ExperimentDetail, 2, 2),
-                (Panel::ExperimentManifest, 2, 2),
-            ],
-        },
-        ViewPreset {
-            name: "Campaigns",
-            mode: Mode::Tiling,
-            panels: &[
-                (Panel::Campaigns, 2, 4),
-                (Panel::ExperimentMetrics, 2, 4),
-                (Panel::ExperimentDetail, 4, 1),
+                (Panel::ExperimentDetail, 2, 3),
+                (Panel::RunActivity, 2, 3),
+                (Panel::ExperimentManifest, 4, 3),
             ],
         },
         ViewPreset {
@@ -337,13 +317,42 @@ fn admin_layout() -> Vec<PanelWin<AdminPanel>> {
     wins
 }
 
-/// App-specific theming layered after [`panel_kit::CSS`]: a high-contrast
-/// pink/blue palette echoing the native console, plus table + detail styles.
+/// Story-owned layout and shared achromatic panel-kit tokens.
 const APP_CSS: &str = "
-:root { --accent: #f472b6; --pink: #f472b6; --blue: #93c5fd; }
-.topbar { display:flex; align-items:baseline; gap:1rem; padding:.5rem .9rem;
-  border-bottom:1px solid var(--color-border); }
-.topbar h1 { font-size:1rem; color:var(--pink); margin:0; }
+:root {
+  --gray-0:#101010; --gray-1:#181818; --gray-2:#242424;
+  --gray-3:#363636; --gray-4:#525252; --gray-5:#737373;
+  --gray-6:#bdbdbd; --gray-7:#dedede; --gray-8:#fafafa;
+  --color-background:var(--gray-0); --color-surface:var(--gray-1);
+  --color-text:var(--gray-8); --color-text-muted:var(--gray-6);
+  --color-border:var(--gray-4); --color-divider:var(--gray-3);
+  --color-inverse-background:var(--gray-8); --color-inverse-text:var(--gray-0);
+  --color-primary:var(--gray-8); --color-secondary:var(--gray-7);
+  --color-tertiary:var(--gray-6); --color-highlight:var(--gray-8);
+  --color-success:var(--gray-8); --color-error:var(--gray-8);
+  --color-warning:var(--gray-7); --color-failure:var(--gray-8);
+  --color-info:var(--gray-7); --color-focus-ring:var(--gray-8);
+  --panel-radius:0; --badge-radius:0;
+  --hit-min:44px;
+}
+button, input, select, textarea, a { min-height:44px; border-radius:0; box-sizing:border-box; }
+button, input[type=checkbox] { min-width:44px; }
+:focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:2px; }
+::selection { background:var(--color-inverse-background); color:var(--color-inverse-text); }
+input, textarea { caret-color:var(--color-text); }
+a { color:var(--color-text); display:inline-flex; align-items:center; padding:0 .3rem; }
+.panel-body { scrollbar-color:var(--gray-6) var(--gray-1); }
+.pk-dt { font-variant-numeric:tabular-nums; }
+.metadata-chip { display:inline-flex; align-items:center; min-height:44px; }
+.metadata-chip .badge-main { margin:0; min-height:44px; min-width:44px; }
+.pk-dt button { min-height:44px; min-width:44px; }
+.pk-tr-legend-means, .pk-tr-faint, .pk-tr-rail-meta { color:var(--color-text-muted); }
+.panel-body button.pk-tr-rail-hit { min-height:0; }
+.dock { height:52px; flex-basis:52px; }
+.activity-modes { display:flex; flex-wrap:wrap; gap:.5rem; margin:.5rem 0; }
+.topbar { display:flex; align-items:center; gap:1rem; padding:.5rem .9rem;
+  height:auto; min-height:52px; flex:0 0 auto; border-bottom:1px solid var(--color-border); }
+.topbar h1 { font-size:1rem; color:var(--color-text); margin:0; flex-shrink:0; }
 .topbar .hint { color:var(--color-text-muted); font-size:.72rem; }
 .views { display:flex; align-items:center; gap:.3rem; flex:1; min-width:0; flex-wrap:wrap; }
 .view-tab { display:inline-flex; }
@@ -368,7 +377,7 @@ const APP_CSS: &str = "
 .cur-tab:hover { color:var(--color-text); }
 .cur-count { margin-left:.35rem; color:var(--color-text-muted); }
 .cur-body { flex:1; min-height:0; display:flex; flex-direction:column; gap:.4rem; }
-.cur-section { border:1px solid var(--line2); padding:.35rem; display:flex;
+.cur-section { border:1px solid var(--color-divider); padding:.35rem; display:flex;
   flex-direction:column; gap:.3rem; }
 .cur-section-head { display:flex; gap:.4rem; align-items:center; }
 .cur-heading { font-weight:600; }
@@ -384,30 +393,21 @@ const APP_CSS: &str = "
 .ok { color:var(--color-success); font-size:.74rem; }
 .views { flex-wrap:nowrap; overflow-x:auto; }
 .pk-dt td .row-link { font-size:inherit; }
-.tbl { width:100%; border-collapse:collapse; font-size:.74rem; }
-.tbl th { text-align:left; color:var(--color-text-muted); font-weight:normal;
-  border-bottom:1px solid var(--line2); padding:.25rem .4rem; }
-.tbl td { padding:.25rem .4rem; border-bottom:1px solid var(--color-border);
-  color:var(--color-text); vertical-align:top; }
-.tbl .phase { color:var(--blue); }
-.row-link { background:none; border:none; color:var(--pink); cursor:pointer;
-  font-family:var(--mono); font-size:.74rem; padding:0; text-align:left; }
+.row-link { background:none; border:none; color:var(--color-text); cursor:pointer;
+  font-family:var(--mono); font-size:.74rem; padding:.2rem .3rem; text-align:left; text-decoration:underline; text-underline-offset:3px; }
 .row-link:hover { text-decoration:underline; }
 .muted { color:var(--color-text-muted); }
 .view-head { margin:.1rem 0 .6rem; }
-.scroll-tbl { max-height:340px; overflow-y:auto; }
-.scroll-tbl .tbl thead th { position:sticky; top:0; background:var(--color-background); z-index:1; }
 .view-head h2 { font-size:.92rem; color:var(--color-text); margin:0 0 .2rem; }
 .view-head p { font-size:.72rem; color:var(--color-text-muted); margin:0; }
 .detail-grid { display:grid; grid-template-columns:auto 1fr; gap:.2rem .8rem;
   font-size:.74rem; margin-bottom:.6rem; }
 .detail-grid dt { color:var(--color-text-muted); }
 .detail-grid dd { color:var(--color-text); margin:0; word-break:break-all; }
-.btn { background:var(--color-background); color:var(--color-text); border:1px solid var(--line2);
-  border-radius:3px; padding:.1rem .45rem; font-size:.7rem; cursor:pointer;
-  font-family:var(--mono); }
-.admin-toggle { margin-left:auto; color:var(--pink); border-color:var(--pink); }
-.btn:hover { border-color:var(--pink); }
+.btn { background:var(--color-background); color:var(--color-text); border:1px solid var(--color-divider);
+  border-radius:0; padding:.3rem .5rem; font-size:.7rem; cursor:pointer; font-family:var(--mono); }
+.admin-toggle { margin-left:auto; }
+.btn:hover { border-color:var(--color-text); }
 .section-label { font-size:.78rem; color:var(--color-text); margin:.5rem 0 .25rem; }
 /* The Grafana embed tracks the panel's height instead of a fixed 340px, so
    resizing/maximizing the panel actually gives the dashboard more room (it is
@@ -421,58 +421,45 @@ const APP_CSS: &str = "
 .preview { max-height:300px; overflow:auto; white-space:pre-wrap;
   font-family:var(--mono); font-size:.7rem; background:var(--color-background);
   border:1px solid var(--color-border); padding:.4rem; margin:.4rem 0; }
-.rc-select { background:var(--color-background); color:var(--color-text); border:1px solid var(--line2);
+.rc-select { background:var(--color-background); color:var(--color-text); border:1px solid var(--color-divider);
   font-family:var(--mono); font-size:.74rem; padding:.15rem .3rem; width:100%; }
-.rc-input { background:var(--color-background); color:var(--color-text); border:1px solid var(--line2);
+.rc-input { background:var(--color-background); color:var(--color-text); border:1px solid var(--color-divider);
   font-family:var(--mono); font-size:.74rem; padding:.15rem .3rem; width:100%;
   box-sizing:border-box; }
-.rc-textarea { background:var(--color-background); color:var(--color-text); border:1px solid var(--line2);
+.rc-textarea { background:var(--color-background); color:var(--color-text); border:1px solid var(--color-divider);
   font-family:var(--mono); font-size:.72rem; padding:.2rem .3rem; width:100%;
   box-sizing:border-box; height:4rem; resize:vertical; }
-/* Research drill-down: breadcrumbs are the navigation record; chips mark
-   leaf kinds (experiment vs report); condition badges colour by status. */
+/* Breadcrumbs lead back to the one campaign browser. */
 .crumbs { display:flex; align-items:baseline; gap:.3rem; font-size:.74rem;
   font-family:var(--mono); margin:.1rem 0 .6rem; }
-.crumbs .sep { color:var(--color-text-muted); }
-.chip { display:inline-block; margin-left:.35rem; border:1px solid var(--blue); color:var(--blue);
-  border-radius:3px; padding:0 .25rem; font-size:.66rem; margin-left:.3rem; }
-.cond { display:inline-block; border-radius:3px; padding:0 .25rem;
-  font-size:.66rem; margin:0 .15rem .15rem 0; border:1px solid var(--line2);
-  color:var(--color-text-muted); }
-.cond.True, .cond.ok, .cond.ready { border-color:var(--color-success); color:var(--color-success); }
-.cond.warn { border-color:var(--color-warning); color:var(--color-warning); }
-.cond.bad, .cond.err { border-color:var(--color-error); color:var(--color-error); }
 .pk-dt .date { white-space:nowrap; color:var(--color-text-muted); }
 .pk-dt td .row-link { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; vertical-align:bottom; }
 .filmstrip { width:100%; margin:.2rem 0; border:1px solid var(--color-border); }
 .crumb-current { color:var(--color-text); }
+@media(max-width:700px) {
+  .topbar { flex-wrap:wrap; gap:.5rem; }
+  .views { flex-basis:100%; flex-wrap:wrap; overflow:visible; }
+  .cur-tabs { flex-wrap:wrap; }
+  .cur-name, .cur-title { width:100%; flex-basis:100%; }
+  .detail-grid { grid-template-columns:1fr; }
+}
 ";
 
-/// Research drill-down depth. The hierarchy mirrors CRD ownership
-/// (ResearchDrive -> ResearchCampaign -> Experiment / ResearchReport); one
-/// level is visible at a time and the breadcrumb bar renders the path back.
+/// One campaign browser; experiment and report rows open their canonical
+/// inspector/curator instead of creating another detail surface.
 #[derive(Clone, PartialEq)]
 enum ResearchNav {
     Global,
-    Campaign(String),
-    Experiment {
-        campaign: String,
-        exp: ResourceSummary,
-    },
-    Report {
-        campaign: String,
-        report: ReportSummary,
-    },
+    Campaign { namespace: String, name: String },
 }
 
 /// App root.
 #[component]
 pub fn App() -> Element {
-    // Preserve the existing versioned localStorage keys. The core V1/V2 reader
-    // accepts the controller-era records; authored tile spans are reapplied as
-    // floors so old saved layouts cannot collapse iframe-backed panels.
+    // New story-owned panel catalog: obsolete campaign/leaf panels are not
+    // restored from earlier saved layouts.
     let ws = use_panel_workspace(
-        "athena_console_web_v3",
+        "athena_console_web_v5_layout",
         default_layout,
         Some(&RESEARCH_VIEWS),
     );
@@ -530,16 +517,14 @@ pub fn App() -> Element {
             Panel::ExperimentDetail => experiment_detail_view(selected),
             Panel::ExperimentMetrics => experiment_metrics_view(selected),
             Panel::ExperimentManifest => experiment_manifest_view(selected, manifest_doc),
-            Panel::Campaigns => campaigns_view(snap, ws_emit, selected, manifest_doc),
+            Panel::RunActivity => rsx! { activity::RunActivity { snapshot: snap, selected } },
             Panel::Templates => templates_view(snap, template_doc),
             Panel::RuntimeProfiles => runtime_view(snap),
             Panel::Benchmarks => benchmarks_view(snap),
             Panel::ReportCurator => {
                 let nav_campaign = match &*research_nav.read() {
                     ResearchNav::Global => None,
-                    ResearchNav::Campaign(c)
-                    | ResearchNav::Experiment { campaign: c, .. }
-                    | ResearchNav::Report { campaign: c, .. } => Some(c.clone()),
+                    ResearchNav::Campaign { name, .. } => Some(name.clone()),
                 };
                 curator::curator_view(
                     snap,
@@ -551,7 +536,14 @@ pub fn App() -> Element {
                 )
             }
             Panel::Reports => reports_view(snap, ws_emit, curator_state),
-            Panel::Research => research_view(snap, research_nav, selected, manifest_doc, ws_emit),
+            Panel::Research => research_view(
+                snap,
+                research_nav,
+                selected,
+                manifest_doc,
+                ws_emit,
+                curator_state,
+            ),
         }
     };
 
@@ -656,7 +648,7 @@ pub fn App() -> Element {
                     h1 { "Athena Console" }
                     {view_bar(&ws, view_draft, view_err)}
                     {auth_bar(&read_phase(&auth_state.read()))}
-                    button { class: "btn admin-toggle", onclick: move |_| admin.set(true), "⚙ Admin" }
+                    button { class: "btn admin-toggle", onclick: move |_| admin.set(true), "Admin" }
                 }
                 div {
                     class: "{workspace_class}",
@@ -681,7 +673,6 @@ fn restore_panel(emit: EventHandler<WorkspaceEvent<Panel>>, panel: Panel) {
         command: PanelCommand::Restore,
     });
 }
-
 
 /// Current sign-in state as a plain value. A pending or errored resource read
 /// collapses to `Loading`, so a failed config fetch never claims a session.
@@ -739,10 +730,16 @@ async fn finish_callback(
         return Ok(failed_phase(config, message));
     }
     let Some(verifier) = auth::take_verifier() else {
-        return Ok(failed_phase(config, "PKCE verifier was lost; sign in again".into()));
+        return Ok(failed_phase(
+            config,
+            "PKCE verifier was lost; sign in again".into(),
+        ));
     };
     let Some(redirect_uri) = auth::current_url() else {
-        return Ok(failed_phase(config, "cannot determine the redirect URI".into()));
+        return Ok(failed_phase(
+            config,
+            "cannot determine the redirect URI".into(),
+        ));
     };
     let body = auth::token_request_body(code, &verifier, &redirect_uri, &config.client_id);
     match exchange_token(config, &body).await {
@@ -754,10 +751,7 @@ async fn finish_callback(
     }
 }
 
-async fn exchange_token(
-    config: &auth::AuthConfig,
-    body: &str,
-) -> Result<auth::Token, String> {
+async fn exchange_token(config: &auth::AuthConfig, body: &str) -> Result<auth::Token, String> {
     let url = format!(
         "{}/protocol/openid-connect/token",
         config.issuer.trim_end_matches('/')
@@ -780,13 +774,18 @@ async fn exchange_token(
 /// A phase offering a fresh sign-in link for the current page.
 fn signed_out_phase(config: &auth::AuthConfig) -> auth_flow::Phase {
     let redirect_uri = auth::current_url().unwrap_or_default();
-    auth_flow::Phase::SignedOut { sign_in: auth_flow::begin(config, &redirect_uri) }
+    auth_flow::Phase::SignedOut {
+        sign_in: auth_flow::begin(config, &redirect_uri),
+    }
 }
 
 /// A failed phase that still offers another attempt when one can be built.
 fn failed_phase(config: &auth::AuthConfig, message: String) -> auth_flow::Phase {
     let redirect_uri = auth::current_url().unwrap_or_default();
-    auth_flow::Phase::Failed { message, sign_in: auth_flow::begin(config, &redirect_uri) }
+    auth_flow::Phase::Failed {
+        message,
+        sign_in: auth_flow::begin(config, &redirect_uri),
+    }
 }
 
 /// `GET /api/auth/config` — public OIDC parameters for the public client.
@@ -816,7 +815,7 @@ fn auth_bar(phase: &auth_flow::Phase) -> Element {
     if let Some((label, title)) = phase.notice() {
         return rsx! {
             span { class: "hint", title: "{title}",
-                span { class: "cond warn", "{label}" }
+                {metadata_chip("Session", label)}
             }
         };
     }
@@ -837,6 +836,7 @@ fn restore_detail_panels(emit: EventHandler<WorkspaceEvent<Panel>>) {
     restore_panel(emit, Panel::ExperimentDetail);
     restore_panel(emit, Panel::ExperimentMetrics);
     restore_panel(emit, Panel::ExperimentManifest);
+    restore_panel(emit, Panel::RunActivity);
 }
 
 // ---------------------------------------------------------------------------
@@ -849,13 +849,13 @@ fn experiments_view(
     selected: Signal<Option<ResourceSummary>>,
     manifest_doc: Signal<String>,
 ) -> Element {
-    let sel = selected.read().as_ref().map(|s| s.name.clone());
+    let sel = selected.read().as_ref().map(ResourceSummary::manifest_path);
     let rows: Vec<Row> = snap
         .experiments
         .into_iter()
         .map(|exp| {
             let pick = exp.clone();
-            let is_sel = sel.as_deref() == Some(exp.name.as_str());
+            let is_sel = sel.as_deref() == Some(exp.manifest_path().as_str());
             let name = exp.name.clone();
             experiment_row(
                 &exp,
@@ -888,37 +888,48 @@ fn experiments_view(
     }
 }
 
-/// Placeholder shown by the per-experiment panels when nothing is selected.
+/// The inspector is the only experiment/campaign detail destination.
 fn no_selection() -> Element {
-    rsx! {
-        p { class: "muted",
-            "Select an experiment from the Experiments panel."
-        }
-    }
+    rsx! { p { class: "muted", "Select a campaign in Research or a run in Experiments." } }
 }
 
-/// Metadata grid for the selected experiment.
 fn experiment_detail_view(selected: Signal<Option<ResourceSummary>>) -> Element {
     let Some(exp) = selected.read().clone() else {
         return no_selection();
     };
-    let workspace = exp
-        .workspace_path
-        .clone()
-        .unwrap_or_else(|| "Not reported".to_string());
     let manifest_path = exp.manifest_path();
-
     rsx! {
         div { class: "view-head",
             h2 { "{exp.name}" }
-            p { "{exp.namespace} / {exp.kind} · phase {exp.phase}" }
+            p { "{exp.namespace} / {exp.kind}" }
         }
+        {metadata_chip("Phase", &exp.phase)}
+        {cond_badges(&exp.conditions)}
+        if let Some(hypothesis) = &exp.hypothesis { p { "{hypothesis}" } }
         dl { class: "detail-grid",
-            dt { "Phase" } dd { "{exp.phase}" }
-            dt { "Namespace" } dd { "{exp.namespace}" }
             dt { "Detail" } dd { "{exp.detail}" }
-            dt { "Workspace" } dd { "{workspace}" }
+            dt { "Created" } dd { "{fmt_ms(&exp.created_at)} UTC" }
+            dt { "Started" } dd { "{fmt_ms(&exp.started_at)} UTC" }
+            dt { "Ended" } dd { "{fmt_ms(&exp.ended_at)} UTC" }
+            dt { "Workspace" } dd { {exp.workspace_path.as_deref().unwrap_or("Not reported")} }
             dt { "Manifest" } dd { "{manifest_path}" }
+        }
+        if let Some(value) = &exp.decision { {metadata_chip("Decision", value)} }
+        if let Some(value) = &exp.template { {metadata_chip("Template", value)} }
+        if let Some(value) = &exp.parent { {metadata_chip("Parent", value)} }
+        if let Some(url) = &exp.logs_link {
+            a { href: "{url}", target: "_blank", rel: "noopener noreferrer", "Open logs" }
+        }
+        if let Some(url) = &exp.metrics_link {
+            a { href: "{url}", target: "_blank", rel: "noopener noreferrer", "Open metrics" }
+        }
+        if exp.kind == "experiment" {
+            img {
+                class: "filmstrip",
+                src: "https://spot.casazza.io/api/v1/experiments/{exp.name}/figures/eval_filmstrip.png",
+                alt: "Evaluation filmstrip for {exp.name}",
+                "onerror": "this.remove()",
+            }
         }
     }
 }
@@ -944,8 +955,8 @@ fn time_range(sel: &ResourceSummary) -> (String, String) {
     (from, to)
 }
 
-/// Set the selection, surface the three detail panels, and load the manifest —
-/// shared by the Experiments and Campaigns tables (both are clickable).
+/// Select a resource from the experiment table or campaign browser, then
+/// open its single inspector, metrics, manifest and activity destinations.
 fn select_resource(
     mut selected: Signal<Option<ResourceSummary>>,
     mut manifest_doc: Signal<String>,
@@ -1014,53 +1025,6 @@ fn experiment_manifest_view(
     }
 }
 
-fn campaigns_view(
-    snap: ClusterSnapshot,
-    emit: EventHandler<WorkspaceEvent<Panel>>,
-    selected: Signal<Option<ResourceSummary>>,
-    manifest_doc: Signal<String>,
-) -> Element {
-    let sel = selected.read().as_ref().map(|s| s.name.clone());
-    let rows: Vec<Row> = snap
-        .campaigns
-        .into_iter()
-        .map(|c| {
-            let pick = c.clone();
-            let shown = campaign_label(&c);
-            let is_sel = sel.as_deref() == Some(c.name.as_str());
-            let full = c.name.clone();
-            let label = shown.clone();
-            campaign_row(
-                &c,
-                rsx! { span { title: "{full}",
-                    button {
-                        class: "row-link",
-                        onclick: move |_| select_resource(selected, manifest_doc, emit, pick.clone()),
-                        "{label}"
-                    }
-                } },
-                &shown,
-            )
-            .selected(is_sel)
-        })
-        .collect();
-    rsx! {
-        div { class: "view-head",
-            h2 { "Campaigns" }
-            p { "Click a campaign to load its metrics (all member experiments, over the campaign window) into the Metrics panel." }
-        }
-        ConsoleTable {
-            id: "athena-campaigns",
-            columns: campaign_columns(),
-            rows,
-            sort: SortSpec::new("created", SortDir::Desc),
-            storage_key: "athena.table.campaigns".to_string(),
-            empty: "No campaigns found.".to_string(),
-            placeholder: "filter campaigns…".to_string(),
-        }
-    }
-}
-
 /// RFC 3339 timestamp (status fields) → `YYYY-MM-DD HH:MM`, matching [`fmt_ms`].
 fn fmt_rfc3339(at: &str) -> String {
     at.get(..16)
@@ -1093,7 +1057,7 @@ fn templates_view(snap: ClusterSnapshot, mut template_doc: Signal<String>) -> El
         .into_iter()
         .map(|tpl: TemplateSummary| {
             let t = tpl.clone();
-            Row::new(tpl.name.clone())
+            Row::new(format!("{}/{}", tpl.namespace, tpl.name))
                 .text(tpl.name.clone())
                 .text(tpl.objective.clone())
                 .date(&tpl.created_at)
@@ -1183,7 +1147,7 @@ fn resource_table(
     let rows: Vec<Row> = rows
         .into_iter()
         .map(|r| {
-            Row::new(r.name.clone())
+            Row::new(r.manifest_path())
                 .text(r.name.clone())
                 .text_class(r.phase.clone(), "phase")
                 .date(&r.created_at)
@@ -1195,7 +1159,7 @@ fn resource_table(
             id: format!("athena-{}", name_col.to_lowercase()),
             columns: vec![
                 DataColumnSpec::new("name", name_col).pinned(),
-                DataColumnSpec::new("phase", "Phase"),
+                DataColumnSpec::new("phase", "Phase").enumerated(),
                 DataColumnSpec::new("created", "Created").number(),
                 DataColumnSpec::new("detail", detail_col),
             ],
@@ -1210,27 +1174,42 @@ fn resource_table(
 // Research drill-down: global fleet -> campaign -> experiment | report.
 // ---------------------------------------------------------------------------
 
-/// Condition badges. Class picks the colour: True reads green, anything else
-/// red; the reason rides in the title tooltip.
-fn cond_badges(conds: &[ConditionDto]) -> Element {
-    let rows: Vec<(String, String, String)> = conds
-        .iter()
-        .map(|c| {
-            let class = if c.status == "True" {
-                "cond ok"
-            } else {
-                "cond bad"
-            };
-            (
-                class.to_string(),
-                format!("{} {}", c.ctype, c.status),
-                c.reason.clone(),
-            )
-        })
-        .collect();
+/// Metadata uses the shared chip painter. Clicking copies its literal value;
+/// no condition polarity or phase is reinterpreted as research success.
+fn metadata_chip(field: &str, value: &str) -> Element {
+    rsx! { MetadataChip { field: field.to_string(), value: value.to_string() } }
+}
+
+/// Defer event-handler allocation to the component runtime: table row models
+/// can be constructed independently of a mounted Dioxus application.
+#[component]
+fn MetadataChip(field: String, value: String, #[props(default = true)] labeled: bool) -> Element {
+    use panel_kit::badge::Badge;
+    use panel_kit_core::badge::{BadgeKind, BadgeSpec, BadgeTone, BadgeVariant};
+    let label = if labeled {
+        format!("{field}: {value}")
+    } else {
+        value.clone()
+    };
+    let mut spec = BadgeSpec::new(&field, &label, BadgeKind::Generic)
+        .with_tone(BadgeTone::Neutral, BadgeVariant::Outline);
+    spec.with_x = false;
+    spec.with_plus = false;
+    let text = serde_json::to_string(&value).expect("string is JSON encodable");
     rsx! {
-        for (class, label, reason) in rows {
-            span { class: "{class}", title: "{reason}", "{label}" }
+        span { class: "metadata-chip", title: "{label} — click to copy",
+            Badge { spec, on_action: move |_| {
+                let script = format!("navigator.clipboard.writeText({text}).catch(e => console.warn('Copy failed', e))");
+                document::eval(&script);
+            } }
+        }
+    }
+}
+
+fn cond_badges(conds: &[ConditionDto]) -> Element {
+    rsx! {
+        for c in conds {
+            span { title: "{c.reason}", {metadata_chip(&c.ctype, &c.status)} }
         }
     }
 }
@@ -1238,74 +1217,32 @@ fn cond_badges(conds: &[ConditionDto]) -> Element {
 fn research_view(
     snap: ClusterSnapshot,
     mut nav: Signal<ResearchNav>,
-    mut selected: Signal<Option<ResourceSummary>>,
-    mut manifest_doc: Signal<String>,
+    selected: Signal<Option<ResourceSummary>>,
+    manifest_doc: Signal<String>,
     emit: EventHandler<WorkspaceEvent<Panel>>,
+    curator_state: Signal<curator::CuratorState>,
 ) -> Element {
-    let level = nav.read().clone();
-
-    // Breadcrumbs: every ancestor is a button back to that depth.
-    let campaign_crumb = match &level {
-        ResearchNav::Global => None,
-        ResearchNav::Campaign(c) => Some(c.clone()),
-        ResearchNav::Experiment { campaign, .. } | ResearchNav::Report { campaign, .. } => {
-            Some(campaign.clone())
-        }
-    };
-    let leaf_crumb = match &level {
-        ResearchNav::Experiment { exp, .. } => Some(exp.name.clone()),
-        ResearchNav::Report { report, .. } => Some(report.name.clone()),
-        _ => None,
-    };
-    let crumbs = {
-        let campaign_for_leafless = campaign_crumb.clone();
-        rsx! {
-            div { class: "crumbs",
-                button { class: "row-link", onclick: move |_| nav.set(ResearchNav::Global), "research" }
-                if let Some(c) = campaign_crumb.clone() {
-                    span { class: "sep", "\u{203a}" }
-                    if leaf_crumb.is_some() {
-                        button {
-                            class: "row-link",
-                            onclick: move |_| {
-                                if let Some(c) = campaign_for_leafless.clone() {
-                                    nav.set(ResearchNav::Campaign(c));
-                                }
-                            },
-                            "{c}"
-                        }
-                    } else {
-                        span { class: "crumb-current", "{c}" }
-                    }
-                }
-                if let Some(l) = leaf_crumb.clone() {
-                    span { class: "sep", "\u{203a}" }
-                    span { class: "crumb-current", "{l}" }
-                }
-            }
-        }
-    };
-
-    let body = match level {
+    match nav() {
         ResearchNav::Global => {
-            let drives = snap.drives.clone();
             let campaign_rows: Vec<Row> = snap
                 .campaigns
                 .iter()
                 .map(|c| {
-                    let name = c.name.clone();
+                    let pick = c.clone();
                     let shown = campaign_label(c);
-                    let full = c.name.clone();
-                    let label = shown.clone();
                     campaign_row(
                         c,
-                        rsx! { span { title: "{full}",
-                            button {
-                                class: "row-link",
-                                onclick: move |_| nav.set(ResearchNav::Campaign(name.clone())),
-                                "{label}"
+                        rsx! {
+                            button { class: "row-link", title: "{c.namespace}/{c.name}",
+                                onclick: move |_| {
+                                    nav.set(ResearchNav::Campaign {
+                                        namespace: pick.namespace.clone(), name: pick.name.clone(),
+                                    });
+                                    select_resource(selected, manifest_doc, emit, pick.clone());
+                                },
+                                "{shown}"
                             }
-                        } },
+                        },
                         &shown,
                     )
                 })
@@ -1313,45 +1250,38 @@ fn research_view(
             rsx! {
                 div { class: "view-head",
                     h2 { "Research" }
-                    p { "The autonomous loops, their curriculum evidence, and every campaign. Click through: campaign \u{203a} experiment or report." }
+                    p { "Drive evidence and campaigns. Select a campaign to inspect its runs and metrics." }
                 }
-                for d in drives {
-                    div { class: "detail-card",
-                        h3 { "{d.name}" }
-                        p {
-                            span { class: "phase", "{d.phase}" }
-                            span { class: "muted", " created {fmt_ms(&d.created_at)}" }
-                            if let Some(stage) = d.stage.clone() {
-                                span { class: "chip", "stage: {stage}" }
-                            }
-                            span { class: "muted", " stagnation {d.stagnation}" }
-                        }
-                        p { {cond_badges(&d.conditions)} }
-                        for st in d.stages.clone() {
-                            div {
-                                p { class: "muted",
-                                    "{st.name}"
-                                    if let Some(at) = st.promoted_at.clone() {
-                                        " \u{2014} promoted {fmt_rfc3339(&at)}"
-                                    }
-                                }
-                                table { class: "tbl",
-                                    thead { tr { th { "Template" } th { "Best" } th { "Succeeded" } th { "Gate" } } }
-                                    tbody {
-                                        for t in st.templates.clone() {
-                                            tr {
-                                                td { "{t.template_ref}" }
-                                                td { {t.best_objective.map(|b| format!("{b:.3}")).unwrap_or_else(|| "\u{2014}".into())} }
-                                                td { "{t.succeeded}" }
-                                                td {
-                                                    if t.passed {
-                                                        span { class: "cond ok", "passed" }
-                                                    } else {
-                                                        span { class: "cond", "pending" }
-                                                    }
-                                                }
-                                            }
-                                        }
+                if snap.drives.is_empty() { p { class: "muted", "No research drives found." } }
+                for d in &snap.drives {
+                    section {
+                        h3 { "{d.namespace}/{d.name}" }
+                        {metadata_chip("Phase", &d.phase)}
+                        if let Some(stage) = &d.stage { {metadata_chip("Stage", stage)} }
+                        p { class: "muted", "Created {fmt_ms(&d.created_at)} UTC · stagnation {d.stagnation}" }
+                        {cond_badges(&d.conditions)}
+                        for st in &d.stages {
+                            {
+                                let rows: Vec<Row> = st.templates.iter().map(|t| {
+                                    Row::new(&t.template_ref)
+                                        .text(&t.template_ref)
+                                        .num(t.best_objective, t.best_objective.map(|n| format!("{n:.3}")).unwrap_or_else(|| "—".into()))
+                                        .num(Some(t.succeeded as f64), t.succeeded.to_string())
+                                        .cell(metadata_chip("Gate", if t.passed { "passed" } else { "pending" }), Key::text(if t.passed { "passed" } else { "pending" }))
+                                }).collect();
+                                rsx! {
+                                    h4 { "{st.name}" }
+                                    if let Some(at) = &st.promoted_at { p { class: "muted", "Promoted {fmt_rfc3339(at)} UTC" } }
+                                    ConsoleTable {
+                                        id: format!("athena-stage-{}-{}-{}", d.namespace, d.name, st.name),
+                                        columns: vec![
+                                            DataColumnSpec::new("template", "Template").pinned(),
+                                            DataColumnSpec::new("best", "Best").number(),
+                                            DataColumnSpec::new("succeeded", "Succeeded").number(),
+                                            DataColumnSpec::new("gate", "Gate").enumerated(),
+                                        ],
+                                        rows, sort: SortSpec::new("template", SortDir::Asc),
+                                        empty: "No template gate evidence reported.".to_string(),
                                     }
                                 }
                             }
@@ -1360,9 +1290,7 @@ fn research_view(
                 }
                 h3 { "Campaigns" }
                 ConsoleTable {
-                    id: "athena-research-campaigns",
-                    columns: campaign_columns(),
-                    rows: campaign_rows,
+                    id: "athena-research-campaigns", columns: campaign_columns(), rows: campaign_rows,
                     sort: SortSpec::new("created", SortDir::Desc),
                     storage_key: "athena.table.research.campaigns".to_string(),
                     empty: "No campaigns found.".to_string(),
@@ -1370,180 +1298,66 @@ fn research_view(
                 }
             }
         }
-        ResearchNav::Campaign(campaign) => {
-            let camp = snap.campaigns.iter().find(|c| c.name == campaign).cloned();
-            let exps: Vec<ResourceSummary> = snap
-                .experiments
+        ResearchNav::Campaign { namespace, name } => {
+            let camp = snap
+                .campaigns
                 .iter()
-                .filter(|e| e.campaign.as_deref() == Some(campaign.as_str()))
-                .cloned()
-                .collect();
-            let reports: Vec<ReportSummary> = snap
-                .reports
-                .iter()
-                .filter(|r| r.campaign_ref == campaign)
-                .cloned()
-                .collect();
-            let exp_rows: Vec<Row> = exps
-                .into_iter()
+                .find(|c| c.name == name && c.namespace == namespace);
+            let exp_rows: Vec<Row> = snap.experiments.iter()
+                .filter(|e| e.namespace == namespace && e.campaign.as_deref() == Some(name.as_str()))
                 .map(|e| {
-                    let camp = campaign.clone();
                     let pick = e.clone();
-                    let name = e.name.clone();
-                    experiment_row(
-                        &e,
-                        rsx! { span {
-                            button {
-                                class: "row-link",
-                                onclick: move |_| nav.set(ResearchNav::Experiment {
-                                    campaign: camp.clone(),
-                                    exp: pick.clone(),
-                                }),
-                                "{name}"
-                            }
-                        } },
-                        false,
-                    )
-                })
-                .collect();
-            let report_rows: Vec<Row> = reports
-                .into_iter()
-                .map(|r| {
-                    let camp = campaign.clone();
-                    let pick = r.clone();
-                    Row::new(r.name.clone())
-                        .cell(
-                            rsx! { span {
-                                button {
-                                    class: "row-link",
-                                    onclick: move |_| nav.set(ResearchNav::Report {
-                                        campaign: camp.clone(),
-                                        report: pick.clone(),
-                                    }),
-                                    "{r.name}"
-                                }
-                            } },
-                            Key::text(r.name.clone()),
-                        )
-                        .text(r.title.clone())
-                        .text_class(r.phase.clone(), "phase")
-                        .date(&r.created_at)
-                })
-                .collect();
-            rsx! {
-                div { class: "view-head",
-                    h2 { title: "{campaign}", {camp.as_ref().map(campaign_label).unwrap_or_else(|| campaign.clone())} }
-                    if let Some(c) = camp.clone() {
-                        p {
-                            span { class: "phase", "{c.phase}" }
-                            span { class: "muted", " created {fmt_ms(&c.created_at)}" }
-                            if let Some(t) = c.template.clone() { span { class: "chip", "template: {t}" } }
-                            if let Some(st) = c.strategy.clone() { span { class: "chip", "strategy: {st}" } }
-                            span { class: "muted", " {c.detail}" }
+                    experiment_row(e, rsx! {
+                        button { class: "row-link",
+                            onclick: move |_| select_resource(selected, manifest_doc, emit, pick.clone()),
+                            "{e.name}"
                         }
-                        p { {cond_badges(&c.conditions)} }
-                    }
+                    }, false)
+                }).collect();
+            let report_rows: Vec<Row> = snap.reports.iter()
+                .filter(|r| r.namespace == namespace && r.campaign_ref == name)
+                .map(|r| {
+                    let pick = r.clone();
+                    Row::new(format!("{}/{}", r.namespace, r.name)).cell(rsx! {
+                        button { class: "row-link",
+                            onclick: move |_| {
+                                curator::open_report(curator_state, pick.namespace.clone(), pick.name.clone());
+                                restore_panel(emit, Panel::ReportCurator);
+                            }, "{r.name}"
+                        }
+                    }, Key::text(&r.name)).text(&r.title).text_class(&r.phase, "phase").date(&r.created_at)
+                }).collect();
+            rsx! {
+                nav { class: "crumbs", aria_label: "Research breadcrumb",
+                    button { class: "row-link", onclick: move |_| nav.set(ResearchNav::Global), "All research" }
+                    span { aria_hidden: "true", " / " }
+                    span { aria_current: "page", "{namespace}/{name}" }
+                }
+                div { class: "view-head",
+                    h2 { {camp.map(campaign_label).unwrap_or_else(|| name.clone())} }
+                    p { "Runs open in the inspector; reports open in the Report Curator." }
                 }
                 h3 { "Experiments" }
                 ConsoleTable {
-                    id: "athena-research-experiments",
-                    columns: experiment_columns(false),
-                    rows: exp_rows,
+                    id: "athena-research-experiments", columns: experiment_columns(false), rows: exp_rows,
                     sort: SortSpec::new("created", SortDir::Desc),
                     storage_key: "athena.table.research.experiments".to_string(),
                     empty: "No experiments in this campaign.".to_string(),
-                    placeholder: "filter experiments…".to_string(),
                 }
-                if !report_rows.is_empty() {
-                    h3 { "Reports" }
-                    ConsoleTable {
-                        id: "athena-research-reports",
-                        columns: vec![
-                            DataColumnSpec::new("name", "Report").pinned(),
-                            DataColumnSpec::new("title", "Title"),
-                            DataColumnSpec::new("phase", "Phase"),
-                            DataColumnSpec::new("created", "Created").number(),
-                        ],
-                        rows: report_rows,
-                        sort: SortSpec::new("created", SortDir::Desc),
-                    }
+                h3 { "Reports" }
+                ConsoleTable {
+                    id: "athena-research-reports",
+                    columns: vec![
+                        DataColumnSpec::new("name", "Report").pinned(),
+                        DataColumnSpec::new("title", "Title"),
+                        DataColumnSpec::new("phase", "Phase").enumerated(),
+                        DataColumnSpec::new("created", "Created").number(),
+                    ],
+                    rows: report_rows, sort: SortSpec::new("created", SortDir::Desc),
+                    empty: "No reports in this campaign.".to_string(),
                 }
             }
         }
-        ResearchNav::Experiment { exp, .. } => {
-            // Filmstrip via the public Panathenaia BFF. Only robot eval runs
-            // produce one; non-robot experiments (audits, probes) 404, so the
-            // image removes itself instead of rendering a broken icon.
-            let film = format!(
-                "https://spot.casazza.io/api/v1/experiments/{}/figures/eval_filmstrip.png",
-                exp.name
-            );
-            let exp_open = exp.clone();
-            rsx! {
-                div { class: "view-head",
-                    h2 { "{exp.name}" }
-                    p { span { class: "phase", "{exp.phase}" }
-                        if let Some(d) = exp.decision.clone() { span { class: "chip", "{d}" } }
-                        if let Some(t) = exp.template.clone() { span { class: "chip", "template: {t}" } }
-                        if let Some(p) = exp.parent.clone() { span { class: "chip", "parent: {p}" } }
-                        span { class: "muted", " created {fmt_ms(&exp.created_at)} \u{b7} started {fmt_ms(&exp.started_at)} \u{b7} ended {fmt_ms(&exp.ended_at)}" }
-                    }
-                }
-                if let Some(h) = exp.hypothesis.clone() {
-                    p { "{h}" }
-                }
-                img {
-                    class: "filmstrip",
-                    src: "{film}",
-                    alt: "",
-                    "onerror": "this.remove()",
-                }
-                p {
-                    button {
-                        class: "btn",
-                        onclick: move |_| {
-                            let e = exp_open.clone();
-                            selected.set(Some(e.clone()));
-                            restore_detail_panels(emit);
-                            spawn(async move {
-                                match fetch_manifest(&e.namespace, &e.kind, &e.name).await {
-                                    Ok(yaml) => manifest_doc.set(yaml),
-                                    Err(err) => manifest_doc.set(format!("# failed to load manifest: {err}\n")),
-                                }
-                            });
-                        },
-                        "Open detail panels"
-                    }
-                }
-            }
-        }
-        ResearchNav::Report { report, .. } => {
-            let sections: Vec<(String, String)> = report.sections.clone().into_iter().collect();
-            rsx! {
-                div { class: "view-head",
-                    h2 { {if report.title.is_empty() { report.name.clone() } else { report.title.clone() }} }
-                    p { span { class: "phase", "{report.phase}" }
-                        span { class: "muted", " {report.name}" } }
-                }
-                for (heading, text) in sections {
-                    h3 { "{heading}" }
-                    p { "{text}" }
-                }
-                if !report.seeded_hypotheses.is_empty() {
-                    h3 { "Seeded hypotheses" }
-                    ul {
-                        for h in report.seeded_hypotheses.clone() {
-                            li { "{h}" }
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    rsx! {
-        {crumbs}
-        {body}
     }
 }
 
@@ -1557,7 +1371,7 @@ fn reports_view(
         .into_iter()
         .map(|r| {
             let r2 = r.clone();
-            Row::new(r.name.clone())
+            Row::new(format!("{}/{}", r.namespace, r.name))
                 .text(r.name.clone())
                 .text(r.campaign_ref.clone())
                 .text(r.title.clone())
@@ -1593,7 +1407,7 @@ fn reports_view(
                 DataColumnSpec::new("name", "Report").pinned(),
                 DataColumnSpec::new("campaign", "Campaign"),
                 DataColumnSpec::new("title", "Title"),
-                DataColumnSpec::new("phase", "Phase"),
+                DataColumnSpec::new("phase", "Phase").enumerated(),
                 DataColumnSpec::new("created", "Created").number(),
                 DataColumnSpec::new("excluded", "Excluded").number(),
                 DataColumnSpec::new("load", "").pinned().unsorted(),
@@ -1636,7 +1450,7 @@ fn gpu_pools_view(snap: SchedulingSnapshot) -> Element {
                 DataColumnSpec::new("ns", "NS"),
                 DataColumnSpec::new("queue", "Queue"),
                 DataColumnSpec::new("priority", "Priority"),
-                DataColumnSpec::new("state", "State"),
+                DataColumnSpec::new("state", "State").enumerated(),
                 DataColumnSpec::new("gpu", "GPU").number(),
             ],
             sort: SortSpec::new("name", SortDir::Asc),
@@ -1651,7 +1465,7 @@ fn gpu_pools_view(snap: SchedulingSnapshot) -> Element {
                         .text(w.name.clone())
                         .text(w.namespace.clone())
                         .text(w.queue.clone())
-                        .text_class(prio, "phase")
+                        .text(prio)
                         .text(w.state.clone())
                         .cell(rsx! { span { "{w.gpus}" } }, Key::num(w.gpus as f64))
                 })
@@ -1663,67 +1477,65 @@ fn gpu_pools_view(snap: SchedulingSnapshot) -> Element {
 }
 
 fn node_power_view(snap: SchedulingSnapshot) -> Element {
+    let rows = snap
+        .nodes
+        .iter()
+        .map(|n| {
+            Row::new(&n.name)
+                .text(&n.name)
+                .cell(
+                    metadata_chip("Power", if n.powered { "on" } else { "off" }),
+                    Key::text(if n.powered { "on" } else { "off" }),
+                )
+                .text_class(&n.phase, "phase")
+                .text(&n.pool)
+        })
+        .collect::<Vec<_>>();
     rsx! {
-        div { class: "view-head",
-            h2 { "Node Power" }
-            p { "Hephaestus scale-from-zero — physical GPU nodes powered on/off." }
-        }
-        table { class: "tbl",
-            thead {
-                tr {
-                    th { "Node" }
-                    th { "Power" }
-                    th { "Phase" }
-                    th { "Pool" }
-                }
-            }
-            tbody {
-                for n in snap.nodes.iter() {
-                    tr {
-                        td { "{n.name}" }
-                        td { class: "phase", {if n.powered { "● ON" } else { "○ off" }} }
-                        td { "{n.phase}" }
-                        td { "{n.pool}" }
-                    }
-                }
-            }
+        div { class: "view-head", h2 { "Node Power" } p { "Hephaestus physical GPU node state; read-only." } }
+        ConsoleTable {
+            id: "athena-nodes",
+            columns: vec![
+                DataColumnSpec::new("name", "Node").pinned(),
+                DataColumnSpec::new("power", "Power").enumerated(),
+                DataColumnSpec::new("phase", "Phase").enumerated(),
+                DataColumnSpec::new("pool", "Pool").enumerated(),
+            ],
+            rows, sort: SortSpec::new("name", SortDir::Asc),
+            storage_key: "athena.table.nodes".to_string(),
+            empty: "No node power state reported.".to_string(),
         }
     }
 }
 
 fn inference_view(snap: SchedulingSnapshot) -> Element {
-    if snap.inference.is_empty() {
-        return rsx! {
-            div { class: "view-head", h2 { "Inference Backends" } }
-            p { class: "muted",
-                "No ephemeral inference backend active. Campaigns with inferenceMesh / inferenceCluster appear here while serving."
-            }
-        };
-    }
+    let rows = snap
+        .inference
+        .iter()
+        .map(|b| {
+            Row::new(format!("{}/{}", b.campaign, b.kind))
+                .text(&b.campaign)
+                .text(&b.kind)
+                .cell(
+                    metadata_chip("Serving", if b.serving { "serving" } else { "starting" }),
+                    Key::text(if b.serving { "serving" } else { "starting" }),
+                )
+                .text(&b.endpoint)
+        })
+        .collect::<Vec<_>>();
     rsx! {
-        div { class: "view-head",
-            h2 { "Inference Backends" }
-            p { "Ephemeral per-campaign endpoints (mesh-llm / vLLM-on-Ray)." }
-        }
-        table { class: "tbl",
-            thead {
-                tr {
-                    th { "Campaign" }
-                    th { "Kind" }
-                    th { "Serving" }
-                    th { "Endpoint" }
-                }
-            }
-            tbody {
-                for b in snap.inference.iter() {
-                    tr {
-                        td { "{b.campaign}" }
-                        td { "{b.kind}" }
-                        td { class: "phase", {if b.serving { "● serving" } else { "… starting" }} }
-                        td { "{b.endpoint}" }
-                    }
-                }
-            }
+        div { class: "view-head", h2 { "Inference Backends" } p { "Per-campaign mesh / vLLM-on-Ray endpoints; read-only." } }
+        ConsoleTable {
+            id: "athena-inference",
+            columns: vec![
+                DataColumnSpec::new("campaign", "Campaign").pinned(),
+                DataColumnSpec::new("kind", "Kind").enumerated(),
+                DataColumnSpec::new("state", "Serving").enumerated(),
+                DataColumnSpec::new("endpoint", "Endpoint"),
+            ],
+            rows, sort: SortSpec::new("campaign", SortDir::Asc),
+            storage_key: "athena.table.inference".to_string(),
+            empty: "No ephemeral inference backend active. Campaigns appear while serving.".to_string(),
         }
     }
 }

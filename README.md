@@ -11,6 +11,8 @@ Start here:
 - docs/tier3-lean-prover-spec.md — formal theorem proving as auto-RL (design spec)
 - operator/ — Rust kube-rs operator and CRD API crates
 - operator/crates/athena-console/ — Rust/Iced console for watching Athena resources
+- operator/crates/athena-console-web/ — deployed Dioxus browser console + axum BFF
+- [docs/console-ux.md](docs/console-ux.md) — console stories, panel ownership, component inventory and migration rationale
 - examples/ — example Experiment, BenchmarkRun, and ResearchCampaign resources
 - experiments/ — stateless train/eval workload code run by Kubernetes Jobs
 - nix/athena/, modules/k8s/, charts/athena/ — Nix-rendered Helm/manifests (GitOps via Flux)
