@@ -287,6 +287,10 @@ be made without their missing data contract.
   The separate Rust 1.96 verification shell still hits a Dioxus 0.6.3 wasm
   optimizer opcode incompatibility; no optimizer bypass or dependency downgrade
   is used by the production Docker recipe.
+  Browser auth uses JavaScript `Date.now()` for epoch seconds instead of
+  native-only `SystemTime`, which panics on wasm32. The production release
+  bundle renders the enabled-OIDC Sign in control without a browser panic;
+  the complete 70-test console package still passes.
 - Nine live-browser checks and five read-interception fixture checks pass.
   Real resources cover drive evidence, campaign/experiment inspection,
   timestamp graph/rail disclosure, manifest/template loading, all read-only

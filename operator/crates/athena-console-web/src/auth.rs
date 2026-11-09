@@ -213,10 +213,19 @@ pub(crate) fn token_is_fresh(token: &Token, now: u64) -> bool {
 
 /// Current epoch seconds, or 0 if the clock is unavailable.
 pub(crate) fn now_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    #[cfg(target_arch = "wasm32")]
+    {
+        // std::time::SystemTime panics on wasm32-unknown-unknown. OIDC token
+        // expiry needs the browser's epoch clock, not a native-only fallback.
+        (web_sys::js_sys::Date::now() / 1_000.0) as u64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
 }
 
 // ---------------------------------------------------------------------------
