@@ -279,10 +279,18 @@ be made without their missing data contract.
   finds 18 existing athena-api warnings. No blanket lint suppression was added.
 - `dx build --platform web --package athena-console-web --bin athena-console-web`
   bundles the SPA successfully; the native console-server build succeeds.
-  The verification shell supplied Rust 1.96, Dioxus CLI 0.6.3 and wasm-bindgen
-  CLI 0.2.121. The CLI's release wasm optimizer rejects an emitted opcode
-  (`invalid code after misc prefix: 17`); optimized release bundling is not
-  claimed verified. No optimizer bypass or dependency downgrade was committed.
+  `Dockerfile.console` uses Rust 1.89.0 on Debian Bookworm: the pinned panel-kit
+  dependency `serde-saphyr` requires 1.89, so the former 1.88 builder cannot
+  compile this lockfile. The standard Docker release SPA and BFF build succeeds,
+  and the resulting image starts with OIDC enabled as UID 65532 on a read-only
+  filesystem; health, auth discovery and the SPA return HTTP 200.
+  The separate Rust 1.96 verification shell still hits a Dioxus 0.6.3 wasm
+  optimizer opcode incompatibility; no optimizer bypass or dependency downgrade
+  is used by the production Docker recipe.
+  Browser auth uses JavaScript `Date.now()` for epoch seconds instead of
+  native-only `SystemTime`, which panics on wasm32. The production release
+  bundle renders the enabled-OIDC Sign in control without a browser panic;
+  the complete 70-test console package still passes.
 - Nine live-browser checks and five read-interception fixture checks pass.
   Real resources cover drive evidence, campaign/experiment inspection,
   timestamp graph/rail disclosure, manifest/template loading, all read-only
