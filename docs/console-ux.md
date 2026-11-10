@@ -1,11 +1,180 @@
 # Athena Console UX
 
-Last reviewed: 2026-11-09
+Last reviewed: 2026-11-10
 
 This is the canonical story, panel-ownership and component inventory for the
 console. Update it in place when adding or removing a panel. Kubernetes owns
 research state; the console presents observations and edits ResearchReport
 **specs**, never status. A panel needs a story, not merely an available widget.
+
+## Product direction: review evidence while research continues
+
+The confirmed product context lives in [PRODUCT.md](../PRODUCT.md). Athena is
+autoresearch as a Kubernetes-native library: operators and CRDs own research
+and HPC execution, including the user-described SkyPilot/Ray/Kueue scope.
+Campaign projections and ResearchReports make the accumulated evidence useful.
+This is not a generic cluster dashboard or a robotics-only video viewer.
+
+The user selected a **review inbox with autonomous progress alongside it** as
+the primary console job. For Spot, the concrete task is watching a candidate
+walk compared with the **last retained best version for the same task**.
+Human visual review is **advisory or retrospective**: research does not wait
+for a verdict. The research agent takes feedback into consideration according
+to its content; a negative observation has no agreed automatic veto, rollback,
+reward-edit or cancellation meaning.
+
+The console implements a **Review** entry with candidate/reference evidence,
+controller observations and advisory ResearchReport editing. Results is a
+newest-first experiment browser, **not an authoritative required-review queue**:
+admission, urgency and completion policy remain open. Agent-feedback consumption
+and acknowledgment are not implemented by this UI. The sections below distinguish
+the implemented behavior, its data limits and the still-proposed J4 story.
+
+### High-level principles and their interface consequences
+
+| Principle | Concrete consequence | Reject |
+| --- | --- | --- |
+| Design around the human decision. | The default entry answers what merits review and opens its evidence; execution inventories are supporting destinations. | One equally prominent panel or navigation item per CRD. |
+| Put evidence before chrome. | A review centers the candidate and explicit baseline; task identity, machine checks and feedback remain in context. | Requiring users to assemble a comparison by rearranging windows. |
+| Make comparisons trustworthy. | Identify both versions, the task, artifact provenance and relevant evaluation conditions. Flag unavailable or non-comparable evidence; do not silently substitute another baseline. | Calling the newest run an improvement or inferring visual quality from a passing check. |
+| Keep different authorities distinct. | Machine results show their declared check/input context; human observations are attributed judgments; agent interpretations remain distinguishable. Preserve literal controller-owned status. | A single green badge standing for execution health, gate validity, visual quality and human approval. |
+| Make autonomy and intervention explicit. | Research progress remains visible while an item is unreviewed. Any actual steering or promotion action is separate, authorized and explicit. | Treating unreviewed as blocked, or treating feedback submission as a stop/promote/rollback command. |
+| Reveal supporting complexity progressively. | Keep campaign context, metrics and relevant check evidence near the comparison; open manifests, queue admission, node power and detailed traces when needed. | A wall of infrastructure widgets before the user sees the result. |
+| Preserve context and a usable default. | Navigation retains the selected task/candidate/baseline and protects an unsaved feedback/report draft. Desktop comparison uses the available space; compact layouts retain identities and media controls without page overflow. | Requiring layout customization, losing a draft on selection change, or shrinking evidence into a fixed-height remainder. |
+| Preserve identity without encoding truth in color. | Keep Athena's pink/blue roles and consistent panel-kit controls. Explicit text distinguishes selected, failed, unavailable, unreviewed and running. | Another blanket grayscale override or a color-only verdict. |
+
+These are Operate-mode principles: task completion, legibility, trustworthy
+state and familiar controls outrank decoration. Panel-kit supplies shared
+interaction and rendering contracts; it does not determine the information
+architecture. No replacement visual identity is proposed.
+
+### Prioritized job stories
+
+The priorities follow the interview. Acceptance statements are the product
+contract, not claims that every historical resource supplies the required
+artifacts. Implementation and verification boundaries are recorded below.
+Existing R/O/W identifiers remain capability coverage, not the priority order.
+
+| ID / priority | User story | Acceptance and boundary |
+| --- | --- | --- |
+| J1 — primary, confirmed | When I return to autoresearch, I want to find results worth my judgment so I can review useful evidence rather than browse every object. | Reach a candidate's review with task and baseline identity intact. Autonomous progress stays visible. Which results qualify and how they are ordered remain open; do not pretend every completed run requires review. |
+| J2 — primary, confirmed | When I review a Spot candidate, I want to watch it walk against the last retained best for the same task so I can judge visible improvement or regression. | Both artifacts and version labels are available in one comparison context. Playback controls remain usable. State material differences in conditions; show a missing baseline/artifact explicitly. Do not assume synchronized timestamps or interpolate evidence to make it comparable. |
+| J3 — primary, confirmed intent | When I notice a meaningful difference, I want to give the research agent grounded feedback so it can consider that observation in its research. | Bind the observation to the candidate, baseline, task and relevant evidence. Make save/failure/permission state explicit and preserve unsaved work. The minimum form, timestamps/tags and automatic steering semantics are not agreed. Feedback alone is not a machine-gate result or a promotion decision. |
+| J4 — proposed, needs product confirmation | After I give feedback, I want to understand whether and how the agent addressed it so I know the observation was not silently lost. | Link to an agent response or relevant follow-up experiment when a real contract supplies one. Saving a report is not proof that an agent consumed it. No acknowledgment states, service or controller status fields are invented by this brief. |
+| J5 — supporting, confirmed scope | While research runs, I want to understand progress and investigate failures or waiting so I can distinguish research outcomes from execution problems. | Retain machine-check evidence and campaign context; disclose operator-owned Job/Ray/SkyPilot execution and Kueue admission where supported by real APIs. Name actual reasons for waiting. A pending human review is not one of those reasons in this workflow. |
+| J6 — supporting, confirmed scope | When reviewing a body of work, I want to roll campaign evidence and findings into projections and ResearchReports so the research has durable, queryable memory. | Conclusions link back to experiments and evidence; human observations remain distinguishable from measurements. Preserve authorized spec-only writes, dirty drafts and resourceVersion conflict handling. Do not imply a generated summary has been verified or a new projection schema has been agreed. |
+| J7 — supporting, existing capability | When execution context matters, I want to inspect configuration and capacity without losing the research subject I was investigating. | Keep Catalog/Admin and detailed manifests reachable as secondary tools. Do not add imperative deployment controls or claim that the console already launches every execution backend. |
+
+### Implemented information hierarchy
+
+New sessions enter Review. Desktop uses a dominant evidence comparison and a
+smaller Results browser; compact layouts lead with evidence and provide native
+links to choose a candidate and return to the comparison. Existing saved views
+and custom layouts remain intact; Review is added without resetting v5 storage.
+
+1. **Review entry:** a bounded place to find reviewable results, with research
+   progress alongside rather than an equal-weight fleet of resource panels.
+   Admission, grouping, ranking and counts need a defined policy before they
+   can be presented as authoritative.
+2. **Evidence comparison:** selected task and campaign context, candidate versus
+   retained-best evidence, relevant deterministic-check results and a place for
+   grounded feedback. Supporting detail must not displace the comparison.
+3. **Research explanation:** campaign history, hypotheses, metrics and reports,
+   reachable without losing the review subject.
+4. **Execution explanation:** trace, manifest, queue, capacity and backend detail
+   when they explain what happened or why progress stopped.
+5. **Configuration and workspace tools:** secondary destinations. Named layouts
+   and panel customization remain optional, not prerequisites for J1–J3.
+
+The comparison carries campaign snapshot counts, provenance and check evidence.
+Refresh explicitly reloads observations; this change does not claim a Kubernetes
+watch/SSE implementation. Layout reset/save controls are secondary disclosure,
+and supporting panels are retained rather than removed merely to simplify a mock.
+
+### Data contracts and honest capability gaps
+
+- `src/review.rs` owns review selection, retained-reference resolution, paired
+  artifacts and benchmark presentation. The first displayed candidate is pinned
+  rather than silently changing when a refreshed snapshot contains a newer run.
+- The default baseline is the selected candidate's **current campaign-reported
+  incumbent**, in the same namespace, with a `Keep` decision and matching declared
+  template, behavior/robot, objective/goal and benchmark-suite context. These
+  declarations are not proof that evaluator inputs, seeds or budgets match.
+- Campaign status does not retain historical incumbent transitions, and the
+  controller may rewrite old winners to `Discard`. If the candidate is itself
+  the incumbent, do not guess the previous best from dates, scores or row order.
+  The unavailable state is explicit; users may choose a compatible manual
+  reference, labeled as manual rather than historically retained best.
+- A missing or changed manual reference remains unavailable. It never silently
+  falls back to a different incumbent. Object UIDs keep a replaced same-named
+  resource from becoming the selected experiment.
+- The BFF exposes real object UID/resourceVersion, execution image, declared
+  artifact URLs and condition messages. Private workspace paths and
+  credential-bearing URLs are not published as direct browser links. Panathenaia's existing
+  read-only `/api/v1/experiments/{name}/figures/{file}` contract is used only for
+  its `apps` namespace, not another namespace's same-named experiment.
+- Recorded images have paired scale/scroll and full-resolution links; directly
+  published MP4/WebM evidence uses native playback controls. A filmstrip is
+  labeled as frames, never a continuous movie or synchronized sequence.
+  Artifact loading, failure and explicit Retry are visible rather than removing
+  a failed image silently.
+- Declared policy URLs can be opened in the existing Spot gym or requested in
+  isolated embedded players. This is an independent external simulation: the
+  operator must check morphology/environment, the players are not synchronized,
+  and mounting its canvas is not proof of correct policy execution or a controlled
+  benchmark. Non-robotics evidence does not require that renderer.
+- Benchmark gates are controller-published values/thresholds and recorded suite/
+  reproducibility hashes, not a client-created pass. Target kind/namespace/name,
+  creation time and observed generation must agree before results are associated
+  with a run. Missing timestamps or stale generations remain unverified. Hashes
+  identify recorded inputs; the console does not prove evaluator determinism.
+- `src/curator.rs` reuses its Draft, auth/save gate and report API for advisory
+  observations. Report specs include an `Experiment` subject with `Assessing`
+  motivation, candidate inclusion, cited references, captured task/object versions
+  and an Observation section. No experiment status or promotion action is written.
+- An unsaved observation survives selection changes and has tab-scoped session
+  recovery across reload/authentication navigation. A synchronous before-unload
+  flush preserves the latest edit; recovery pins the original reference or
+  standalone context instead of substituting a newer incumbent. A fresh
+  Kubernetes snapshot still validates object identity. The backup is cleared
+  after confirmed save or explicit reversion/discard, not treated as a review
+  ledger or a successful write. Create/update errors retain the draft and expose
+  Retry. A saved version can be compared after an error;
+  keeping the user's observation against that revision is explicit and preserves
+  unrelated latest sections. Changed subject/evidence blocks that merge; saving
+  as a new named report is an explicit alternative. Existing resourceVersion
+  conflict protection remains in force.
+- ResearchReport supplies durable research memory, not a feedback-consumption
+  receipt. Nothing here asserts that the research agent read, accepted or acted
+  on an observation.
+- Durable observations, references and any future consumption evidence belong
+  in Kubernetes-owned research memory. Clients author permitted specs;
+  controllers own observed status. Browser-local state is only transient UI
+  context or a draft, never the authoritative review queue or feedback ledger.
+- The change adds optional, explicitly named BFF projection fields, not CRDs, observed
+  statuses, write endpoints or dependencies. SkyPilot/Ray/Kueue are not claimed
+  to expose identical console data or new launch controls.
+
+### Open decisions; do not fill these with defaults
+
+- Review selection and ranking: every run, new/retained best, anomalies,
+  agent nominations, or another policy. The suggested radio option in a
+  **cancelled** interview round is not a user decision.
+- Review completion: what counts as reviewed, whether dismissal or deferral
+  exists, and when changed candidate/baseline evidence calls for re-review.
+  Opening media or saving feedback does not establish an agreed completion
+  rule; do not invent one in UI state.
+- A second concrete workload: Spot is the example, not permission to hard-code
+  a robotics-only product or invent another workload's review needs.
+- Richer feedback and review scale: the implemented minimum is an Observation
+  text field with captured context. Structured moments/tags, workload volume and
+  time-to-review targets are not established.
+- Agent response/accountability: J4 is a recommendation. Whether an agent must
+  acknowledge feedback, how it links follow-up work and when it may disagree
+  remain unconfirmed.
+- A universal task-equivalence/renderer contract: current matching uses the
+  declarations above, not inferred task semantics or a claimed identical
+  evaluation environment. The existing pink/blue visual identity stays intact.
 
 ## Application and dependency boundary
 
@@ -35,19 +204,19 @@ The consumer does not resolve through that stale fork. The complete canonical
 log was read newest first through `7940325`, including merged histories;
 checking only the personal fork would incorrectly recommend a downgrade.
 
-## User stories and canonical homes
+## Existing capability coverage and canonical homes
 
 | ID | Persona and need | Panel / entry point | Shared components and acceptance |
 | --- | --- | --- | --- |
 | R1 | Researcher: identify a stalled drive and the template gate blocking promotion. | Research, global level | Literal phase/condition `Badge`s and typed `DataTable` per stage. Show objective, succeeded count, gate result, promotion timestamp and stagnation without inventing a gate decision. |
 | R2 | Researcher: inspect a campaign, compare its runs and scope its metrics. | Research campaign breadcrumb → Experiment Detail / Metrics / Manifest / Run Activity | One `DataTable` campaign browser, one member-run table; selecting a campaign scopes Grafana by campaign and actual run window. Breadcrumb returns to the global fleet. |
-| R3 | Researcher: compare experiments across campaigns, sort/filter by outcome and inspect one run. | Experiments view → canonical inspector | `DataTable` typed numeric/enum columns, search, column visibility/persistence, export, keyboard navigation, selected row. Inspector owns hypothesis, timestamps, decision, parent, workspace, links and optional filmstrip. |
+| R3 | Researcher: compare experiments across campaigns, sort/filter by outcome and inspect one run. | Experiments view → canonical inspector; Review for paired evidence | `DataTable` typed numeric/enum columns, search, column visibility/persistence, export, keyboard navigation, selected row. Inspector owns metadata and artifact links; Review owns paired visual evidence instead of duplicating a hard-coded filmstrip renderer. |
 | R4 | Run debugger: inspect observed creation/start/end milestones and their facts. | Run Activity after selecting a run/campaign | Shared `Trace` graph/query/inspector and alternate `TraceRail` for an individual experiment. Only present timestamps become events; unknown terminal outcomes are not success. No fabricated actors, tool calls, token counts or durations. |
 | R5 | Researcher: inspect the selected resource's metrics and manifest without losing selection. | Experiment Metrics / Experiment Manifest | `GrafanaDashboard` scoped by experiment/campaign and start/end with buffer; `IdePanel` local YAML buffer. Editing this buffer does not deploy or write status. |
 | R6 | Scientist: find and review a report, edit its narrative/hypotheses, curate included runs, preview and save without overwriting a concurrent version. | Reports → Report Curator; campaign report rows use the same destination | `DataTable` for reports, dataset, references and status conditions; `Badge` for literal phase/conditions. Existing Dataset/Narrative/Hypotheses/References/Preview/Status tabs, auth, dirty-draft protection, resourceVersion conflict handling and spec-only writes remain. |
 | O1 | Operator: inspect templates, benchmark suites/runs and execution profiles. | Catalog view | `DataTable` for each list and `IdePanel` template YAML. No imperative deployment controls. |
 | O2 | Operator: distinguish queue admission from node power and inference readiness. | Admin → GPU Pools & Queues / Node Power / Inference Backends | `DataTable` for workloads, nodes and endpoints; literal power/serving chips. Pool quota/usage summary remains separate from individual workload rows. Read-only scheduling API. |
-| W1 | Any user: arrange/minimize/maximize panels, switch task views, reset or save a custom layout. | Research / Experiments / Reports / Catalog, dock and frame controls | Shared reducer/frame/dock/chrome and `workspace::panel_element`; host-owned named view persistence. The catalog change uses new v5 layout keys, so removed panels are not restored from older layouts. |
+| W1 | Any user: arrange/minimize/maximize panels, switch task views, reset or save a custom layout. | Review / Research / Experiments / Reports / Catalog, dock and Layout disclosure | Shared reducer/frame/dock/chrome and `workspace::panel_element`; host-owned named view persistence. Existing v5 saved/custom layouts are preserved; new sessions start in Review. |
 
 ### Identity and panel sizing
 
@@ -278,13 +447,21 @@ Public web components are Dioxus painters; neutral models live in
 
 ## Verification contract
 
+For review-first verification, exercise J1–J3 with real or explicitly labeled
+fixture contracts: candidate/reference identity, absent/changed baselines,
+non-comparable conditions, stale benchmark generations, artifact loading/error/
+retry, image scaling, video playback, unsigned writes, draft preservation and
+create/update conflict recovery. Do not turn report-save success into a J4
+agent acknowledgment. Keep actual Kubernetes, OIDC and external-renderer
+integration claims separate from intercepted fixture-write assertions.
+
 Build the deployed SPA with Dioxus CLI 0.6.3 (`dx build --platform web --release`)
 and the native BFF with `cargo build -p athena-console-web --features server
 --bin console-server`. Run the complete web package tests with `--features
 server` and clippy for all its targets. Do not weaken or re-pin existing tests.
 
 For browser verification, serve the actual built bundle with console-server;
-intercept read API requests with clearly labeled fixture DTOs rather than
+use clearly labeled read fixtures and intercept fixture writes rather than
 mutating Kubernetes or adding a durable fixture-state service. Exercise R1–W1,
 empty/error/loading states, run selection and trace expansion, report tabs,
 Catalog/Admin, named-view persistence, and a constrained viewport. Save screenshots
@@ -292,7 +469,45 @@ and text captures outside the repository; distinguish fixture rendering proof
 from live OIDC/Grafana/Kubernetes integration. No claim about agent traces can
 be made without their missing data contract.
 
-### Cutover evidence and limits
+### Review-first implementation evidence (2026-11-10)
+
+- `cargo test --locked -p athena-console-web --features server`: 62 library
+  and 17 server/auth tests pass, including retained/manual reference boundaries,
+  namespace/task/object-identity mismatches, stale benchmark generations,
+  credential/private-path exclusion and concurrent observation-merge protection.
+- The native server and Dioxus 0.6.3 browser bundle build. The complete
+  `Dockerfile.console` production recipe also builds on Rust 1.89/Bookworm from
+  a tracked-source archive plus the implementation files, without local caches,
+  kubeconfig or unrelated workspace files in the image context.
+- Seventeen browser fixture scenarios pass, including a repeat against the
+  production image: paired evidence, native selection, image scale, benchmark
+  freshness, missing artifacts/references, empty-observation blocking, draft
+  preservation, comparative and standalone reload recovery including the latest
+  edit, create conflict, explicit update recovery preserving a concurrent
+  section, native video decode/playback and desktop/compact layout. All four
+  fixture report writes were intercepted;
+  fixture auth was disabled only in the intercepted fixture config, never in
+  the actual preview or cluster.
+- Four captured report references have matching narrative citations. No
+  Kubernetes research objects, report specs or observed statuses were mutated
+  for verification.
+- Fourteen real-data UI/API checks pass against the read-only cluster snapshot
+  (402 experiments, 68 campaigns at verification), including actual object
+  identities/manual reference, OIDC-enabled unsigned-write blocking, secondary
+  views/Admin and bounded evidence-first compact layout. Two declared-policy
+  frames mount canvases and finish the external WASM loading state; this does
+  not establish policy compatibility, active inference or evaluation quality.
+- Historical declared evaluation-frame URLs can return missing artifacts.
+  Missing media, unknown task declarations and absent incumbent history are
+  presented explicitly, not replaced with fixture content or a guessed winner.
+- Screenshots and browser reports are outside the repository under
+  `/tmp/athena-review-*`. The labeled fixture comparison is rendering/interaction
+  evidence, not a recorded robot measurement or a deployed-release claim.
+- Delegated investigation/implementation models were unavailable. The fallback
+  was inline implementation, manual consistency review and actual browser
+  verification; no independent LLM review approval is claimed.
+
+### Historical migration evidence and limits (`221f0a3`)
 
 - `cargo test -p athena-console-web --features server`: 55 frontend/model tests
   and 15 BFF/auth tests pass, including timestamp overflow/unknown-outcome and

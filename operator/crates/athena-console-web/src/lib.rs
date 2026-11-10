@@ -6,15 +6,13 @@
 //!
 //! - a Dioxus **frontend** (this crate's lib + default bin) where every console
 //!   view is a panel-kit [`Panel`], and
-//! - a tiny axum **backend** (`src/bin/server.rs`, `server` feature) that reuses
-//!   `athena-api` + `kube` to serve the [`models`] DTOs as JSON.
+//! - a tiny axum **backend** (`src/bin/console-server/main.rs`, `server`
+//!   feature) that projects Kubernetes resources into [`models`] DTOs.
 //!
-//! The headline view, [`Panel::ExperimentDetail`], embeds the learning-metric
-//! Grafana dashboard via [`panel_kit::grafana::GrafanaDashboard`] and the
-//! manifest editor via [`panel_kit::ide::IdePanel`]. (Its sibling
-//! [`panel_kit::grafana::GrafanaPanel`] embeds one `/d-solo/` chart — unusable
-//! here until the dashboard's panel ids are pinned in nixlab, since
-//! provisioning reassigns them.)
+//! Review is the default human workflow: compare a candidate with a real
+//! retained reference, inspect evidence and record advisory research feedback.
+//! Existing research, metric, manifest, report and operator tools remain
+//! supporting destinations; the console never owns execution status.
 
 mod activity;
 mod api;
@@ -22,6 +20,7 @@ mod auth;
 mod auth_flow;
 mod curator;
 pub mod models;
+mod review;
 mod tables;
 mod workspace;
 
@@ -41,6 +40,7 @@ use panel_kit_core::PanelCommand;
 use panel_kit_core::reducer::WorkspaceEvent;
 use panel_kit_core::widgets::data_table::SortDir;
 use serde::{Deserialize, Serialize};
+use std::{cell::RefCell, rc::Rc};
 use tables::{
     ConsoleTable, DataRow as Row, SortKey as Key, campaign_columns, campaign_row,
     experiment_columns, experiment_row, fmt_ms,
@@ -65,6 +65,10 @@ const GRAFANA_DASHBOARD_UID: &str = "athena-research-runs";
 /// native console's `selected_resource` field).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Panel {
+    /// Browse evidence without inventing a required-review queue.
+    ReviewResults,
+    /// Candidate/reference evidence and advisory ResearchReport feedback.
+    ReviewEvidence,
     /// Experiment list (the native `View::Experiments`).
     Experiments,
     /// Metadata for the selected experiment (phase, namespace, workspace…).
@@ -96,6 +100,8 @@ pub enum Panel {
 impl PanelKind for Panel {
     fn title(self) -> &'static str {
         match self {
+            Panel::ReviewResults => "Results",
+            Panel::ReviewEvidence => "Evidence review",
             Panel::Experiments => "Experiments",
             Panel::ExperimentDetail => "Experiment Detail",
             Panel::ExperimentMetrics => "Experiment Metrics",
@@ -146,6 +152,8 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
         960.0,
         4,
         &[
+            (Panel::ReviewResults, 640.0),
+            (Panel::ReviewEvidence, 640.0),
             (Panel::Research, 640.0),
             (Panel::Experiments, 460.0),
             (Panel::ExperimentDetail, 360.0),
@@ -168,6 +176,14 @@ fn default_layout() -> Vec<PanelWin<Panel>> {
 static RESEARCH_VIEWS: ViewsSpec<Panel> = ViewsSpec {
     base: "athena_console_web_v5",
     presets: &[
+        ViewPreset {
+            name: "Review",
+            mode: Mode::Tiling,
+            panels: &[
+                (Panel::ReviewEvidence, 3, 5),
+                (Panel::ReviewResults, 1, 5),
+            ],
+        },
         ViewPreset {
             name: "Research",
             mode: Mode::Tiling,
@@ -245,6 +261,9 @@ fn view_bar(
                     }
                 }
             }
+            details { class: "workspace-tools",
+                summary { "Layout" }
+                div { class: "workspace-tools-body",
             button {
                 class: "btn",
                 title: "restore this view's panels and layout",
@@ -274,6 +293,8 @@ fn view_bar(
             }
             if !err.read().is_empty() {
                 span { class: "err", "{err}" }
+            }
+                }
             }
         }
     }
@@ -438,14 +459,60 @@ a { color:var(--color-secondary); }
   font-family:var(--mono); margin:.1rem 0 .6rem; }
 .pk-dt .date { white-space:nowrap; color:var(--color-text-muted); }
 .pk-dt td .row-link { max-width:100%; white-space:normal; overflow-wrap:anywhere; display:inline-block; vertical-align:middle; }
-.filmstrip { width:100%; margin:.2rem 0; border:1px solid var(--color-border); }
 .crumb-current { color:var(--color-text); }
+.workspace-tools { position:relative; margin-left:auto; }
+.review-figure video { display:block; width:100%; min-height:8rem; max-height:28rem; background:var(--color-background); }
+.workspace-tools summary { cursor:pointer; min-height:var(--hit-min); padding:.1rem .45rem; border:1px solid var(--color-border); }
+.workspace-tools-body { position:absolute; right:0; top:100%; z-index:100; display:flex; flex-wrap:wrap; gap:.4rem; padding:.6rem; width:min(28rem,85vw); background:var(--color-surface); border:1px solid var(--color-border); }
+.panel-results .panel-body { display:flex; flex-direction:column; overflow:hidden; }
+.panel-evidence-review .panel-body { overflow:auto; }
+.review-workflow { min-width:0; padding:.35rem; display:flex; flex-direction:column; gap:.85rem; font-size:var(--body-size); }
+.review-heading { display:flex; align-items:start; justify-content:space-between; gap:1rem; flex-wrap:wrap; }
+.review-heading h2 { font-size:1.15rem; margin:0 0 .35rem; }
+.review-heading p, .review-feedback p { margin:.3rem 0; line-height:1.5; }
+.review-actions, .review-progress, .review-observations, .review-replay-actions { display:flex; align-items:center; flex-wrap:wrap; gap:.45rem; }
+.review-progress { padding:.5rem 0; border-top:1px solid var(--color-divider); border-bottom:1px solid var(--color-divider); }
+.review-reference-label { display:flex; flex-direction:column; gap:.35rem; min-width:0; }
+.review-reference-label select { max-width:100%; min-width:0; }
+.review-scale { display:flex; align-items:center; flex-wrap:wrap; gap:.5rem; }
+.review-scale select { width:auto; max-width:100%; }
+.review-row-context { display:block; color:var(--color-text-muted); font-size:.75rem; overflow-wrap:anywhere; line-height:1.5; }
+.review-pair { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1rem; align-items:start; }
+.review-evidence { min-width:0; display:flex; flex-direction:column; gap:.6rem; }
+.review-evidence h3 { margin:0; font-size:1rem; }
+.review-run-name { margin:0; font-weight:600; overflow-wrap:anywhere; line-height:1.5; }
+.review-notice, .review-artifact-missing { padding:.6rem; border:1px solid var(--color-border); margin:0; line-height:1.5; overflow-wrap:anywhere; }
+.review-artifact-missing { min-height:10rem; display:flex; flex-direction:column; justify-content:center; gap:.6rem; }
+.review-figure { margin:0; min-width:0; }
+.review-figure img { display:block; width:100%; height:auto; background:var(--color-background); }
+.review-media-frame { overflow:auto; max-height:28rem; min-width:0; }
+.review-artifact-loading { min-height:8rem; padding:.6rem; }
+.review-figure figcaption { font-size:.75rem; color:var(--color-text-muted); line-height:1.5; margin-top:.3rem; }
+.review-policy { display:block; width:100%; height:28rem; border:1px solid var(--color-border); }
+.review-hypothesis { margin:0; line-height:1.5; overflow-wrap:anywhere; }
+.review-facts { margin:0; }
+.review-checks { min-width:0; }
+.review-checks summary { cursor:pointer; min-height:var(--hit-min); padding:.3rem 0; }
+.review-checks .pk-dt { height:auto; max-height:16rem; }
+.review-checks .pk-dt-scroll { max-height:12rem; }
+.review-feedback { border-top:1px solid var(--color-divider); padding-top:.8rem; display:flex; flex-direction:column; gap:.5rem; min-width:0; }
+.review-feedback h3 { margin:0; font-size:1rem; }
+.review-feedback .rc-textarea { min-height:7rem; font-family:inherit; }
+.review-feedback .cur-footer { position:static; }
+.review-feedback details p { white-space:pre-wrap; overflow-wrap:anywhere; }
 @media(max-width:700px) {
   .topbar { flex-wrap:wrap; gap:.5rem; }
+  .topbar { position:relative; }
+  .topbar h1 { min-height:var(--hit-min); display:flex; align-items:center; }
+  .workspace-tools { position:absolute; top:.4rem; right:.75rem; margin:0; }
+  .workspace-tools-body { position:fixed; top:3.6rem; left:.75rem; right:.75rem; width:auto; }
   .views { flex-basis:100%; flex-wrap:wrap; overflow:visible; }
   .cur-tabs { flex-wrap:wrap; }
   .cur-name, .cur-title { width:100%; flex-basis:100%; }
   .detail-grid { grid-template-columns:1fr; }
+  .review-pair { grid-template-columns:minmax(0,1fr); }
+  .review-workflow { padding:.6rem; }
+  .review-policy { height:24rem; }
 }
 ";
 
@@ -484,14 +551,61 @@ pub fn App() -> Element {
     // Scheduling/inference stack snapshot for the admin page.
     let sched = use_resource(move || async move { fetch_scheduling().await });
 
+    let pending = use_hook(|| Rc::new(RefCell::new(review::restore_pending())));
     // External selection state for the data-less ExperimentDetail panel.
-    let selected = use_signal(|| Option::<ResourceSummary>::None);
+    let selected = use_signal({
+        let pending = pending.clone();
+        move || pending.borrow_mut().selected.take()
+    });
     // Editable manifest / template documents for the IdePanels.
     let manifest_doc = use_signal(|| "# Select an experiment to load its manifest.\n".to_string());
     let template_doc = use_signal(|| "# Load a template to view its YAML.\n".to_string());
 
     // Report Curator state (draft, loaded report, tab, save outcome).
     let curator_state = use_signal(curator::CuratorState::default);
+    let review_feedback = use_signal({
+        let pending = pending.clone();
+        move || {
+            let mut pending = pending.borrow_mut();
+            curator::CuratorState {
+                loaded: pending.loaded.take(),
+                pinned_campaign: pending.pinned_campaign.take(),
+                base: std::mem::take(&mut pending.base),
+                draft: std::mem::take(&mut pending.draft),
+                ..Default::default()
+            }
+        }
+    });
+    let review_feedback_subject = use_signal({
+        let pending = pending.clone();
+        move || pending.borrow_mut().subject.take()
+    });
+    let review_reference = use_signal(move || pending.borrow_mut().reference.take());
+    use_effect(move || review::preserve_pending(
+        &review_feedback.read(),
+        selected.read().as_ref(),
+        review_reference.read().as_ref(),
+        review_feedback_subject.read().as_deref(),
+        snapshot.read().as_ref().and_then(|value| value.as_ref().ok()),
+    ));
+    review::use_pending_flush(review_feedback, selected, review_reference, review_feedback_subject, snapshot);
+    // Pin the initial presentation selection once. A later refresh must not
+    // silently move the comparison to a newly-created run.
+    use_effect(move || {
+        if let Some(Ok(snap)) = &*snapshot.read() {
+            let next = {
+                let current = selected.peek();
+                match current.as_ref() {
+                    None => review::candidate(snap, None).cloned(),
+                    Some(current) if current.kind == "experiment" => review::candidate(snap, Some(current)).cloned(),
+                    _ => None,
+                }
+            };
+            if let Some(run) = next {
+                load_resource(selected, manifest_doc, run);
+            }
+        }
+    });
 
     // Research drill-down navigation. `Panel` variants carry no data (PanelKind
     // is Copy), so the current depth — global fleet, one campaign, one
@@ -504,6 +618,7 @@ pub fn App() -> Element {
     // only hits auth when it tries to write a ResearchReport.
     let auth_state = use_resource(|| async { resolve_auth_phase().await });
 
+    let review_ws = ws.clone();
     let body = move |kind: Panel, _maximized: bool| -> Element {
         let snap = snapshot.read();
         let snap = match &*snap {
@@ -511,12 +626,42 @@ pub fn App() -> Element {
                 return rsx! { p { class: "muted", "Loading Athena resources…" } };
             }
             Some(Err(e)) => {
-                return rsx! { p { class: "err", "Failed to load snapshot: {e}" } };
+                return rsx! {
+                    div { role: "alert",
+                        p { class: "err", "Failed to load resources: {e}" }
+                        button { class: "btn", onclick: move |_| snapshot.restart(), "Retry resources" }
+                    }
+                };
             }
             Some(Ok(snap)) => snap.clone(),
         };
 
         match kind {
+            Panel::ReviewResults => review::results_view(snap, selected),
+            Panel::ReviewEvidence => {
+                let inspect_ws = review_ws.clone();
+                let campaign_ws = review_ws.clone();
+                rsx! {
+                    review::ReviewEvidence {
+                        snap,
+                        selected,
+                        reference: review_reference,
+                        feedback: review_feedback,
+                        feedback_subject: review_feedback_subject,
+                        auth: read_phase(&auth_state.read()),
+                        on_saved: move |_| snapshot.restart(),
+                        on_inspect: move |run| {
+                            inspect_ws.switch_view("Experiments");
+                            select_resource(selected, manifest_doc, ws_emit, run);
+                        },
+                        on_campaign: move |(namespace, name)| {
+                            let mut nav = research_nav;
+                            nav.set(ResearchNav::Campaign { namespace, name });
+                            campaign_ws.switch_view("Research");
+                        },
+                    }
+                }
+            }
             Panel::Experiments => experiments_view(snap, ws_emit, selected, manifest_doc),
             Panel::ExperimentDetail => experiment_detail_view(selected),
             Panel::ExperimentMetrics => experiment_metrics_view(selected),
@@ -651,6 +796,7 @@ pub fn App() -> Element {
                 header { class: "topbar",
                     h1 { "Athena Console" }
                     {view_bar(&ws, view_draft, view_err)}
+                    button { class: "btn", title: "Reload controller-owned resource snapshots", onclick: move |_| snapshot.restart(), "Refresh" }
                     {auth_bar(&read_phase(&auth_state.read()))}
                     button { class: "btn admin-toggle", onclick: move |_| admin.set(true), "Admin" }
                 }
@@ -927,13 +1073,8 @@ fn experiment_detail_view(selected: Signal<Option<ResourceSummary>>) -> Element 
         if let Some(url) = &exp.metrics_link {
             a { href: "{url}", target: "_blank", rel: "noopener noreferrer", "Open metrics" }
         }
-        if exp.kind == "experiment" {
-            img {
-                class: "filmstrip",
-                src: "https://spot.casazza.io/api/v1/experiments/{exp.name}/figures/eval_filmstrip.png",
-                alt: "Evaluation filmstrip for {exp.name}",
-                "onerror": "this.remove()",
-            }
+        if let Some(url) = &exp.figures_url {
+            a { href: "{url}", target: "_blank", rel: "noopener noreferrer", "Open evaluation artifact" }
         }
     }
 }
@@ -962,17 +1103,31 @@ fn time_range(sel: &ResourceSummary) -> (String, String) {
 /// Select a resource from the experiment table or campaign browser, then
 /// open its single inspector, metrics, manifest and activity destinations.
 fn select_resource(
-    mut selected: Signal<Option<ResourceSummary>>,
-    mut manifest_doc: Signal<String>,
+    selected: Signal<Option<ResourceSummary>>,
+    manifest_doc: Signal<String>,
     emit: EventHandler<WorkspaceEvent<Panel>>,
     r: ResourceSummary,
 ) {
-    selected.set(Some(r.clone()));
     restore_detail_panels(emit);
+    load_resource(selected, manifest_doc, r);
+}
+
+fn load_resource(
+    mut selected: Signal<Option<ResourceSummary>>,
+    mut manifest_doc: Signal<String>,
+    r: ResourceSummary,
+) {
+    selected.set(Some(r.clone()));
+    manifest_doc.set(format!("# Loading {}/{}…\n", r.namespace, r.name));
     spawn(async move {
-        match fetch_manifest(&r.namespace, &r.kind, &r.name).await {
-            Ok(yaml) => manifest_doc.set(yaml),
-            Err(err) => manifest_doc.set(format!("# failed to load manifest: {err}\n")),
+        let result = fetch_manifest(&r.namespace, &r.kind, &r.name).await;
+        if selected.peek().as_ref().is_some_and(|current| {
+            current.namespace == r.namespace && current.name == r.name && current.uid == r.uid
+        }) {
+            manifest_doc.set(match result {
+                Ok(yaml) => yaml,
+                Err(err) => format!("# failed to load manifest: {err}\n"),
+            });
         }
     });
 }

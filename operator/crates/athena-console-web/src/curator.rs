@@ -81,7 +81,7 @@ impl Tab {
 }
 
 /// Editable report content. Compared against the loaded base for dirtiness.
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Draft {
     pub name: String,
     pub title: String,
@@ -190,6 +190,8 @@ pub struct CuratorState {
     pub tab: Tab,
     pub preview: Option<Result<String, String>>,
     pub save: SaveState,
+    /// Read-only conflict comparison; never replaces an unsaved draft itself.
+    pub latest_saved: Option<ReportDetailDto>,
 }
 
 impl CuratorState {
@@ -203,6 +205,7 @@ impl CuratorState {
         self.draft = Draft::default();
         self.preview = None;
         self.save = SaveState::Idle;
+        self.latest_saved = None;
         self.tab = Tab::Dataset;
     }
 
@@ -213,6 +216,7 @@ impl CuratorState {
         self.loaded = Some(detail);
         self.preview = None;
         self.save = SaveState::Idle;
+        self.latest_saved = None;
     }
 }
 
@@ -246,6 +250,300 @@ fn effective_campaign(
         _ => {}
     }
     nav_campaign.map(String::from)
+}
+
+/// Prepare the existing report draft model; never invent a review verdict or
+/// overwrite another unsaved observation when the comparison changes.
+fn observation_draft(
+    candidate: &ResourceSummary,
+    baseline: Option<&ResourceSummary>,
+) -> Result<Draft, String> {
+    let uid = candidate
+        .uid
+        .as_deref()
+        .ok_or("Candidate UID is not reported; refresh before recording feedback.")?;
+    if candidate.campaign.is_none() {
+        return Err("An owning campaign is required to record a ResearchReport.".into());
+    }
+    if let Some(baseline) = baseline
+        && (!crate::review::same_task(candidate, baseline) || baseline.uid.is_none())
+    {
+        return Err(
+            "The reference must have a Kubernetes identity and matching declared task.".into(),
+        );
+    }
+    let reference = baseline
+        .and_then(|b| b.uid.as_deref())
+        .unwrap_or("standalone");
+    let name = format!(
+        "review-{uid}-{}",
+        reference.chars().take(8).collect::<String>()
+    );
+    let mut context = String::from(
+        "Advisory research observation. This report does not approve, block, promote, roll back or cancel execution. Agent consumption is not established by saving it.\n",
+    );
+    let mut references = Vec::new();
+    for (key, run) in
+        std::iter::once(("candidate", candidate)).chain(baseline.map(|b| ("reference", b)))
+    {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            context,
+            "\n{key}: {}/{} [@{key}]\nUID: {}\nresourceVersion: {}\nTask: {} / {} / {}\nRuntime image: {}",
+            run.namespace,
+            run.name,
+            run.uid.as_deref().unwrap_or("not reported"),
+            run.resource_version.as_deref().unwrap_or("not reported"),
+            run.template.as_deref().unwrap_or("not reported"),
+            run.robot.as_deref().unwrap_or("not reported"),
+            run.mode.as_deref().unwrap_or("not reported"),
+            run.image.as_deref().unwrap_or("not reported")
+        );
+        references.push(serde_json::json!({
+            "key": key,
+            "title": format!("{key}: {}/{}", run.namespace, run.name),
+            "url": run.manifest_path(),
+            "supports": format!("Object UID {}, resourceVersion {}", run.uid.as_deref().unwrap_or("not reported"), run.resource_version.as_deref().unwrap_or("not reported"))
+        }));
+        for (kind, url) in [
+            ("evaluation", &run.figures_url),
+            ("policy", &run.policy_url),
+        ] {
+            if let Some(url) = url {
+                let _ = writeln!(context, "{kind} evidence: {url} [@{key}-{kind}]");
+                references.push(serde_json::json!({
+                    "key": format!("{key}-{kind}"),
+                    "title": format!("{key} {kind} evidence"),
+                    "url": url,
+                    "supports": "Evidence associated with this advisory observation"
+                }));
+            }
+        }
+    }
+    if baseline.is_none() {
+        context.push_str("\nNo comparison baseline was available or selected; this is a standalone observation.\n");
+    }
+    Ok(Draft {
+        name,
+        title: format!("Advisory observation: {}", candidate.name),
+        sections: vec![
+            ("Observation".into(), String::new()),
+            ("Review context".into(), context),
+        ],
+        included: vec![candidate.name.clone()],
+        about: serde_json::json!({"kind":"Experiment","name":candidate.name,"motivation":"Assessing"}),
+        references: serde_json::Value::Array(references),
+        ..Default::default()
+    })
+}
+
+fn merge_observation(
+    ours: &Draft,
+    latest: &ReportDetailDto,
+    namespace: &str,
+    campaign: &str,
+) -> Result<Draft, &'static str> {
+    let context = ours
+        .sections
+        .iter()
+        .find(|(key, _)| key == "Review context")
+        .map(|(_, text)| text);
+    if latest.spec.namespace != namespace
+        || latest.spec.campaign_ref != campaign
+        || latest.spec.name != ours.name
+        || latest.spec.about != ours.about
+        || latest.spec.references != ours.references
+        || latest.spec.sections.get("Review context") != context
+    {
+        return Err(
+            "The saved report's subject or evidence changed. Preserve this observation as a separate report instead of overwriting that context.",
+        );
+    }
+    let observation = ours
+        .sections
+        .iter()
+        .find(|(key, _)| key == "Observation")
+        .map(|(_, text)| text.clone())
+        .ok_or("The draft has no observation.")?;
+    let mut merged = Draft::from_detail(latest);
+    if let Some((_, text)) = merged
+        .sections
+        .iter_mut()
+        .find(|(key, _)| key == "Observation")
+    {
+        *text = observation;
+    } else {
+        merged.sections.push(("Observation".into(), observation));
+    }
+    Ok(merged)
+}
+
+fn observation_recovery(
+    mut state: Signal<CuratorState>,
+    st: &CuratorState,
+    namespace: &str,
+    campaign: &str,
+) -> Element {
+    let SaveState::Failed(message) = &st.save else {
+        return rsx! {};
+    };
+    let namespace = namespace.to_string();
+    let compare_namespace = namespace.clone();
+    let campaign = campaign.to_string();
+    let name = st.draft.name.clone();
+    let original_error = message.clone();
+    rsx! {
+        div { class: "review-recovery",
+            p { "Your observation is preserved. Compare with the saved report before replacing a concurrent version, or give this draft a new report name." }
+            button {
+                class: "btn",
+                onclick: move |_| {
+                    let namespace = compare_namespace.clone();
+                    let name = name.clone();
+                    let original_error = original_error.clone();
+                    state.write().save = SaveState::Busy("loading saved report…");
+                    spawn(async move {
+                        match crate::fetch_report_detail(&namespace, &name).await {
+                            Ok(detail) => {
+                                let mut st = state.write();
+                                st.latest_saved = Some(detail);
+                                st.save = SaveState::Failed(original_error);
+                            }
+                            Err(error) => state.write().save = SaveState::Failed(format!("Saved report could not be loaded: {error}")),
+                        }
+                    });
+                },
+                "Compare with saved report"
+            }
+            button {
+                class: "btn",
+                onclick: move |_| {
+                    let mut st = state.write();
+                    st.loaded = None;
+                    st.base = Draft::default();
+                    st.draft.name.clear();
+                    st.latest_saved = None;
+                    st.save = SaveState::Idle;
+                },
+                "Save draft as a new report"
+            }
+            if let Some(latest) = &st.latest_saved {
+                p { "Saved {latest.spec.namespace}/{latest.spec.name} · version {latest.spec.resource_version.as_deref().unwrap_or(\"not reported\")}" }
+                pre { class: "preview", "{latest.spec.sections.get(\"Observation\").map(String::as_str).unwrap_or(\"No saved observation section\")}" }
+                p { "Keeping your observation replaces only the Observation section on the next save. Other fields from the latest report are retained." }
+                button {
+                    class: "btn",
+                    onclick: move |_| {
+                        let mut st = state.write();
+                        let Some(latest) = st.latest_saved.as_ref() else { return; };
+                        let merged = match merge_observation(&st.draft, latest, &namespace, &campaign) {
+                            Ok(merged) => merged,
+                            Err(reason) => { st.save = SaveState::Failed(reason.into()); return; }
+                        };
+                        if let Some(latest) = st.latest_saved.take() {
+                            st.open(latest);
+                            st.draft = merged;
+                        }
+                    },
+                    "Keep my observation; use latest revision"
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn review_feedback_view(
+    mut state: Signal<CuratorState>,
+    mut subject: Signal<Option<String>>,
+    candidate: &ResourceSummary,
+    baseline: Option<&ResourceSummary>,
+    on_saved: EventHandler<()>,
+    auth: &crate::auth_flow::Phase,
+) -> Element {
+    let key = format!(
+        "{}|{}",
+        crate::review::identity(candidate),
+        baseline.map(crate::review::identity).unwrap_or_default()
+    );
+    let st = state.read().clone();
+    let active = subject.read().as_deref() == Some(key.as_str());
+    if !active {
+        if st.dirty() || matches!(st.save, SaveState::Busy(_)) {
+            return rsx! {
+                section { class: "review-feedback",
+                    h3 { "Unsaved advisory observation" }
+                    p { "The draft for “{st.draft.title}” is preserved. Return to its candidate/reference to finish it, or explicitly discard it before starting another." }
+                    details { summary { "Draft context" }
+                        for (heading, text) in &st.draft.sections {
+                            p { "{heading}: {text}" }
+                        }
+                    }
+                    button {
+                        class: "btn", disabled: matches!(st.save, SaveState::Busy(_)),
+                        onclick: move |_| { state.write().start_new(); subject.set(None); },
+                        "Discard unsaved observation"
+                    }
+                }
+            };
+        }
+        let draft = match observation_draft(candidate, baseline) {
+            Ok(draft) => draft,
+            Err(reason) => return rsx! { p { class: "review-notice", "{reason}" } },
+        };
+        let campaign_name = candidate.campaign.clone();
+        return rsx! {
+            section { class: "review-feedback",
+                h3 { "Advisory feedback" }
+                p { "Record what you observed in a ResearchReport. Research keeps running; saving is not proof that an agent considered the finding." }
+                button {
+                    class: "btn",
+                    onclick: move |_| {
+                        let mut st = state.write();
+                        st.start_new();
+                        st.pinned_campaign = campaign_name.clone();
+                        st.draft = draft.clone();
+                        subject.set(Some(key.clone()));
+                    },
+                    "Write an observation"
+                }
+            }
+        };
+    }
+    let observation = st
+        .draft
+        .sections
+        .iter()
+        .find(|(k, _)| k == "Observation")
+        .map(|(_, text)| text.clone())
+        .unwrap_or_default();
+    let problem = observation
+        .trim()
+        .is_empty()
+        .then(|| "Write an observation before saving.".to_string());
+    let Some(campaign) = candidate.campaign.as_deref() else {
+        return rsx! { p { class: "review-notice", "The owning campaign is not available." } };
+    };
+    rsx! {
+        section { class: "review-feedback",
+            h3 { "Advisory observation" }
+            label { r#for: "review-observation", "What improved, regressed, or deserves investigation?" }
+            textarea {
+                id: "review-observation", class: "rc-textarea",
+                value: observation,
+                oninput: move |event| {
+                    if let Some((_, text)) = state.write().draft.sections.iter_mut().find(|(k, _)| k == "Observation") {
+                        *text = event.value();
+                    }
+                },
+            }
+            p { class: "muted", "Candidate, reference, object versions and evidence links are captured in the report. This is not an execution gate." }
+            {footer(state, &st, &candidate.namespace, campaign, on_saved, auth, problem)}
+            {observation_recovery(state, &st, &candidate.namespace, campaign)}
+            if matches!(st.save, SaveState::Done(_)) && !st.dirty() {
+                p { class: "muted", "Saved as Kubernetes research memory. No agent-consumption acknowledgment or execution change is implied." }
+            }
+        }
+    }
 }
 
 pub fn curator_view(
@@ -427,7 +725,7 @@ pub fn curator_view(
             {chooser}
             {tabs}
             div { class: "cur-body", {body} }
-            {footer(state, &st, &campaign, on_saved, &auth)}
+            {footer(state, &st, &campaign.namespace, &campaign.name, on_saved, &auth, None)}
         }
     }
 }
@@ -711,9 +1009,11 @@ fn status_tab(st: &CuratorState) -> Element {
 fn footer(
     mut state: Signal<CuratorState>,
     st: &CuratorState,
-    campaign: &ResourceSummary,
+    namespace: &str,
+    campaign_name: &str,
     on_saved: EventHandler<()>,
     auth: &crate::auth_flow::Phase,
+    additional_problem: Option<String>,
 ) -> Element {
     let is_new = st.loaded.is_none();
     let dirty = st.dirty();
@@ -721,16 +1021,24 @@ fn footer(
     // Writing a ResearchReport is the research record, so it needs a live
     // session; reads above are unaffected. The gate lives in `auth_flow` so
     // its rules are unit-tested rather than re-implemented here.
-    let (can_save, problem) =
-        crate::auth_flow::save_gate(auth, st.draft.problem(is_new), dirty, busy);
+    let (can_save, problem) = crate::auth_flow::save_gate(
+        auth,
+        additional_problem.or_else(|| st.draft.problem(is_new)),
+        dirty,
+        busy,
+    );
     let rv = st
         .loaded
         .as_ref()
         .and_then(|r| r.spec.resource_version.clone());
-    let dto = st.draft.to_dto(&campaign.namespace, &campaign.name, rv);
+    let dto = st.draft.to_dto(namespace, campaign_name, rv);
     let save = move |_| {
         let dto = dto.clone();
-        state.write().save = SaveState::Busy("saving…");
+        {
+            let mut st = state.write();
+            st.save = SaveState::Busy("saving…");
+            st.latest_saved = None;
+        }
         spawn(async move {
             let result = if dto.resource_version.is_some() {
                 crate::update_report(dto).await
@@ -787,7 +1095,7 @@ fn footer(
                 disabled: !can_save,
                 title: problem.clone().unwrap_or_default(),
                 onclick: save,
-                if is_new { "create" } else { "save" }
+                if matches!(st.save, SaveState::Failed(_)) { "Retry save" } else if is_new { "create" } else { "save" }
             }
             match (&st.save, &problem) {
                 (_, Some(p)) if dirty => rsx! { span { class: "err", "{p}" } },
@@ -848,5 +1156,95 @@ mod tests {
         assert!(!st.dirty());
         st.draft.excluded.insert("e1".into());
         assert!(st.dirty());
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+
+    #[test]
+    fn observations_refuse_unknown_identity_and_cross_task_references() {
+        let mut candidate = ResourceSummary {
+            name: "candidate".into(),
+            namespace: "apps".into(),
+            kind: "experiment".into(),
+            campaign: Some("campaign".into()),
+            template: Some("task".into()),
+            ..Default::default()
+        };
+        assert!(observation_draft(&candidate, None).is_err());
+        candidate.uid = Some("candidate-uid".into());
+        let mut reference = candidate.clone();
+        reference.name = "reference".into();
+        reference.uid = Some("reference-uid".into());
+        reference.namespace = "another-tenant".into();
+        assert!(observation_draft(&candidate, Some(&reference)).is_err());
+        reference.namespace = "apps".into();
+        reference.template = Some("different-task".into());
+        assert!(observation_draft(&candidate, Some(&reference)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod observation_merge_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_conflict_resolution_preserves_latest_unrelated_work_and_rejects_new_evidence() {
+        let latest = ReportDetailDto {
+            spec: ReportSpecDto {
+                namespace: "apps".into(),
+                name: "review".into(),
+                campaign_ref: "campaign".into(),
+                sections: BTreeMap::from([
+                    (
+                        "Observation".into(),
+                        "another reviewer's observation".into(),
+                    ),
+                    (
+                        "Review context".into(),
+                        "fixed candidate and baseline identity".into(),
+                    ),
+                    ("New finding".into(), "concurrent work must survive".into()),
+                ]),
+                resource_version: Some("new-version".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut ours = Draft::from_detail(&latest);
+        ours.sections.retain(|(key, _)| key != "New finding");
+        ours.sections
+            .iter_mut()
+            .find(|(key, _)| key == "Observation")
+            .unwrap()
+            .1 = "my unsaved observation".into();
+        let merged = merge_observation(&ours, &latest, "apps", "campaign").unwrap();
+        assert_eq!(
+            merged
+                .sections
+                .iter()
+                .find(|(key, _)| key == "New finding")
+                .unwrap()
+                .1,
+            "concurrent work must survive"
+        );
+        assert_eq!(
+            merged
+                .sections
+                .iter()
+                .find(|(key, _)| key == "Observation")
+                .unwrap()
+                .1,
+            "my unsaved observation"
+        );
+        let mut changed = latest.clone();
+        changed
+            .spec
+            .sections
+            .insert("Review context".into(), "a different baseline".into());
+        assert!(merge_observation(&ours, &changed, "apps", "campaign").is_err());
+        assert!(merge_observation(&ours, &latest, "other-namespace", "campaign").is_err());
     }
 }
