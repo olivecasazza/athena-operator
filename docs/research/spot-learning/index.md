@@ -66,8 +66,10 @@ provides gait conditioning, three frames of joint-target-error history, default
 pose plus scaled 12-joint position actions, and 20 ms control steps. These are
 useful baseline design choices, not evidence its weights match Rapier's robot.
 Joint semantics, model dimensions, mass/inertia, PD gains, observation noise and
-normalization must be checked before transfer. Both projects using 12 actions
-and 20 ms steps is insufficient compatibility evidence.
+normalization must be checked before transfer. Rapier's active v85 profile sets
+`SPOT_VARIABLE_IMPEDANCE=1`: its action is **16-D** (12 joint targets plus four
+per-leg stiffness controls), not the archived task's 12-D action. Matching joint
+counts or 20 ms control steps is insufficient compatibility evidence.
 
 Current main documents Python 3.12–3.13, CUDA 12/13 installation routes, and
 Warp 1.18.0 CUDA-12 wheels. Do not silently upgrade the existing Python/Torch /
