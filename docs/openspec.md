@@ -636,6 +636,11 @@ shared historical workspace into this policy. Declare a profile-scoped
 default-deny NetworkPolicy through GitOps; the sandbox flag does not configure
 network access. Runners must write only to their declared workspace.
 
+Experiment lifecycle uses a Job's `FailureTarget=True` as authoritative failure
+before Pod termination completes, preserving the Kubernetes reason and message.
+An image pull still in `Pending` must not mask `DeadlineExceeded` as `Preparing`
+while Kubernetes waits to emit the final `Failed` condition.
+
 Status additions:
 
 ```yaml

@@ -764,6 +764,22 @@ fn status_from_job_and_pods(
         );
     }
 
+    // FailureTarget is authoritative before Kubernetes finishes terminating
+    // Pods. A stuck image pull must not hide DeadlineExceeded as Preparing.
+    if let Some(failure) = job.status.as_ref().and_then(|status| {
+        status.conditions.as_ref()?.iter().find(|condition| {
+            condition.type_ == "FailureTarget" && condition.status == "True"
+        })
+    }) {
+        let reason = failure.reason.as_deref().unwrap_or("JobFailed");
+        let message = failure.message.as_deref().unwrap_or("Kubernetes Job failed");
+        return (
+            ExperimentPhase::Failed,
+            message.to_string(),
+            vec![condition("Failed", "True", reason, message)],
+        );
+    }
+
     // A pod lost to preemption / node drain / eviction is infrastructure churn,
     // not a workload failure. As long as the Job hasn't exhausted its backoff
     // budget it will recreate the pod, so keep the experiment retryable instead
@@ -1756,6 +1772,32 @@ mod tests {
     use super::*;
     use athena_api::experiment::ExperimentSpec;
     use athena_api::runtime_profile::RuntimeProfileSpec;
+
+    #[test]
+    fn failure_target_is_authoritative_while_pod_termination_is_pending() {
+        let pod: Pod = serde_json::from_value(json!({
+            "metadata": {},
+            "status": { "phase": "Pending" }
+        })).unwrap();
+        for (target, expected) in [
+            ("True", ExperimentPhase::Failed),
+            ("False", ExperimentPhase::Preparing),
+        ] {
+            let job: Job = serde_json::from_value(json!({
+                "metadata": {},
+                "status": { "conditions": [{
+                    "type": "FailureTarget", "status": target,
+                    "reason": "DeadlineExceeded",
+                    "message": "image pull exceeded the active deadline"
+                }] }
+            })).unwrap();
+            let (phase, _, conditions) = status_from_job_and_pods(&job, std::slice::from_ref(&pod));
+            assert_eq!(phase, expected);
+            if target == "True" {
+                assert_eq!(conditions[0].reason.as_deref(), Some("DeadlineExceeded"));
+            }
+        }
+    }
 
     fn test_experiment(name: &str) -> Experiment {
         let mut experiment = Experiment::new(
