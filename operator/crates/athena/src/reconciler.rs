@@ -1399,6 +1399,8 @@ fn build_job(
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".to_string()),
+                    automount_service_account_token: profile.spec.policy.sandboxed.then_some(false),
+                    security_context: crate::sandbox::pod_context(profile.spec.policy.sandboxed),
                     containers: vec![Container {
                         name: "experiment".to_string(),
                         image: Some(profile.spec.image.clone()),
@@ -1426,6 +1428,9 @@ fn build_job(
                         },
                         resources: Some(resource_requirements(&profile.spec.resources)),
                         volume_mounts: Some(volume_mounts),
+                        security_context: crate::sandbox::container_context(
+                            profile.spec.policy.sandboxed,
+                        ),
                         ..Default::default()
                     }],
                     volumes: Some(volumes),
@@ -1587,6 +1592,11 @@ fn build_sky_launcher_job(
     namespace: &str,
     experiment_name: &str,
 ) -> Result<Job, Error> {
+    if profile.spec.policy.sandboxed {
+        return Err(Error::UnsupportedRuntimeMode(
+            "sandboxed SkyPilot execution is not supported".to_string(),
+        ));
+    }
     let sky = profile.spec.sky.clone().unwrap_or_default();
     let mut labels = experiment_labels(experiment, profile, experiment_name);
     labels.insert(
@@ -1961,6 +1971,59 @@ mod tests {
         )
         .expect("profile spec deserializes");
         RuntimeProfile::new("onprem", spec)
+    }
+
+    #[test]
+    fn sandboxed_experiment_cannot_mount_tokens_or_gain_privileges() {
+        let mut profile = onprem_profile();
+        profile.spec.policy.sandboxed = true;
+        let job = build_job(
+            &test_experiment("audit"),
+            &profile,
+            "exp-audit",
+            "/workspace/runs/camp/audit",
+            "/workspace/runs/camp/audit/metrics.json",
+            "athena",
+            "audit",
+            None,
+        );
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        assert_eq!(pod.automount_service_account_token, Some(false));
+        let context = pod.security_context.unwrap();
+        assert_eq!(context.run_as_non_root, Some(true));
+        assert_eq!(context.run_as_user, Some(65532));
+        assert_eq!(context.fs_group, Some(65532));
+        assert_eq!(context.seccomp_profile.unwrap().type_, "RuntimeDefault");
+        let security = pod.containers[0].security_context.as_ref().unwrap();
+        assert_eq!(security.privileged, Some(false));
+        assert_eq!(security.allow_privilege_escalation, Some(false));
+        assert_eq!(security.read_only_root_filesystem, Some(true));
+        assert_eq!(
+            security
+                .capabilities
+                .as_ref()
+                .unwrap()
+                .drop
+                .as_ref()
+                .unwrap(),
+            &["ALL"]
+        );
+    }
+
+    #[test]
+    fn sandboxed_sky_launch_is_rejected_instead_of_weakening_isolation() {
+        let mut profile = sky_profile();
+        profile.spec.policy.sandboxed = true;
+        let result = build_sky_launcher_job(
+            &test_experiment("audit"),
+            &profile,
+            "exp-audit",
+            "/workspace/runs/camp/audit",
+            "/workspace/runs/camp/audit/metrics.json",
+            "athena",
+            "audit",
+        );
+        assert!(matches!(result, Err(Error::UnsupportedRuntimeMode(_))));
     }
 
     // On-prem batchJobs must carry a wall-clock deadline so a hung (non-crashing)

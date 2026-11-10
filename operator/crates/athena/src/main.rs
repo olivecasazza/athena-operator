@@ -8,6 +8,7 @@ mod panathenaia;
 mod proposer_harness;
 mod reconciler;
 mod report_reconciler;
+mod sandbox;
 mod telemetry;
 
 use std::sync::Arc;

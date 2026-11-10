@@ -368,6 +368,8 @@ fn build_job(
                 }),
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".to_string()),
+                    automount_service_account_token: profile.spec.policy.sandboxed.then_some(false),
+                    security_context: crate::sandbox::pod_context(profile.spec.policy.sandboxed),
                     containers: vec![Container {
                         name: "benchmark".to_string(),
                         image: task
@@ -410,6 +412,9 @@ fn build_job(
                             mount_path: profile.spec.storage.workspace_mount_path.clone(),
                             ..Default::default()
                         }]),
+                        security_context: crate::sandbox::container_context(
+                            profile.spec.policy.sandboxed,
+                        ),
                         ..Default::default()
                     }],
                     volumes: Some(vec![Volume {
