@@ -42,6 +42,8 @@ pub struct ConditionDto {
     pub status: String,
     #[serde(default)]
     pub reason: String,
+    #[serde(default)]
+    pub message: String,
 }
 
 /// A ResearchDrive, collapsed for the console's global view.
@@ -101,6 +103,11 @@ pub struct ResourceSummary {
     pub name: String,
     /// Lowercase singular CRD kind, e.g. `"experiment"`, `"benchmarkrun"`.
     pub kind: String,
+    /// Kubernetes identity/version, retained in review provenance.
+    #[serde(default)]
+    pub uid: Option<String>,
+    #[serde(default)]
+    pub resource_version: Option<String>,
     pub phase: String,
     pub detail: String,
     #[serde(default)]
@@ -123,6 +130,18 @@ pub struct ResourceSummary {
     /// it in parameters; campaigns get stage context from the drive instead.
     #[serde(default)]
     pub mode: Option<String>,
+    #[serde(default)]
+    pub robot: Option<String>,
+    /// Actual execution image, not the template's current desired image.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Browser-safe artifact URLs; never workspace paths or secret references.
+    #[serde(default)]
+    pub figures_url: Option<String>,
+    #[serde(default)]
+    pub policy_url: Option<String>,
+    #[serde(default)]
+    pub benchmark_suite: Option<String>,
     /// Experiment hypothesis (truncated server-side); the drill-down's
     /// experiment view shows it, because a run without its question is noise.
     #[serde(default)]
@@ -172,6 +191,23 @@ pub struct ResourceSummary {
     pub failed: Option<u32>,
     #[serde(default)]
     pub running: Option<u32>,
+    /// BenchmarkRun target and controller-published gate/provenance evidence.
+    #[serde(default)]
+    pub target_kind: Option<String>,
+    #[serde(default)]
+    pub target_name: Option<String>,
+    #[serde(default)]
+    pub target_namespace: Option<String>,
+    #[serde(default)]
+    pub suite_hash: Option<String>,
+    #[serde(default)]
+    pub reproducibility_hash: Option<String>,
+    #[serde(default)]
+    pub gates: Vec<GateResultDto>,
+    #[serde(default)]
+    pub object_generation: Option<i64>,
+    #[serde(default)]
+    pub observed_generation: Option<i64>,
 }
 
 impl ResourceSummary {
@@ -180,6 +216,16 @@ impl ResourceSummary {
     pub fn manifest_path(&self) -> String {
         format!("k8s://{}/{}/{}.yaml", self.namespace, self.kind, self.name)
     }
+}
+
+#[cfg_attr(feature = "server", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GateResultDto {
+    pub metric: String,
+    pub passed: bool,
+    pub threshold: f64,
+    #[serde(default)]
+    pub actual: Option<f64>,
 }
 
 /// An ExperimentTemplate row. Mirrors the native `TemplateSummary`.

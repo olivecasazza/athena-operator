@@ -23,7 +23,7 @@ use athena_api::research_report::{ResearchReport, ResearchReportSpec};
 use athena_api::runtime_profile::RuntimeProfile;
 use athena_console_web::models::{
     ClusterSnapshot, ConditionDto, ConditionMessageDto, DriveSummary, ReportDetailDto,
-    ReportSpecDto, ReportSummary, ResourceSummary, StageProgressDto, TemplateProgressDto,
+    GateResultDto, ReportSpecDto, ReportSummary, ResourceSummary, StageProgressDto, TemplateProgressDto,
     TemplateSummary,
 };
 use axum::{
@@ -44,6 +44,38 @@ mod auth;
 /// k8s `Time` → epoch-millis string (for scoping the Grafana embed).
 fn to_ms(t: &Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>) -> Option<String> {
     t.as_ref().map(|x| x.0.timestamp_millis().to_string())
+}
+
+/// Browser URLs only: do not publish private workspace paths or credentials.
+fn public_artifact_url(uri: &str) -> Option<String> {
+    let uri = uri.strip_prefix("gs://nixlab-spot-reruns/policies/")
+        .map(|path| std::borrow::Cow::Owned(format!("https://storage.googleapis.com/nixlab-spot-reruns/policies/{path}")))
+        .unwrap_or(std::borrow::Cow::Borrowed(uri));
+    let url = reqwest::Url::parse(&uri).ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none())
+        .then(|| url.to_string())
+}
+
+fn review_artifacts(exp: &Experiment) -> (Option<String>, Option<String>) {
+    let Some(artifacts) = exp.status.as_ref().and_then(|s| s.artifacts.as_ref()) else {
+        return (None, None);
+    };
+    let figures = artifacts.figures_uri.as_deref().and_then(|uri| {
+        if let Some(url) = public_artifact_url(uri) {
+            return Some(url);
+        }
+        // Panathenaia's existing namespaced, read-only figure contract.
+        // Never resolve another namespace's same-named experiment through it.
+        (exp.namespace().as_deref() == Some("apps") && uri.starts_with("/workspace/"))
+            .then(|| format!(
+                "https://spot.casazza.io/api/v1/experiments/{}/figures/eval_filmstrip.png",
+                exp.name_any()
+            ))
+    });
+    let policy = artifacts.onnx_uri.as_deref().and_then(public_artifact_url);
+    (figures, policy)
 }
 
 #[tokio::main]
@@ -185,40 +217,45 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         drives_api.list(&lp),
     )?;
 
-    // Run windows from the experiment Jobs (exp-<name>) so the embed can scope its
-    // Grafana time range to when the experiment actually ran.
-    let job_times: HashMap<String, (Option<String>, Option<String>)> = job_list
+    // Follow controller-reported Job references, scoped by namespace/name.
+    let job_times = job_list
         .items
-        .into_iter()
+        .iter()
         .filter_map(|j| {
-            let name = j.metadata.name.clone()?;
+            let name = j.metadata.name.as_deref()?;
             let st = j.status.as_ref();
             Some((
-                name,
+                (j.metadata.namespace.as_deref().unwrap_or("default"), name),
                 (
                     st.and_then(|s| to_ms(&s.start_time)),
                     st.and_then(|s| to_ms(&s.completion_time)),
                 ),
             ))
         })
-        .collect();
+        .collect::<HashMap<_, _>>();
 
     // Experiments carry no template ref; it lives on the owning campaign.
-    let campaign_template: HashMap<String, String> = campaign_list
+    let campaign_template: HashMap<(&str, &str), (&str, Option<&str>)> = campaign_list
         .items
         .iter()
-        .map(|c| (c.name_any(), c.spec.template_ref.clone()))
+        .map(|c| (
+            (c.metadata.namespace.as_deref().unwrap_or("default"), c.metadata.name.as_deref().unwrap_or_default()),
+            (c.spec.template_ref.as_str(), c.spec.benchmark_suite_ref.as_deref()),
+        ))
         .collect();
     // Campaigns get their objective metric/goal from their template.
-    let template_objective: HashMap<String, (String, String)> = tpl_list
+    let template_objective: HashMap<(&str, &str), (&str, &str)> = tpl_list
         .items
         .iter()
         .map(|t| {
             (
-                t.name_any(),
+                (t.metadata.namespace.as_deref().unwrap_or("default"), t.metadata.name.as_deref().unwrap_or_default()),
                 (
-                    t.spec.objective.metric.clone(),
-                    format!("{:?}", t.spec.objective.goal).to_lowercase(),
+                    t.spec.objective.metric.as_str(),
+                    match t.spec.objective.goal {
+                        athena_api::experiment_template::ObjectiveGoal::Maximize => "maximize",
+                        athena_api::experiment_template::ObjectiveGoal::Minimize => "minimize",
+                    },
                 ),
             )
         })
@@ -228,10 +265,18 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .items
         .into_iter()
         .map(|e| {
+            let namespace = e.metadata.namespace.as_deref().unwrap_or("default");
+            let campaign = campaign_template.get(&(namespace, e.spec.campaign_ref.as_str()));
+            let declared_objective = campaign.and_then(|(template, _)| {
+                template_objective.get(&(namespace, *template))
+            });
+            let (figures_url, policy_url) = review_artifacts(&e);
             let status = e.status.as_ref();
-            let jt = job_times.get(&format!("exp-{}", e.name_any())).cloned();
+            let jt = status.and_then(|s| s.job_name.as_deref())
+                .and_then(|name| job_times.get(&(namespace, name)));
             let detail = status.and_then(|s| s.metrics_detail.as_ref());
-            let objective = detail.and_then(|d| d.objective_name.clone());
+            let objective = detail.and_then(|d| d.objective_name.clone())
+                .or_else(|| declared_objective.map(|o| o.0.to_string()));
             let objective_value = detail
                 .and_then(|d| d.best.as_ref())
                 .zip(objective.as_deref())
@@ -247,9 +292,16 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 Some((en - s) / 1000)
             });
             ResourceSummary {
-                namespace: e.namespace().unwrap_or_else(|| "default".to_string()),
+                namespace: namespace.to_string(),
                 name: e.name_any(),
                 kind: "experiment".to_string(),
+                uid: e.uid(),
+                resource_version: e.resource_version(),
+                figures_url,
+                policy_url,
+                image: status.and_then(|s| s.environment.as_ref()).and_then(|e| e.image.clone()),
+                robot: e.spec.parameters.get("robot").and_then(|v| v.as_str()).map(String::from),
+                benchmark_suite: campaign.and_then(|(_, suite)| suite.map(str::to_string)),
                 phase: status
                     .map(|s| format!("{:?}", s.phase))
                     .unwrap_or_else(|| "Pending".to_string()),
@@ -263,8 +315,9 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 ended_at: jt.as_ref().and_then(|(_, en)| en.clone()),
                 created_at: to_ms(&e.metadata.creation_timestamp),
                 drive: None,
-                template: campaign_template.get(&e.spec.campaign_ref).cloned(),
-                objective_goal: detail.and_then(|d| d.objective_goal.clone()),
+                template: campaign.map(|(template, _)| template.to_string()),
+                objective_goal: detail.and_then(|d| d.objective_goal.clone())
+                    .or_else(|| declared_objective.map(|o| o.1.to_string())),
                 objective,
                 objective_value,
                 decision: status
@@ -284,7 +337,13 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 // Truncated: the drill-down shows it inline; a 2 KB hypothesis
                 // in every row would bloat the snapshot for no reader.
                 hypothesis: Some(e.spec.hypothesis.chars().take(240).collect()),
-                conditions: Vec::new(),
+                conditions: status.and_then(|s| s.conditions.as_ref())
+                    .into_iter().flatten().map(|c| ConditionDto {
+                        ctype: c.condition_type.clone().unwrap_or_default(),
+                        status: c.status.clone().unwrap_or_default(),
+                        reason: c.reason.clone().unwrap_or_default(),
+                        message: c.message.clone().unwrap_or_default(),
+                    }).collect(),
                 ..Default::default()
             }
         })
@@ -331,11 +390,11 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 template: Some(c.spec.template_ref.clone()),
                 strategy: Some(c.spec.strategy.strategy_type.clone()),
                 objective: template_objective
-                    .get(&c.spec.template_ref)
-                    .map(|o| o.0.clone()),
+                    .get(&(c.metadata.namespace.as_deref().unwrap_or("default"), c.spec.template_ref.as_str()))
+                    .map(|o| o.0.to_string()),
                 objective_goal: template_objective
-                    .get(&c.spec.template_ref)
-                    .map(|o| o.1.clone()),
+                    .get(&(c.metadata.namespace.as_deref().unwrap_or("default"), c.spec.template_ref.as_str()))
+                    .map(|o| o.1.to_string()),
                 objective_value: status.and_then(|s| s.best_objective),
                 best_experiment: status.and_then(|s| s.best_experiment.clone()),
                 succeeded: status.map(|s| s.succeeded_experiments),
@@ -354,6 +413,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                         ctype: c.condition_type.unwrap_or_default(),
                         status: c.status.unwrap_or_default(),
                         reason: c.reason.unwrap_or_default(),
+                        message: c.message.unwrap_or_default(),
                     })
                     .collect(),
                 ..Default::default()
@@ -413,6 +473,19 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 namespace: r.namespace().unwrap_or_else(|| "default".to_string()),
                 name: r.name_any(),
                 kind: "benchmarkrun".to_string(),
+                uid: r.uid(),
+                resource_version: r.resource_version(),
+                object_generation: r.metadata.generation,
+                observed_generation: status.and_then(|s| s.observed_generation),
+                target_kind: (r.spec.target_ref.api_version == "research.nixlab.io/v1alpha1")
+                    .then(|| r.spec.target_ref.kind.clone()),
+                target_name: Some(r.spec.target_ref.name.clone()),
+                target_namespace: r.spec.target_ref.namespace.clone().or_else(|| r.namespace()),
+                suite_hash: status.and_then(|s| s.observed_suite_hash.clone()),
+                reproducibility_hash: status.and_then(|s| s.reproducibility_hash.clone()),
+                gates: status.into_iter().flat_map(|s| &s.gates).map(|g| GateResultDto {
+                    metric: g.metric.clone(), passed: g.passed, threshold: g.threshold, actual: g.actual,
+                }).collect(),
                 phase: status
                     .map(|s| format!("{:?}", s.phase))
                     .unwrap_or_else(|| "Pending".to_string()),
@@ -436,7 +509,10 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                 campaign: None,
                 mode: None,
                 hypothesis: None,
-                conditions: Vec::new(),
+                conditions: status.into_iter().flat_map(|s| &s.conditions).map(|c| ConditionDto {
+                    ctype: c.condition_type.clone(), status: format!("{:?}", c.status),
+                    reason: c.reason.clone().unwrap_or_default(), message: c.message.clone().unwrap_or_default(),
+                }).collect(),
                 ..Default::default()
             }
         })
@@ -517,6 +593,7 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
                         ctype: c.condition_type,
                         status: format!("{:?}", c.status),
                         reason: c.reason.unwrap_or_default(),
+                        message: c.message.unwrap_or_default(),
                     })
                     .collect(),
                 stages: cur
@@ -1445,5 +1522,37 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
             let s = tool_schema(&upd);
             assert!(s["properties"]["body"]["properties"]["resource_version"].is_object());
         }
+    }
+}
+
+#[cfg(test)]
+mod review_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_urls_do_not_disclose_credentials_private_buckets_or_workspace_paths() {
+        for uri in [
+            "/workspace/private/data", "file:///workspace/private/data",
+            "gs://private-holdout/answers", "https://user:password@example.com/artifact.png",
+            "javascript:alert(1)",
+        ] {
+            assert!(public_artifact_url(uri).is_none(), "unsafe URI accepted: {uri}");
+        }
+        assert_eq!(public_artifact_url("gs://nixlab-spot-reruns/policies/run/walk_policy.onnx").as_deref(),
+            Some("https://storage.googleapis.com/nixlab-spot-reruns/policies/run/walk_policy.onnx"));
+    }
+
+    #[test]
+    fn namespaced_artifacts_never_resolve_through_another_namespaces_public_gateway() {
+        let mut experiment: Experiment = serde_json::from_value(serde_json::json!({
+            "apiVersion":"research.nixlab.io/v1alpha1", "kind":"Experiment",
+            "metadata":{"name":"same-name","namespace":"private"},
+            "spec":{"campaignRef":"campaign","hypothesis":"question"},
+            "status":{"phase":"succeeded","artifacts":{"figuresUri":"/workspace/runs/campaign/same-name/figures"}}
+        })).unwrap();
+        assert_eq!(review_artifacts(&experiment).0, None);
+        experiment.metadata.namespace = Some("apps".into());
+        assert_eq!(review_artifacts(&experiment).0.as_deref(),
+            Some("https://spot.casazza.io/api/v1/experiments/same-name/figures/eval_filmstrip.png"));
     }
 }

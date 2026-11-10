@@ -53,7 +53,7 @@ serde_json = { workspace = true }
 # the transport. The native side additionally needs `rustls-tls` (see the
 # target-specific section at the end) or it cannot fetch the Keycloak JWKS.
 reqwest = { version = "0.12", default-features = false, features = [ "json" ] }
-web-sys = { version = "0.3", features = ["Window", "Location", "History", "Url", "UrlSearchParams", "Storage", "Request", "RequestInit", "RequestMode", "Response"] }
+web-sys = { version = "0.3", features = ["Window", "Location", "History", "Url", "UrlSearchParams", "Storage", "Request", "RequestInit", "RequestMode", "Response", "console"] }
 # Browser PKCE (RFC 7636) for the Dioxus frontend: CSPRNG verifier + S256.
 # Both are pure Rust and compile for wasm32 and host, so the contract tests
 # below run on the host target.
