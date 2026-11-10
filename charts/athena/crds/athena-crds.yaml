@@ -137,7 +137,8 @@
                     "default": {
                       "allowCommandOverride": false,
                       "allowImageOverride": false,
-                      "allowSecretRefs": false
+                      "allowSecretRefs": false,
+                      "sandboxed": false
                     },
                     "properties": {
                       "allowCommandOverride": {
@@ -147,6 +148,11 @@
                         "type": "boolean"
                       },
                       "allowSecretRefs": {
+                        "type": "boolean"
+                      },
+                      "sandboxed": {
+                        "default": false,
+                        "description": "Opt-in evaluator sandbox: no Kubernetes token, non-root UID/GID 65532, no capabilities or privilege escalation, read-only root filesystem. Use a dedicated workspace claim: fsGroup applies to the mounted volume.",
                         "type": "boolean"
                       }
                     },

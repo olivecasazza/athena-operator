@@ -264,6 +264,8 @@
           checks = {
             helm-chart = athena.helmChart pkgs;
             k8s-manifests = athena.k8sManifests pkgs;
+          } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+            athena-operator = athenaOperator;
           };
 
           devShells = {

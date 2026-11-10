@@ -625,6 +625,17 @@ spec:
     allowedSecretRefs: []
 ```
 
+Implemented evaluator isolation: `spec.policy.sandboxed: true` opts on-premise
+Experiment and BenchmarkRun Jobs into UID/GID 65532, non-root execution,
+`RuntimeDefault` seccomp, all capabilities dropped, no privilege escalation,
+a read-only root filesystem, and `automountServiceAccountToken: false`.
+Existing profiles are unchanged unless they opt in. Sandboxed SkyPilot profiles
+are rejected rather than silently losing the boundary. Allocate a **dedicated**
+workspace PVC: sandbox fsGroup 65532 applies to that volume, so never opt a
+shared historical workspace into this policy. Declare a profile-scoped
+default-deny NetworkPolicy through GitOps; the sandbox flag does not configure
+network access. Runners must write only to their declared workspace.
+
 Status additions:
 
 ```yaml

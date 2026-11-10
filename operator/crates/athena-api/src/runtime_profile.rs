@@ -316,6 +316,11 @@ pub struct RuntimePolicy {
     pub allow_image_override: bool,
     pub allow_command_override: bool,
     pub allow_secret_refs: bool,
+    /// Opt-in evaluator sandbox: no Kubernetes token, non-root UID/GID 65532,
+    /// no capabilities or privilege escalation, read-only root filesystem.
+    /// Use a dedicated workspace claim: fsGroup applies to the mounted volume.
+    #[serde(default)]
+    pub sandboxed: bool,
 }
 
 impl Default for RuntimePolicy {
@@ -324,6 +329,7 @@ impl Default for RuntimePolicy {
             allow_image_override: false,
             allow_command_override: false,
             allow_secret_refs: false,
+            sandboxed: false,
         }
     }
 }
