@@ -946,8 +946,52 @@
                             "minimum": 0.0,
                             "type": "integer"
                           },
+                          "mcpAuth": {
+                            "description": "OAuth client credentials for the protected MCP resource. The Secret is namespace-local and mounted read-only; the runner receives no Kubernetes token.",
+                            "nullable": true,
+                            "properties": {
+                              "clientId": {
+                                "maxLength": 255,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "clientSecretRef": {
+                                "description": "Reference to one key inside a same-namespace Secret.",
+                                "properties": {
+                                  "key": {
+                                    "type": "string"
+                                  },
+                                  "name": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "key",
+                                  "name"
+                                ],
+                                "type": "object"
+                              },
+                              "resource": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "tokenUrl": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "clientId",
+                              "clientSecretRef",
+                              "resource",
+                              "tokenUrl"
+                            ],
+                            "type": "object"
+                          },
                           "mcpUrl": {
-                            "default": "http://athena-console.apps.svc.cluster.local/mcp",
+                            "default": "http://athena-console.apps.svc.cluster.local:3000/mcp",
                             "description": "Athena MCP endpoint the agent reads from.",
                             "type": "string"
                           },
@@ -1380,8 +1424,52 @@
                             "minimum": 0.0,
                             "type": "integer"
                           },
+                          "mcpAuth": {
+                            "description": "OAuth client credentials for the protected MCP resource. The Secret is namespace-local and mounted read-only; the runner receives no Kubernetes token.",
+                            "nullable": true,
+                            "properties": {
+                              "clientId": {
+                                "maxLength": 255,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "clientSecretRef": {
+                                "description": "Reference to one key inside a same-namespace Secret.",
+                                "properties": {
+                                  "key": {
+                                    "type": "string"
+                                  },
+                                  "name": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "key",
+                                  "name"
+                                ],
+                                "type": "object"
+                              },
+                              "resource": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "tokenUrl": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "clientId",
+                              "clientSecretRef",
+                              "resource",
+                              "tokenUrl"
+                            ],
+                            "type": "object"
+                          },
                           "mcpUrl": {
-                            "default": "http://athena-console.apps.svc.cluster.local/mcp",
+                            "default": "http://athena-console.apps.svc.cluster.local:3000/mcp",
                             "description": "Athena MCP endpoint the agent reads from.",
                             "type": "string"
                           },

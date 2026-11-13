@@ -23,8 +23,8 @@ use athena_api::research_drive::{HarnessType, ProposerHarness, ProposerSpec, Res
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, Pod, PodSecurityContext,
-    PodSpec, PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretKeySelector,
-    SecurityContext, Volume, VolumeMount,
+    KeyToPath, PodSpec, PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretKeySelector,
+    SecretVolumeSource, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::{ListParams, ObjectMeta, PostParams};
@@ -227,6 +227,36 @@ fn build_job(
         mount_path: p.into(),
         ..Default::default()
     };
+    let mut volumes = vec![empty("work"), empty("tmp")];
+    let mut mounts = vec![mount("work", "/work"), mount("tmp", "/tmp")];
+    if let Some(auth) = &harness.mcp_auth {
+        envs.extend([
+            env("MCP_OAUTH_TOKEN_URL", auth.token_url.clone()),
+            env("MCP_OAUTH_CLIENT_ID", auth.client_id.clone()),
+            env("MCP_OAUTH_RESOURCE", auth.resource.clone()),
+            env("MCP_OAUTH_CLIENT_SECRET_FILE", "/var/run/secrets/athena-mcp/client-secret"),
+        ]);
+        volumes.push(Volume {
+            name: "mcp-credentials".into(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(auth.client_secret_ref.name.clone()),
+                optional: Some(false),
+                items: Some(vec![KeyToPath {
+                    key: auth.client_secret_ref.key.clone(),
+                    path: "client-secret".into(),
+                    mode: Some(0o440),
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        mounts.push(VolumeMount {
+            name: "mcp-credentials".into(),
+            mount_path: "/var/run/secrets/athena-mcp".into(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+    }
 
     Ok(Job {
         metadata: ObjectMeta {
@@ -290,10 +320,10 @@ fn build_job(
                             }),
                             ..Default::default()
                         }),
-                        volume_mounts: Some(vec![mount("work", "/work"), mount("tmp", "/tmp")]),
+                        volume_mounts: Some(mounts),
                         ..Default::default()
                     }],
-                    volumes: Some(vec![empty("work"), empty("tmp")]),
+                    volumes: Some(volumes),
                     ..Default::default()
                 }),
             },

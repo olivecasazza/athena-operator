@@ -136,6 +136,11 @@
             src = operatorSrc;
             cargoExtraArgs = "-p athena";
           };
+          webConsoleCargoArtifacts = craneLib.buildDepsOnly {
+            pname = "athena-console-web-deps";
+            src = operatorSrc;
+            cargoExtraArgs = "-p athena-console-web --features server";
+          };
           athenaConsole = craneLib.buildPackage {
             pname = "athena-console";
             src = operatorSrc;
@@ -264,8 +269,25 @@
           checks = {
             helm-chart = athena.helmChart pkgs;
             k8s-manifests = athena.k8sManifests pkgs;
-          } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          }
+          // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
             athena-operator = athenaOperator;
+            athena-console-web = craneLib.cargoTest {
+              pname = "athena-console-web-tests";
+              src = operatorSrc;
+              cargoArtifacts = webConsoleCargoArtifacts;
+              cargoExtraArgs = "-p athena-console-web --features server";
+            };
+            proposer-auth =
+              pkgs.runCommand "athena-proposer-auth-check"
+                {
+                  nativeBuildInputs = [ pkgs.python3 ];
+                }
+                ''
+                  export PYTHONDONTWRITEBYTECODE=1
+                  python -m unittest discover -s ${./runners/prime-proposer} -p 'test_*.py'
+                  touch $out
+                '';
           };
 
           devShells = {
@@ -328,4 +350,3 @@
       formatter.aarch64-linux = nixpkgs.legacyPackages.aarch64-linux.nixfmt-rfc-style;
     };
 }
-

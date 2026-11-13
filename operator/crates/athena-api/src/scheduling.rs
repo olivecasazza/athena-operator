@@ -77,6 +77,28 @@ fn dyn_api(client: &Client, group: &str, version: &str, kind: &str) -> Api<Dynam
     Api::all_with(client.clone(), &ar)
 }
 
+async fn namespaced_objects(
+    client: &Client, group: &str, version: &str, kind: &str,
+    namespaces: Option<&[String]>, lp: &ListParams,
+) -> Vec<DynamicObject> {
+    let Some(namespaces) = namespaces else {
+        return dyn_api(client, group, version, kind).list(lp).await
+            .map(|list| list.items).unwrap_or_default();
+    };
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(group, version, kind));
+    let mut items = Vec::new();
+    for namespace in namespaces {
+        if let Ok(list) = Api::<DynamicObject>::namespaced_with(client.clone(), namespace, &ar).list(lp).await {
+            if items.is_empty() {
+                items = list.items;
+            } else {
+                items.extend(list.items);
+            }
+        }
+    }
+    items
+}
+
 fn as_i64(v: &Value) -> i64 {
     match v {
         Value::Number(n) => n.as_i64().unwrap_or(0),
@@ -109,6 +131,15 @@ fn sum_flavor_resource(flavors: &Value, res: &str, key: &str) -> i64 {
 /// Snapshot the scheduling/inference stack. Best-effort: a missing CRD (e.g. no
 /// Kueue) yields empty sections rather than erroring, so the console still renders.
 pub async fn read_scheduling(client: &Client) -> SchedulingSnapshot {
+    read_scheduling_scoped(client, None).await
+}
+
+/// Infrastructure overview with namespace-local workloads and inference.
+/// ClusterQueue and MetalMachine capacity remains cluster-wide; callers must
+/// independently authorize access to infrastructure, not just research data.
+pub async fn read_scheduling_scoped(
+    client: &Client, namespaces: Option<&[String]>,
+) -> SchedulingSnapshot {
     let mut snap = SchedulingSnapshot::default();
     let lp = ListParams::default();
 
@@ -147,9 +178,7 @@ pub async fn read_scheduling(client: &Client) -> SchedulingSnapshot {
     }
 
     // Workloads → rows.
-    let wls = dyn_api(client, "kueue.x-k8s.io", "v1beta1", "Workload");
-    if let Ok(list) = wls.list(&lp).await {
-        for w in list {
+    for w in namespaced_objects(client, "kueue.x-k8s.io", "v1beta1", "Workload", namespaces, &lp).await {
             let admitted = w
                 .data
                 .pointer("/status/conditions")
@@ -213,7 +242,6 @@ pub async fn read_scheduling(client: &Client) -> SchedulingSnapshot {
                 gpus,
             });
         }
-    }
 
     // MetalMachines (Hephaestus) → node power. group heph.nixlab.io/v1alpha1;
     // power = status.poweredOn, phase = status.phase, pool = spec.poolRef.
@@ -245,9 +273,7 @@ pub async fn read_scheduling(client: &Client) -> SchedulingSnapshot {
 
     // Inference backends: RayJobs named vllm-* (cluster) + Deployments named
     // mesh-llm-* (mesh). Campaign is the suffix.
-    let rjs = dyn_api(client, "ray.io", "v1", "RayJob");
-    if let Ok(list) = rjs.list(&lp).await {
-        for rj in list {
+    for rj in namespaced_objects(client, "ray.io", "v1", "RayJob", namespaces, &lp).await {
             let name = rj.metadata.name.clone().unwrap_or_default();
             if let Some(campaign) = name.strip_prefix("vllm-") {
                 let dep = rj
@@ -267,7 +293,6 @@ pub async fn read_scheduling(client: &Client) -> SchedulingSnapshot {
                 });
             }
         }
-    }
 
     snap
 }

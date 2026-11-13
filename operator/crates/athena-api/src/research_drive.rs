@@ -271,12 +271,29 @@ pub struct ProposerHarness {
     /// Athena MCP endpoint the agent reads from.
     #[serde(default = "default_mcp_url")]
     pub mcp_url: String,
+    /// OAuth client credentials for the protected MCP resource. The Secret is
+    /// namespace-local and mounted read-only; the runner receives no Kubernetes token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_auth: Option<McpClientCredentials>,
     /// Agent turn budget per proposal.
     #[serde(default = "default_harness_turns")]
     pub max_turns: u32,
     /// Wall-clock budget per proposal Job, seconds.
     #[serde(default = "default_harness_timeout")]
     pub timeout_seconds: u32,
+}
+
+/// Machine identity for bounded, read-only research-memory access.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpClientCredentials {
+    #[schemars(length(min = 1, max = 2048))]
+    pub token_url: String,
+    #[schemars(length(min = 1, max = 255))]
+    pub client_id: String,
+    #[schemars(length(min = 1, max = 2048))]
+    pub resource: String,
+    pub client_secret_ref: SecretKeyRef,
 }
 
 /// Supported proposer harnesses.
@@ -287,7 +304,7 @@ pub enum HarnessType {
 }
 
 fn default_mcp_url() -> String {
-    "http://athena-console.apps.svc.cluster.local/mcp".to_string()
+    "http://athena-console.apps.svc.cluster.local:3000/mcp".to_string()
 }
 
 fn default_harness_turns() -> u32 {

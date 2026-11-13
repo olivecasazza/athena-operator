@@ -6,35 +6,66 @@
 //! without a browser.
 
 use crate::auth::{self, AuthConfig, Pkce};
+use crate::access::AccessSession;
 
 /// Where the frontend is in the sign-in flow.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Phase {
     /// Checking `/api/auth/config`.
     Loading,
-    /// Auth disabled on the backend (local dev): everything is open.
+    /// Explicit loopback-only development profile.
     Disabled,
     /// No usable token; `SignIn` carries the authorize URL to navigate to.
     SignedOut { sign_in: Option<String> },
-    /// A fresh bearer token is available.
-    SignedIn,
+    /// Capabilities verified by the backend, not inferred from token presence.
+    SignedIn { session: AccessSession },
+    /// Authenticated identity without an assigned application role.
+    Denied { message: String, sign_in: Option<String> },
     /// A stored token was rejected or expired mid-session.
     Expired { message: String, sign_in: Option<String> },
     /// The IdP or the exchange failed.
     Failed { message: String, sign_in: Option<String> },
 }
 
+/// A fresh stored credential still needs server verification; expiry is not
+/// the same state as a visitor who has never signed in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoredSession {
+    Missing,
+    Expired,
+    Verify,
+}
+
+pub(crate) fn stored_session(token: Option<&auth::Token>, now: u64) -> StoredSession {
+    match token {
+        None => StoredSession::Missing,
+        Some(token) if auth::token_is_fresh(token, now) => StoredSession::Verify,
+        Some(_) => StoredSession::Expired,
+    }
+}
+
 impl Phase {
-    /// Whether writes can proceed with a token.
+    pub(crate) fn can_read(&self) -> bool {
+        matches!(self, Phase::Disabled)
+            || matches!(self, Phase::SignedIn { session } if session.permissions.read_research)
+    }
+
     pub(crate) fn can_write(&self) -> bool {
-        matches!(self, Phase::SignedIn | Phase::Disabled)
+        matches!(self, Phase::Disabled)
+            || matches!(self, Phase::SignedIn { session } if session.permissions.write_reports)
+    }
+
+    pub(crate) fn can_read_infrastructure(&self) -> bool {
+        matches!(self, Phase::Disabled)
+            || matches!(self, Phase::SignedIn { session } if session.permissions.read_infrastructure)
     }
 
     /// One line for the top bar: what the user is, and what to do next.
     pub(crate) fn notice(&self) -> Option<(&'static str, &'static str)> {
         match self {
-            Phase::Disabled => Some(("auth off", "backend auth is disabled; writes are open")),
-            Phase::Expired { .. } => Some(("session expired", "sign in again to save reports")),
+            Phase::Disabled => Some(("local development", "explicit loopback-only profile; no bearer required")),
+            Phase::Expired { .. } => Some(("session expired", "sign in again; unsaved feedback is preserved")),
+            Phase::Denied { .. } => Some(("access not assigned", "ask the owner for an Athena client role")),
             Phase::Failed { .. } => Some(("sign-in failed", "see the message; try again")),
             _ => None,
         }
@@ -44,7 +75,8 @@ impl Phase {
 /// The sign-in URL to offer, if the flow can be started.
 pub(crate) fn sign_in_url(phase: &Phase) -> Option<String> {
     match phase {
-        Phase::SignedOut { sign_in } | Phase::Expired { sign_in, .. } | Phase::Failed { sign_in, .. } => sign_in.clone(),
+        Phase::SignedOut { sign_in } | Phase::Expired { sign_in, .. }
+        | Phase::Denied { sign_in, .. } | Phase::Failed { sign_in, .. } => sign_in.clone(),
         _ => None,
     }
 }
@@ -55,17 +87,20 @@ pub(crate) fn begin(config: &AuthConfig, redirect_uri: &str) -> Option<String> {
     let pkce: Pkce = auth::new_pkce().ok()?;
     let state = auth::new_state().ok()?;
     let url = auth::authorize_url(config, redirect_uri, &pkce, &state)?;
-    auth::save_pending(&pkce, &state);
+    auth::save_pending(&pkce, &state, redirect_uri);
     Some(url)
 }
 
-/// Validate the callback's `state` against what was stored when the flow
-/// started. A mismatch means the callback did not come from our own request
-/// (or came from a stale tab), so the pending verifier is discarded.
-pub(crate) fn check_state(returned: &str) -> Result<(), String> {
-    match auth::take_pending() {
-        Some((_, expected)) if expected == returned => Ok(()),
-        Some(_) => Err("sign-in state did not match; the request may have been forged".into()),
+/// Consume state and verifier together. Even a mismatched callback cannot
+/// replay the pending request; a valid callback retains its verifier for exchange.
+pub(crate) fn check_state(returned: &str) -> Result<auth::PendingLogin, String> {
+    consume_pending(&mut auth::take_pending(), returned)
+}
+
+fn consume_pending(pending: &mut Option<auth::PendingLogin>, returned: &str) -> Result<auth::PendingLogin, String> {
+    match pending.take() {
+        Some(login) if login.state == returned => Ok(login),
+        Some(_) => Err("sign-in state did not match; start sign-in again".into()),
         None => Err("no sign-in was in progress for this callback".into()),
     }
 }
@@ -100,6 +135,8 @@ pub(crate) fn save_gate(
 ) -> (bool, Option<String>) {
     let problem = if phase.can_write() {
         spec_problem
+    } else if matches!(phase, Phase::SignedIn { .. }) {
+        Some("read-only access; a researcher or admin role is required to save reports".into())
     } else {
         Some("sign in to save reports".to_string())
     };
@@ -119,16 +156,56 @@ mod tests {
         }
     }
 
+    fn signed_in() -> Phase {
+        Phase::SignedIn { session: AccessSession {
+            profile: "test".into(),
+            namespaces: vec!["apps".into()],
+            permissions: crate::access::AccessPermissions {
+                read_research: true, write_reports: true, read_infrastructure: false,
+            },
+        }}
+    }
+
+    #[test]
+    fn expired_credentials_are_not_treated_as_a_first_time_visitor() {
+        let token = auth::Token { access_token: "opaque-credential".into(), expires_at: Some(100) };
+        assert_eq!(stored_session(None, 75), StoredSession::Missing);
+        assert_eq!(stored_session(Some(&token), 50), StoredSession::Verify);
+        assert_eq!(stored_session(Some(&token), 75), StoredSession::Expired);
+    }
+
+    #[test]
+    fn callback_verifier_survives_validation_but_cannot_be_replayed() {
+        let login = || auth::PendingLogin {
+            verifier: "original-verifier".into(), state: "expected-state".into(),
+            redirect_uri: "https://console.test/review?candidate=run-1".into(),
+        };
+        let mut pending = Some(login());
+        let verified = consume_pending(&mut pending, "expected-state").unwrap();
+        assert_eq!(verified.verifier, "original-verifier");
+        assert_eq!(verified.redirect_uri, "https://console.test/review?candidate=run-1");
+        assert!(consume_pending(&mut pending, "expected-state").is_err());
+        let mut pending = Some(login());
+        assert!(consume_pending(&mut pending, "forged-state").is_err());
+        assert!(consume_pending(&mut pending, "expected-state").is_err());
+    }
+
+    #[test]
+    fn viewer_keeps_research_access_without_saves_or_infrastructure() {
+        let mut phase = signed_in();
+        if let Phase::SignedIn { session } = &mut phase {
+            session.permissions.write_reports = false;
+        }
+        assert!(phase.can_read());
+        assert!(!phase.can_write());
+        assert!(!phase.can_read_infrastructure());
+        assert!(!save_gate(&phase, None, true, false).0);
+    }
+
     #[test]
     fn disabled_phase_can_write_because_backend_is_open() {
         assert!(Phase::Disabled.can_write());
-        assert_eq!(
-            Phase::Disabled.notice(),
-            Some((
-                "auth off",
-                "backend auth is disabled; writes are open"
-            ))
-        );
+        assert!(Phase::Disabled.can_read_infrastructure());
     }
 
     #[test]
@@ -143,9 +220,8 @@ mod tests {
 
     #[test]
     fn signed_in_can_write_and_is_quiet() {
-        assert!(Phase::SignedIn.can_write());
-        assert_eq!(Phase::SignedIn.notice(), None);
-        assert_eq!(sign_in_url(&Phase::SignedIn), None);
+        assert!(signed_in().can_write());
+        assert_eq!(sign_in_url(&signed_in()), None);
     }
 
     #[test]
@@ -205,7 +281,7 @@ mod tests {
 
     #[test]
     fn signed_in_user_can_save_a_valid_dirty_draft() {
-        let (ok, problem) = save_gate(&Phase::SignedIn, None, true, false);
+        let (ok, problem) = save_gate(&signed_in(), None, true, false);
         assert!(ok);
         assert_eq!(problem, None);
     }
@@ -247,17 +323,17 @@ mod tests {
 
     #[test]
     fn clean_dirty_and_busy_states_never_save_even_signed_in() {
-        assert!(!save_gate(&Phase::SignedIn, None, false, false).0, "clean draft");
-        assert!(!save_gate(&Phase::SignedIn, None, true, true).0, "already busy");
+        assert!(!save_gate(&signed_in(), None, false, false).0, "clean draft");
+        assert!(!save_gate(&signed_in(), None, true, true).0, "already busy");
         assert!(
-            !save_gate(&Phase::SignedIn, Some("name is required".into()), true, false).0,
+            !save_gate(&signed_in(), Some("name is required".into()), true, false).0,
             "invalid spec"
         );
     }
 
     #[test]
     fn spec_problem_surfaces_once_signed_in() {
-        let (_, problem) = save_gate(&Phase::SignedIn, Some("name is required".into()), true, false);
+        let (_, problem) = save_gate(&signed_in(), Some("name is required".into()), true, false);
         assert_eq!(problem.as_deref(), Some("name is required"));
     }
 }

@@ -1,9 +1,7 @@
 //! Authenticated HTTP for the console frontend.
 //!
-//! Every mutating call goes through here so the bearer token is attached in
-//! exactly one place and a 401/403 becomes an actionable message instead of a
-//! raw body dump. Read-only GETs stay plain, matching the backend's open read
-//! surface.
+//! Business reads and writes share the same bearer transport and actionable
+//! 401/403 handling. Only OIDC discovery and token exchange remain public.
 
 use crate::auth;
 use serde::de::DeserializeOwned;
@@ -27,7 +25,7 @@ impl std::fmt::Display for ApiError {
             ApiError::Unauthorized { message, reauth } => {
                 write!(f, "{message}")?;
                 if *reauth {
-                    write!(f, " (sign in again to save)")
+                    write!(f, " (sign in again to continue)")
                 } else {
                     Ok(())
                 }
@@ -65,7 +63,7 @@ pub(crate) fn error_for(status: u16, body: &str) -> ApiError {
             reauth: true,
         },
         403 => ApiError::Forbidden(if body.is_empty() {
-            "your account lacks the admin role needed for this write".to_string()
+            "your access profile does not permit this operation".to_string()
         } else {
             body.to_string()
         }),
@@ -138,12 +136,9 @@ mod tests {
     }
 
     #[test]
-    fn forbidden_names_the_missing_role_and_does_not_prompt_sign_in() {
-        let err = error_for(403, "");
-        assert!(matches!(err, ApiError::Forbidden(_)));
-        let text = err.to_string();
-        assert!(text.contains("admin"), "unhelpful 403 copy: {text}");
-        assert!(!text.contains("sign in"), "403 is not a sign-in problem: {text}");
+    fn forbidden_is_not_a_session_expiry() {
+        let err = error_for(403, "researcher role required");
+        assert_eq!(err, ApiError::Forbidden("researcher role required".into()));
     }
 
     #[test]
