@@ -22,12 +22,12 @@ pub(crate) struct PendingObservation {
     pub draft: curator::Draft,
 }
 
-pub(crate) fn restore_pending() -> PendingObservation {
+pub(crate) fn restore_pending(key: &str) -> PendingObservation {
     #[cfg(target_arch = "wasm32")]
     {
         let value = web_sys::window()
             .and_then(|w| w.session_storage().ok().flatten())
-            .and_then(|s| s.get_item("athena.review.pending.v1").ok().flatten());
+            .and_then(|s| s.get_item(key).ok().flatten());
         if let Some(value) = value {
             match serde_json::from_str(&value) {
                 Ok(pending) => return pending,
@@ -37,10 +37,13 @@ pub(crate) fn restore_pending() -> PendingObservation {
             }
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = key;
     PendingObservation::default()
 }
 
 pub(crate) fn preserve_pending(
+    key: &str,
     state: &curator::CuratorState,
     selected: Option<&ResourceSummary>,
     reference: Option<&(String, String)>,
@@ -65,7 +68,7 @@ pub(crate) fn preserve_pending(
             return;
         };
         let result = if state.draft == state.base {
-            storage.remove_item("athena.review.pending.v1")
+            storage.remove_item(key)
         } else {
             let intent = subject.and_then(|key| key.split_once('|'));
             let selected = snapshot
@@ -103,7 +106,7 @@ pub(crate) fn preserve_pending(
                 draft: &state.draft,
             };
             match serde_json::to_string(&pending) {
-                Ok(value) => storage.set_item("athena.review.pending.v1", &value),
+                Ok(value) => storage.set_item(key, &value),
                 Err(_) => {
                     web_sys::console::warn_1(
                         &"Could not serialize this tab's advisory draft.".into(),
@@ -117,32 +120,15 @@ pub(crate) fn preserve_pending(
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = (state, selected, reference, subject, snapshot);
+    let _ = (key, state, selected, reference, subject, snapshot);
 }
 
-pub(crate) fn use_pending_flush(
-    state: Signal<curator::CuratorState>,
-    selected: Signal<Option<ResourceSummary>>,
-    reference: Signal<Option<(String, String)>>,
-    subject: Signal<Option<String>>,
-    snapshot: Resource<Result<ClusterSnapshot, String>>,
-) {
+pub(crate) fn use_pending_flush(flush: impl Fn() + 'static) {
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;
         let callback = use_hook(move || {
-            std::rc::Rc::new(wasm_bindgen::closure::Closure::<dyn FnMut()>::new(
-                move || {
-                    let snapshot = snapshot.peek();
-                    preserve_pending(
-                        &state.peek(),
-                        selected.peek().as_ref(),
-                        reference.peek().as_ref(),
-                        subject.peek().as_deref(),
-                        snapshot.as_ref().and_then(|value| value.as_ref().ok()),
-                    );
-                },
-            ))
+            std::rc::Rc::new(wasm_bindgen::closure::Closure::<dyn FnMut()>::new(flush))
         });
         let installed = callback.clone();
         use_effect(move || {
@@ -169,7 +155,7 @@ pub(crate) fn use_pending_flush(
         });
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = (state, selected, reference, subject, snapshot);
+    let _ = flush;
 }
 
 pub(crate) fn identity(run: &ResourceSummary) -> String {

@@ -28,7 +28,7 @@ use athena_console_web::models::{
 };
 use axum::{
     Json, Router,
-    extract::Path,
+    extract::{Extension, Path},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -83,46 +83,8 @@ async fn main() -> anyhow::Result<()> {
     let dist = std::env::var("ATHENA_CONSOLE_DIST").unwrap_or_else(|_| "dist".to_string());
     let addr = std::env::var("ATHENA_CONSOLE_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
-    // OIDC bearer auth: required for /mcp and mutating /api/*; read-only GETs
-    // stay open. Disabled when OIDC_ISSUER_URL is unset (local dev).
     let auth_state = auth::AuthState::from_env().await?;
-
-    // Mutating surface: report spec writes + preview. Auth runs before the
-    // handler; reads are on the open router below.
-    let write_routes = Router::new()
-        .route("/api/reports/preview", post(preview_report))
-        .route("/api/reports", post(create_report))
-        .route("/api/reports/:namespace/:name", axum::routing::put(replace_report))
-        .route("/mcp", post(api::mcp))
-        .route_layer(axum::middleware::from_fn_with_state(
-            auth_state.clone(),
-            auth::require_auth,
-        ));
-
-    let app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/api/auth/config", get(auth::config))
-        .route("/api/snapshot", get(snapshot))
-        .route("/api/scheduling", get(scheduling))
-        .route("/api/manifest/:namespace/:kind/:name", get(manifest))
-        .route("/api/template/:namespace/:name", get(template))
-        .route("/api/reports/:namespace/:name", get(get_report))
-        // Filtered, newest-first lists (the agent-facing read surface).
-        .route("/api/campaigns", get(api::list_campaigns))
-        .route("/api/experiments", get(api::list_experiments))
-        .route("/api/reports", get(api::list_reports))
-        .route("/api/drives", get(api::list_drives))
-        // One registry describes every endpoint: OpenAPI for humans/tools,
-        // MCP tools for agents. Neither is hand-written JSON.
-        .route("/api/openapi.json", get(api::openapi))
-        .route("/mcp", get(api::mcp_get))
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(auth::protected_resource_metadata),
-        )
-        .merge(write_routes)
-        .with_state(auth_state)
-        .fallback_service(ServeDir::new(dist));
+    let app = app(auth_state, dist);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     api::set_self_addr(listener.local_addr()?);
@@ -131,8 +93,35 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn snapshot() -> Result<Json<ClusterSnapshot>, (StatusCode, String)> {
-    load_snapshot()
+fn app(auth_state: Option<auth::AuthState>, dist: String) -> Router {
+    let business = Router::new()
+        .route("/api/auth/session", get(auth::session))
+        .route("/api/snapshot", get(snapshot))
+        .route("/api/scheduling", get(scheduling))
+        .route("/api/manifest/:namespace/:kind/:name", get(manifest))
+        .route("/api/template/:namespace/:name", get(template))
+        .route("/api/reports/:namespace/:name", get(get_report).put(replace_report))
+        .route("/api/campaigns", get(api::list_campaigns))
+        .route("/api/experiments", get(api::list_experiments))
+        .route("/api/reports", get(api::list_reports).post(create_report))
+        .route("/api/drives", get(api::list_drives))
+        .route("/api/reports/preview", post(preview_report))
+        .route("/mcp", post(api::mcp).get(api::mcp_get))
+        .route_layer(axum::middleware::from_fn_with_state(
+            auth_state.clone(), auth::require_auth,
+        ));
+    Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/api/auth/config", get(auth::config))
+        .route("/api/openapi.json", get(api::openapi))
+        .route("/.well-known/oauth-protected-resource", get(auth::protected_resource_metadata))
+        .merge(business)
+        .with_state(auth_state)
+        .fallback_service(ServeDir::new(dist))
+}
+
+async fn snapshot(Extension(auth): Extension<auth::Auth>) -> Result<Json<ClusterSnapshot>, (StatusCode, String)> {
+    load_snapshot(auth.namespaces())
         .await
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
@@ -141,22 +130,37 @@ async fn snapshot() -> Result<Json<ClusterSnapshot>, (StatusCode, String)> {
 /// `GET /api/scheduling` → the GPU-scheduling/inference stack snapshot (Kueue
 /// pools + workloads, Hephaestus node power, inference backends) for the admin
 /// views. Reuses the shared `athena_api::scheduling` reader; camelCase wire.
-async fn scheduling()
+async fn scheduling(Extension(auth): Extension<auth::Auth>)
 -> Result<Json<athena_api::scheduling::SchedulingSnapshot>, (StatusCode, String)> {
     let client = Client::try_default()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(athena_api::scheduling::read_scheduling(&client).await))
+    Ok(Json(athena_api::scheduling::read_scheduling_scoped(&client, Some(auth.namespaces())).await))
 }
 
 async fn manifest(
+    Extension(auth): Extension<auth::Auth>,
     Path((namespace, kind, name)): Path<(String, String, String)>,
-) -> impl IntoResponse {
-    kubectl_yaml(&namespace, &kind, &name)
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    auth.require_namespace(&namespace)?;
+    if !matches!(kind.as_str(), "experiment" | "researchcampaign" | "researchreport"
+        | "researchdrive" | "experimenttemplate" | "runtimeprofile" | "benchmarksuite" | "benchmarkrun")
+        || !valid_resource_name(&name)
+    {
+        return Err((StatusCode::BAD_REQUEST, "unsupported research kind or invalid resource name".into()));
+    }
+    Ok(kubectl_yaml(&namespace, &kind, &name))
 }
 
-async fn template(Path((namespace, name)): Path<(String, String)>) -> impl IntoResponse {
-    kubectl_yaml(&namespace, "experimenttemplate", &name)
+async fn template(
+    Extension(auth): Extension<auth::Auth>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    auth.require_namespace(&namespace)?;
+    if !valid_resource_name(&name) {
+        return Err((StatusCode::BAD_REQUEST, "invalid template name".into()));
+    }
+    Ok(kubectl_yaml(&namespace, "experimenttemplate", &name))
 }
 
 /// `kubectl -n <ns> get <kind> <name> -o yaml` — same approach as the native
@@ -181,19 +185,24 @@ fn kubectl_yaml(namespace: &str, kind: &str, name: &str) -> (StatusCode, String)
     }
 }
 
-async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
+async fn list_scoped<K>(client: &Client, namespaces: &[String], lp: &ListParams) -> anyhow::Result<Vec<K>>
+where
+    K: Clone + std::fmt::Debug + serde::de::DeserializeOwned
+        + kube::Resource<Scope = kube::core::NamespaceResourceScope>,
+    K::DynamicType: Default,
+{
+    let mut scope = namespaces.iter();
+    let first = scope.next().ok_or_else(|| anyhow::anyhow!("access profile has no namespaces"))?;
+    let mut items = Api::<K>::namespaced(client.clone(), first).list(lp).await?.items;
+    for namespace in scope {
+        items.extend(Api::<K>::namespaced(client.clone(), namespace).list(lp).await?.items);
+    }
+    Ok(items)
+}
+
+async fn load_snapshot(namespaces: &[String]) -> anyhow::Result<ClusterSnapshot> {
     let client = Client::try_default().await?;
     let lp = ListParams::default().limit(500);
-
-    let experiments_api = Api::<Experiment>::all(client.clone());
-    let campaigns_api = Api::<ResearchCampaign>::all(client.clone());
-    let templates_api = Api::<ExperimentTemplate>::all(client.clone());
-    let suites_api = Api::<BenchmarkSuite>::all(client.clone());
-    let runs_api = Api::<BenchmarkRun>::all(client.clone());
-    let jobs_api = Api::<Job>::all(client.clone());
-    let profiles_api = Api::<RuntimeProfile>::all(client.clone());
-    let drives_api = Api::<ResearchDrive>::all(client.clone());
-    let reports_api = Api::<ResearchReport>::all(client);
 
     let (
         exp_list,
@@ -206,20 +215,19 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         report_list,
         drive_list,
     ) = tokio::try_join!(
-        experiments_api.list(&lp),
-        campaigns_api.list(&lp),
-        templates_api.list(&lp),
-        suites_api.list(&lp),
-        runs_api.list(&lp),
-        profiles_api.list(&lp),
-        jobs_api.list(&lp),
-        reports_api.list(&lp),
-        drives_api.list(&lp),
+        list_scoped::<Experiment>(&client, namespaces, &lp),
+        list_scoped::<ResearchCampaign>(&client, namespaces, &lp),
+        list_scoped::<ExperimentTemplate>(&client, namespaces, &lp),
+        list_scoped::<BenchmarkSuite>(&client, namespaces, &lp),
+        list_scoped::<BenchmarkRun>(&client, namespaces, &lp),
+        list_scoped::<RuntimeProfile>(&client, namespaces, &lp),
+        list_scoped::<Job>(&client, namespaces, &lp),
+        list_scoped::<ResearchReport>(&client, namespaces, &lp),
+        list_scoped::<ResearchDrive>(&client, namespaces, &lp),
     )?;
 
     // Follow controller-reported Job references, scoped by namespace/name.
     let job_times = job_list
-        .items
         .iter()
         .filter_map(|j| {
             let name = j.metadata.name.as_deref()?;
@@ -236,7 +244,6 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
 
     // Experiments carry no template ref; it lives on the owning campaign.
     let campaign_template: HashMap<(&str, &str), (&str, Option<&str>)> = campaign_list
-        .items
         .iter()
         .map(|c| (
             (c.metadata.namespace.as_deref().unwrap_or("default"), c.metadata.name.as_deref().unwrap_or_default()),
@@ -245,7 +252,6 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .collect();
     // Campaigns get their objective metric/goal from their template.
     let template_objective: HashMap<(&str, &str), (&str, &str)> = tpl_list
-        .items
         .iter()
         .map(|t| {
             (
@@ -262,7 +268,6 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .collect();
 
     let experiments = exp_list
-        .items
         .into_iter()
         .map(|e| {
             let namespace = e.metadata.namespace.as_deref().unwrap_or("default");
@@ -350,7 +355,6 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .collect();
 
     let campaigns = campaign_list
-        .items
         .into_iter()
         .map(|c| {
             let status = c.status.as_ref();
@@ -422,7 +426,6 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .collect();
 
     let templates = tpl_list
-        .items
         .into_iter()
         .map(|t| TemplateSummary {
             namespace: t.namespace().unwrap_or_else(|| "default".to_string()),
@@ -437,7 +440,6 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .collect();
 
     let benchmark_suites = suite_list
-        .items
         .into_iter()
         .map(|s| ResourceSummary {
             namespace: s.namespace().unwrap_or_else(|| "default".to_string()),
@@ -465,7 +467,6 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .collect();
 
     let benchmark_runs = run_list
-        .items
         .into_iter()
         .map(|r| {
             let status = r.status.as_ref();
@@ -519,7 +520,6 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .collect();
 
     let runtime_profiles = profile_list
-        .items
         .into_iter()
         .map(|p| ResourceSummary {
             namespace: p.namespace().unwrap_or_else(|| "default".to_string()),
@@ -550,7 +550,6 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .collect();
 
     let reports = report_list
-        .items
         .into_iter()
         .map(|r| {
             let status = r.status.as_ref();
@@ -571,7 +570,6 @@ async fn load_snapshot() -> anyhow::Result<ClusterSnapshot> {
         .collect();
 
     let drives = drive_list
-        .items
         .into_iter()
         .map(|d| {
             let st = d.status.clone().unwrap_or_default();
@@ -670,6 +668,10 @@ fn valid_name(name: &str) -> bool {
         && !name.ends_with('-')
 }
 
+fn valid_resource_name(name: &str) -> bool {
+    name.len() <= 253 && name.split('.').all(valid_name)
+}
+
 fn detail_of(r: &ResearchReport) -> ReportDetailDto {
     let status = r.status.as_ref();
     ReportDetailDto {
@@ -707,8 +709,10 @@ fn detail_of(r: &ResearchReport) -> ReportDetailDto {
 
 /// `GET /api/reports/{ns}/{name}` — full editable spec + status.
 async fn get_report(
+    Extension(auth): Extension<auth::Auth>,
     Path((namespace, name)): Path<(String, String)>,
 ) -> Result<Json<ReportDetailDto>, (StatusCode, String)> {
+    auth.require_namespace(&namespace)?;
     let client = Client::try_default().await.map_err(ise)?;
     let reports: Api<ResearchReport> = Api::namespaced(client, &namespace);
     match reports.get_opt(&name).await.map_err(ise)? {
@@ -725,9 +729,15 @@ async fn get_report(
 /// change (another curator, the drive's write-up) is a 409, not a silent
 /// overwrite. Replace — not apply — so removing a section removes it.
 async fn replace_report(
+    Extension(auth): Extension<auth::Auth>,
     Path((namespace, name)): Path<(String, String)>,
     Json(dto): Json<ReportSpecDto>,
 ) -> Result<Json<ReportDetailDto>, (StatusCode, String)> {
+    auth.require_namespace(&namespace)?;
+    auth.require_namespace(&dto.namespace)?;
+    if dto.namespace != namespace || dto.name != name {
+        return Err((StatusCode::BAD_REQUEST, "report body namespace/name must match the URL".into()));
+    }
     let Some(rv) = dto.resource_version.clone() else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -766,8 +776,10 @@ fn ise<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
 /// controller owns status). Rejects invalid names, a missing campaign, and an
 /// existing name (409): updates go through `PUT` with a resourceVersion.
 async fn create_report(
+    Extension(auth): Extension<auth::Auth>,
     Json(dto): Json<ReportSpecDto>,
 ) -> Result<Json<ReportDetailDto>, (StatusCode, String)> {
+    auth.require_namespace(&dto.namespace)?;
     if !valid_name(&dto.name) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -808,7 +820,11 @@ async fn create_report(
 
 /// `POST /api/reports/preview` — assemble the curated dossier Markdown for an
 /// unsaved draft spec. Read-only; nothing is persisted.
-async fn preview_report(Json(dto): Json<ReportSpecDto>) -> Result<String, (StatusCode, String)> {
+async fn preview_report(
+    Extension(auth): Extension<auth::Auth>,
+    Json(dto): Json<ReportSpecDto>,
+) -> Result<String, (StatusCode, String)> {
+    auth.require_namespace(&dto.namespace)?;
     if dto.campaign_ref.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -941,14 +957,15 @@ mod api {
         Page { total, items }
     }
 
-    async fn snap() -> Result<ClusterSnapshot, (StatusCode, String)> {
-        load_snapshot().await.map_err(ise)
+    async fn snap(auth: &auth::Auth) -> Result<ClusterSnapshot, (StatusCode, String)> {
+        load_snapshot(auth.namespaces()).await.map_err(ise)
     }
 
     pub async fn list_campaigns(
+        Extension(auth): Extension<auth::Auth>,
         Query(q): Query<CampaignQuery>,
     ) -> ApiResult<Page<ResourceSummary>> {
-        let items = snap()
+        let items = snap(&auth)
             .await?
             .campaigns
             .into_iter()
@@ -965,9 +982,10 @@ mod api {
     }
 
     pub async fn list_experiments(
+        Extension(auth): Extension<auth::Auth>,
         Query(q): Query<ExperimentQuery>,
     ) -> ApiResult<Page<ResourceSummary>> {
-        let items = snap()
+        let items = snap(&auth)
             .await?
             .experiments
             .into_iter()
@@ -984,8 +1002,11 @@ mod api {
         Ok(Json(page(items, |e| e.created_at.as_ref(), q.limit)))
     }
 
-    pub async fn list_reports(Query(q): Query<ReportQuery>) -> ApiResult<Page<ReportListItem>> {
-        let items = snap()
+    pub async fn list_reports(
+        Extension(auth): Extension<auth::Auth>,
+        Query(q): Query<ReportQuery>,
+    ) -> ApiResult<Page<ReportListItem>> {
+        let items = snap(&auth)
             .await?
             .reports
             .into_iter()
@@ -1010,8 +1031,8 @@ mod api {
         Ok(Json(page(items, |r| r.created_at.as_ref(), q.limit)))
     }
 
-    pub async fn list_drives() -> ApiResult<Vec<DriveSummary>> {
-        Ok(Json(snap().await?.drives))
+    pub async fn list_drives(Extension(auth): Extension<auth::Auth>) -> ApiResult<Vec<DriveSummary>> {
+        Ok(Json(snap(&auth).await?.drives))
     }
 
     // --- registry ---------------------------------------------------------------
@@ -1036,12 +1057,14 @@ mod api {
         pub response: Option<SchemaFn>,
         /// Exposed as an MCP tool.
         pub tool: bool,
+        pub permission: auth::Permission,
     }
 
-    pub fn ops() -> Vec<Op> {
-        vec![
+    pub fn ops() -> &'static [Op] {
+        &[
             Op {
                 id: "list_campaigns",
+                permission: auth::Permission::Research,
                 method: "get",
                 path: "/api/campaigns",
                 summary: "Campaigns newest first: drive, template, strategy, phase, counts, best experiment/objective, conditions.",
@@ -1052,6 +1075,7 @@ mod api {
             },
             Op {
                 id: "list_experiments",
+                permission: auth::Permission::Research,
                 method: "get",
                 path: "/api/experiments",
                 summary: "Experiments newest first: campaign, template, phase, decision, objective and best value, lineage parent/generation, runtime, hypothesis. Search here for prior art before proposing work.",
@@ -1062,6 +1086,7 @@ mod api {
             },
             Op {
                 id: "list_reports",
+                permission: auth::Permission::Research,
                 method: "get",
                 path: "/api/reports",
                 summary: "ResearchReports newest first with section headings. The research memory: conclusions, footguns, negative results.",
@@ -1072,6 +1097,7 @@ mod api {
             },
             Op {
                 id: "list_drives",
+                permission: auth::Permission::Research,
                 method: "get",
                 path: "/api/drives",
                 summary: "ResearchDrives: phase, current curriculum stage, stagnation, conditions, per-stage template gate evidence.",
@@ -1082,6 +1108,7 @@ mod api {
             },
             Op {
                 id: "get_report",
+                permission: auth::Permission::Research,
                 method: "get",
                 path: "/api/reports/{namespace}/{name}",
                 summary: "Full editable ResearchReport spec (including resource_version) plus controller status and conditions.",
@@ -1092,6 +1119,7 @@ mod api {
             },
             Op {
                 id: "get_manifest",
+                permission: auth::Permission::Research,
                 method: "get",
                 path: "/api/manifest/{namespace}/{kind}/{name}",
                 summary: "YAML of one resource (kind: experiment, researchcampaign, researchreport, researchdrive, experimenttemplate, runtimeprofile, benchmarksuite, benchmarkrun).",
@@ -1102,6 +1130,7 @@ mod api {
             },
             Op {
                 id: "get_scheduling",
+                permission: auth::Permission::Infrastructure,
                 method: "get",
                 path: "/api/scheduling",
                 summary: "GPU scheduling: Kueue pools and workloads, node power, inference backends.",
@@ -1112,6 +1141,7 @@ mod api {
             },
             Op {
                 id: "preview_report",
+                permission: auth::Permission::Research,
                 method: "post",
                 path: "/api/reports/preview",
                 summary: "Compose the dossier Markdown for an unsaved report spec. Writes nothing.",
@@ -1122,6 +1152,7 @@ mod api {
             },
             Op {
                 id: "create_report",
+                permission: auth::Permission::Reports,
                 method: "post",
                 path: "/api/reports",
                 summary: "Create a ResearchReport (spec only). 400 if the name is not a DNS label or the campaign is missing; 409 if the name exists.",
@@ -1132,6 +1163,7 @@ mod api {
             },
             Op {
                 id: "update_report",
+                permission: auth::Permission::Reports,
                 method: "put",
                 path: "/api/reports/{namespace}/{name}",
                 summary: "Replace a ResearchReport spec. body.resource_version must come from get_report; 409 if the report changed since (reload, reapply). Pass references/about through unchanged.",
@@ -1142,6 +1174,7 @@ mod api {
             },
             Op {
                 id: "get_snapshot",
+                permission: auth::Permission::Research,
                 method: "get",
                 path: "/api/snapshot",
                 summary: "Everything the console shows, unfiltered (large).",
@@ -1150,7 +1183,44 @@ mod api {
                 response: Some(schema::<ClusterSnapshot>),
                 tool: false,
             },
+            Op {
+                id: "get_template",
+                permission: auth::Permission::Research,
+                method: "get",
+                path: "/api/template/{namespace}/{name}",
+                summary: "ExperimentTemplate YAML within the access profile.",
+                query: None,
+                body: None,
+                response: None,
+                tool: false,
+            },
+            Op {
+                id: "get_access_session",
+                permission: auth::Permission::Research,
+                method: "get",
+                path: "/api/auth/session",
+                summary: "Server-verified capabilities and namespace scope.",
+                query: None,
+                body: None,
+                response: Some(schema::<athena_console_web::access::AccessSession>),
+                tool: false,
+            },
         ]
+    }
+
+    pub fn request_allowed(auth: &auth::Auth, method: &axum::http::Method, path: &str) -> bool {
+        if path == "/mcp" {
+            return auth.allows(auth::Permission::Research);
+        }
+        ops().iter().any(|op| {
+            if !op.method.eq_ignore_ascii_case(method.as_str()) || !auth.allows(op.permission) {
+                return false;
+            }
+            let mut actual = path.split('/');
+            op.path.split('/').all(|segment| actual.next().is_some_and(|part| {
+                (segment.starts_with('{') && segment.ends_with('}')) || segment == part
+            })) && actual.next().is_none()
+        })
     }
 
     fn path_params(path: &str) -> Vec<&str> {
@@ -1228,9 +1298,12 @@ mod api {
                 "operationId": op.id,
                 "summary": op.summary,
                 "parameters": params,
+                "security": [{ "bearerAuth": [] }],
                 "responses": {
                     "200": { "description": "OK", "content": response },
                     "400": { "description": "Invalid request" },
+                    "401": { "description": "Missing, expired or invalid access token" },
+                    "403": { "description": "Role or namespace is outside the access profile" },
                     "409": { "description": "Conflict" },
                 },
             });
@@ -1260,7 +1333,12 @@ mod api {
                 "description": "Read Athena research resources; write ResearchReport specs only. Controllers own status. Timestamps are epoch-millis strings.",
             },
             "paths": paths,
-            "components": { "schemas": schemas },
+            "components": {
+                "schemas": schemas,
+                "securitySchemes": {
+                    "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" },
+                },
+            },
         })
     }
 
@@ -1316,10 +1394,9 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
     }
 
     pub async fn mcp(req: axum::extract::Request) -> axum::response::Response {
-        // Role gate: viewers may not call write tools (create_report /
-        // update_report). Reads and protocol methods stay open to any valid
-        // token; when auth is disabled (dev), everything is allowed.
-        let role = crate::auth::request_auth(&req).map(|a| a.role);
+        let Some(auth) = crate::auth::request_auth(&req).cloned() else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
         let auth_hdr = req
             .headers()
             .get(axum::http::header::AUTHORIZATION)
@@ -1351,7 +1428,7 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({
-                "tools": ops().iter().filter(|o| o.tool).map(|o| json!({
+                "tools": ops().iter().filter(|o| o.tool && auth.allows(o.permission)).map(|o| json!({
                     "name": o.id,
                     "description": o.summary,
                     "inputSchema": tool_schema(o),
@@ -1359,9 +1436,9 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
             })),
             "tools/call" => {
                 let tool = params.get("name").and_then(Value::as_str).unwrap_or("");
-                if role == Some(crate::auth::Role::Viewer) && WRITE_TOOLS.contains(&tool) {
+                if ops().iter().find(|op| op.id == tool).is_some_and(|op| !auth.allows(op.permission)) {
                     Ok(tool_result(
-                        format!("forbidden: tool {tool} requires the admin role"),
+                        format!("forbidden: this access profile does not permit {tool}"),
                         true,
                     ))
                 } else {
@@ -1379,9 +1456,6 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
         Json(body).into_response()
     }
 
-    /// Tools that mutate the research record; viewers are denied at
-    /// `tools/call` time (auth middleware already required a valid token).
-    const WRITE_TOOLS: &[&str] = &["create_report", "update_report"];
 
     fn tool_result(text: String, is_error: bool) -> Value {
         json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
@@ -1396,7 +1470,7 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let Some(op) = ops().into_iter().find(|o| o.tool && o.id == name) else {
+        let Some(op) = ops().iter().find(|o| o.tool && o.id == name) else {
             return tool_result(format!("unknown tool: {name}"), true);
         };
         let Some(addr) = SELF_ADDR.get() else {
@@ -1518,8 +1592,8 @@ Tools mirror the REST API in /api/openapi.json. Timestamps are epoch-millis stri
                     );
                 }
             }
-            let upd = ops().into_iter().find(|o| o.id == "update_report").unwrap();
-            let s = tool_schema(&upd);
+            let upd = ops().iter().find(|o| o.id == "update_report").unwrap();
+            let s = tool_schema(upd);
             assert!(s["properties"]["body"]["properties"]["resource_version"].is_object());
         }
     }

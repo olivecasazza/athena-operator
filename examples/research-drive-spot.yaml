@@ -52,8 +52,16 @@ spec:
     # console MCP endpoint (prior art, reports, footguns) before proposing.
     harness:
       type: PrimeAgent
-      image: ghcr.io/olivecasazza/athena-prime-proposer@sha256:381cc154f24afae33b4368c24bbff41b587d5712d6398b0ac6e827da3f544afa
+      image: ghcr.io/olivecasazza/athena-prime-proposer@sha256:579f49df6035a13852700fcb4fcaa2f0e3beccca60e7afbdc44c7c73053014e5
       timeoutSeconds: 900
+      mcpUrl: http://athena-console.apps.svc.cluster.local:3000/mcp
+      mcpAuth:
+        tokenUrl: http://keycloak.auth.svc.cluster.local:8080/realms/master/protocol/openid-connect/token
+        clientId: athena-research-reader
+        resource: https://athena-console.casazza.io
+        clientSecretRef:
+          name: athena-research-reader
+          key: client-secret
     apiKeySecretRef:
       name: omniroute-secrets
       key: API_KEY_PRIMARY

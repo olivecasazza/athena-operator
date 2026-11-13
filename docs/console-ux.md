@@ -1,6 +1,6 @@
 # Athena Console UX
 
-Last reviewed: 2026-11-10
+Last reviewed: 2026-11-13
 
 This is the canonical story, panel-ownership and component inventory for the
 console. Update it in place when adding or removing a panel. Kubernetes owns
@@ -63,7 +63,7 @@ Existing R/O/W identifiers remain capability coverage, not the priority order.
 | J4 — proposed, needs product confirmation | After I give feedback, I want to understand whether and how the agent addressed it so I know the observation was not silently lost. | Link to an agent response or relevant follow-up experiment when a real contract supplies one. Saving a report is not proof that an agent consumed it. No acknowledgment states, service or controller status fields are invented by this brief. |
 | J5 — supporting, confirmed scope | While research runs, I want to understand progress and investigate failures or waiting so I can distinguish research outcomes from execution problems. | Retain machine-check evidence and campaign context; disclose operator-owned Job/Ray/SkyPilot execution and Kueue admission where supported by real APIs. Name actual reasons for waiting. A pending human review is not one of those reasons in this workflow. |
 | J6 — supporting, confirmed scope | When reviewing a body of work, I want to roll campaign evidence and findings into projections and ResearchReports so the research has durable, queryable memory. | Conclusions link back to experiments and evidence; human observations remain distinguishable from measurements. Preserve authorized spec-only writes, dirty drafts and resourceVersion conflict handling. Do not imply a generated summary has been verified or a new projection schema has been agreed. |
-| J7 — supporting, existing capability | When execution context matters, I want to inspect configuration and capacity without losing the research subject I was investigating. | Keep Catalog/Admin and detailed manifests reachable as secondary tools. Do not add imperative deployment controls or claim that the console already launches every execution backend. |
+| J7 — supporting, existing capability | When execution context matters, I want to inspect configuration and capacity without losing the research subject I was investigating. | Keep Catalog/Infrastructure and detailed manifests reachable as secondary tools. Do not add imperative deployment controls or claim that the console already launches every execution backend. |
 
 ### Implemented information hierarchy
 
@@ -215,7 +215,7 @@ checking only the personal fork would incorrectly recommend a downgrade.
 | R5 | Researcher: inspect the selected resource's metrics and manifest without losing selection. | Experiment Metrics / Experiment Manifest | `GrafanaDashboard` scoped by experiment/campaign and start/end with buffer; `IdePanel` local YAML buffer. Editing this buffer does not deploy or write status. |
 | R6 | Scientist: find and review a report, edit its narrative/hypotheses, curate included runs, preview and save without overwriting a concurrent version. | Reports → Report Curator; campaign report rows use the same destination | `DataTable` for reports, dataset, references and status conditions; `Badge` for literal phase/conditions. Existing Dataset/Narrative/Hypotheses/References/Preview/Status tabs, auth, dirty-draft protection, resourceVersion conflict handling and spec-only writes remain. |
 | O1 | Operator: inspect templates, benchmark suites/runs and execution profiles. | Catalog view | `DataTable` for each list and `IdePanel` template YAML. No imperative deployment controls. |
-| O2 | Operator: distinguish queue admission from node power and inference readiness. | Admin → GPU Pools & Queues / Node Power / Inference Backends | `DataTable` for workloads, nodes and endpoints; literal power/serving chips. Pool quota/usage summary remains separate from individual workload rows. Read-only scheduling API. |
+| O2 | Operator: distinguish queue admission from node power and inference readiness. | Infrastructure → GPU Pools & Queues / Node Power / Inference Backends | `DataTable` for workloads, nodes and endpoints; literal power/serving chips. Pool quota/usage summary remains separate from individual workload rows. Server-authorized, read-only scheduling API. |
 | W1 | Any user: arrange/minimize/maximize panels, switch task views, reset or save a custom layout. | Review / Research / Experiments / Reports / Catalog, dock and Layout disclosure | Shared reducer/frame/dock/chrome and `workspace::panel_element`; host-owned named view persistence. Existing v5 saved/custom layouts are preserved; new sessions start in Review. |
 
 ### Identity and panel sizing
@@ -445,6 +445,136 @@ Public web components are Dioxus painters; neutral models live in
 - `4160e43`, `f6ac787`, `4a77a51`, `7940325`: table/status/meter/text, charts,
   shared core+web+terminal, then initial Dioxus workspace foundation.
 
+## Private access: identity before research data
+
+Authentication is not a report-save enhancement. Research resources are private
+business data, whether requested by the browser, REST or MCP. A Kubernetes
+ServiceAccount limits backend privilege; it does not authorize the human or
+agent making an HTTP request. Cloudflare Access remains an additional ingress
+boundary, not a role grant trusted by the BFF.
+
+### Access stories and existing homes
+
+| ID | User story | Home and contract |
+| --- | --- | --- |
+| A1 | As a returning researcher, I sign in before loading research data and see whether access is missing, expired or denied. | One workspace entry state, shared buttons/chips, protected `/api/auth/session`; no wall of identical panel errors and no anonymous snapshot fallback. |
+| A2 | As a viewer, I inspect research evidence, reports and manifests without acquiring report-write or infrastructure privileges. | Existing Review/Research/Experiments/Reports/Catalog panels; authenticated reads, explicit read-only save explanation, no Infrastructure entry. |
+| A3 | As a researcher, I author a ResearchReport spec without overwriting another revision or losing a draft during sign-in. | Existing feedback composer and Report Curator; server write capability, namespace/body agreement and resourceVersion checks. Advisory and standalone curator drafts recover separately in this tab. |
+| A4 | As an operator, I inspect queues, workload admission, power and inference without confusing capacity reads with research mutation. | Infrastructure panels and protected scheduling endpoint; namespace-scoped workloads/inference plus explicitly cluster-wide capacity reads. |
+| A5 | As a proposer, I authenticate as a bounded research-memory reader and stop before asking the model if prior-art access fails. | Existing MCP tools, stateless proposer Job, namespace-local credential Secret and Prime Agent's supported bearer environment reference. No scheduling tool, report writes or Kubernetes token. |
+| A6 | As the owner of shared Grafana, I grant datasource access deliberately rather than exposing query APIs to anonymous dashboard visitors. | Existing Grafana SSO and `GrafanaDashboard`; explicit Grafana client role, strict role mapping, anonymous access disabled and a separate sign-in link. |
+
+No new panels or AuthProfile CRD are needed. These stories constrain the
+existing surfaces instead of adding another administration dashboard.
+
+### Permission and namespace contract
+
+Tokens require the configured issuer and exact **resource URL** audience, a
+nonempty subject and an issuer-advertised signing algorithm. Merely having the
+browser client ID in `aud`, a matching `azp`, or a global realm-admin role is
+not application authorization. Roles come only from
+`resource_access[OIDC_CLIENT_ID].roles`; unknown/unassigned application roles
+are denied. Multiple assigned roles union their capabilities.
+
+| Athena client role | Research reads / preview | Report spec create/update | Infrastructure reads |
+| --- | --- | --- | --- |
+| viewer | Yes | No | No |
+| researcher | Yes | Yes | No |
+| operator | Yes | No | Yes |
+| admin | Yes | Yes | Yes |
+
+Every business REST route and MCP operation is protected. One static operation
+registry supplies the REST capability check, filtered MCP tool list and MCP
+call policy. Preview reads research state but persists nothing. Health, public
+OIDC configuration, OAuth resource metadata, OpenAPI and static assets remain
+discoverable; they do not contain research records.
+
+The server's named profile supplies an explicit namespace allowlist. Snapshot
+and list acquisition use namespaced Kubernetes requests, not a cluster-wide
+query followed by UI filtering. Manifest kinds are an allowlist of research
+resources, not arbitrary `kubectl` resource arguments. Path/body namespace
+checks precede Kubernetes access; report replacements must also match the URL
+name. The profile is a shared allowed-namespace boundary, not per-user tenant
+impersonation. Kubernetes audit sees the console ServiceAccount.
+
+The backend SA has read access to research resources, Jobs, Kueue workloads
+and RayJobs in the allowed namespaces; its only research writes are
+ResearchReport create/update. It has no Secret, status-write, delete or
+experiment/campaign/template mutation permission. A separate read-only
+ClusterRole covers ClusterQueues and MetalMachines for capacity inspection.
+Only the HTTP infrastructure capability can reach that endpoint.
+
+Production defaults to `ATHENA_AUTH_MODE=required`. Required settings are
+`ATHENA_ACCESS_PROFILE`, `ATHENA_NAMESPACES`, `OIDC_ISSUER_URL`,
+`OIDC_CLIENT_ID` and `OIDC_RESOURCE_URL`. `OIDC_JWKS_URL` selects the trusted
+public-key endpoint; the deployment uses internal Keycloak while retaining
+public HTTPS issuer/resource identifiers. Missing configuration fails startup.
+Unauthenticated development requires explicit `disabled-local` and a loopback
+listener; it cannot silently expose a wildcard-bound server.
+
+### Session and draft behavior
+
+All business reads and writes use the same bearer transport. Only auth
+discovery and the public-client token exchange are unauthenticated. The
+browser obtains capabilities from the server, not from token presence or a
+client-decoded role. This remains the initial-snapshot/manual-refresh UI:
+there is no invented SSE/watch implementation.
+
+The PKCE callback consumes state, verifier and the original redirect URI as one
+single-use record. Callback cleanup removes OAuth parameters without erasing
+the application's path/query. Expired credentials are distinguished from an
+initial signed-out visitor; server rejection invalidates the visible session.
+Neither permission failures nor reauthentication submit or discard a draft.
+Review feedback and standalone Report Curator recovery reuse the same
+tab-scoped draft mechanism with separate keys; they are not a research ledger
+or proof of a successful write.
+
+### GitOps profile and shared-Grafana boundary
+
+The canonical deployment definition is
+`nixlab:modules/k8s/apps/athena-access-profile.json`, consumed by console,
+Keycloak, Grafana and declarative ResearchDrive modules. Content-addressed
+ConfigMap names force the affected processes to pick up environment changes.
+The browser remains a public PKCE client; no browser-client secret is added.
+
+The four already-declared human realm administrators receive explicit Athena
+admin client roles and **Grafana Viewer only**. Existing realm-admin grants,
+builtin composites and identity-provider account-linking policy are not
+reworked by this cutover. The machine client receives only Athena viewer.
+The existing local Grafana break-glass/operator credential path is retained.
+
+Grafana Viewer is **not namespace isolation**: authorized viewers can query the
+shared configured datasources, not merely the visible Athena folder. Athena
+roles do not automatically grant Grafana membership. The metrics panel links
+to Grafana sign-in and never puts a console bearer in an iframe URL. Existing
+anonymous embeds throughout the shared instance will need an authenticated
+Grafana session; account for that impact and the Grafana Recreate rollout.
+
+Proposer authentication is additive
+`ResearchDrive.spec.proposer.harness.mcpAuth`: token URL, client ID, resource
+and local `clientSecretRef`. The Job mounts only that credential key read-only,
+without a Kubernetes token. The reader token lifetime is 1,200 seconds; the
+runner requires it to cover the configured Job budget plus 120 seconds and
+verifies MCP initialize/tool discovery before invoking the model. Redirects
+cannot forward its secret or bearer. Proposer egress adds only the Keycloak
+token endpoint and uses the actual MCPServer pod label; MCP targets port 3000.
+
+The three existing drive specs become GitOps-owned configuration inputs,
+without copying status or rewriting their research history. Their observed
+pause settings are preserved (arena active; curriculum and Spot paused), and
+Flux pruning is disabled for these research-memory CRDs. Changing authentication
+must not resume a drive or manufacture an agent acknowledgment.
+
+Review the exact principal bindings, SA grants, shared-Grafana impact and
+immutable artifacts **before deployment**. Provision the reader credential in
+the existing GCP `auth-keycloak-clients` secret's
+`athena-research-reader-secret` property; ExternalSecret projects only that
+property into `apps/athena-research-reader`. Do not paste it in chat. Import
+the new client/roles, install the additive CRD/operator and runner changes,
+then cut over the private console/Grafana profile. Source-main chart changes
+also reconcile through Flux, so source merge is part of this reviewed rollout,
+not a harmless code-only step.
+
 ## Verification contract
 
 For review-first verification, exercise J1–J3 with real or explicitly labeled
@@ -464,10 +594,48 @@ For browser verification, serve the actual built bundle with console-server;
 use clearly labeled read fixtures and intercept fixture writes rather than
 mutating Kubernetes or adding a durable fixture-state service. Exercise R1–W1,
 empty/error/loading states, run selection and trace expansion, report tabs,
-Catalog/Admin, named-view persistence, and a constrained viewport. Save screenshots
+Catalog/Infrastructure, named-view persistence, and a constrained viewport. Save screenshots
 and text captures outside the repository; distinguish fixture rendering proof
 from live OIDC/Grafana/Kubernetes integration. No claim about agent traces can
 be made without their missing data contract.
+
+### Private access verification (2026-11-13)
+
+- All **65 library and 21 BFF/auth tests** pass. Coverage includes role unions,
+  issuer/resource/subject and algorithm rejection, anonymous business reads,
+  REST/MCP viewer-write parity, namespace refusal, unsupported manifest kinds,
+  single-use PKCE and naturally expired versus missing credentials.
+- Seven isolated proposer HTTP tests pass: valid research access, insufficient
+  token lifetime, bad/partial credentials, missing prior-art tools, and refusal
+  to forward either client secret or bearer through redirects.
+- The production console and proposer Docker recipes build. The declared Nix
+  operator-image output and x86_64 `athena-console-web` / `proposer-auth`
+  checks build; no GitHub Actions Nix build or Hydra-executor success is claimed.
+- The actual release bundle/BFF ran as UID 65532 with a read-only root,
+  no capabilities and a fixture-only kubeconfig. Real browser PKCE requests
+  verified the original redirect query and server-verified permissions.
+  No business snapshot/scheduling/report request occurred before sign-in.
+- Viewer reads, disabled report saves and absent Infrastructure entry are
+  verified. Researcher saves pass the HTTP capability boundary; a deliberately
+  rejected **fixture** persistence request retains the draft and exposes Retry.
+  Operator infrastructure reads carry a bearer while report writes remain
+  disabled. Seven additional BFF HTTP boundary checks and a signed machine
+  OAuth/MCP initialize/tool-discovery round trip pass.
+- Both advisory and standalone curator drafts survive authentication
+  navigation. A natural-expiry browser scenario caught the initial
+  signed-out/expired ambiguity; the corrected bundle shows the explicit
+  expired state and a usable Sign in action without losing either draft.
+  Desktop and 390px surfaces were inspected; the compact page has no
+  horizontal overflow. Captures/logs remain outside the repository.
+- Kubernetes fixture inputs are read-only captures. The fixture server rejects
+  persistence; no real research object/spec/status was written for this proof.
+  Empty infrastructure fixtures do not establish real capacity or backend health.
+  Live Google/Keycloak/Grafana SSO and a real report save are **not** claimed.
+  The public browser handoff stopped at Keycloak's existing-account challenge,
+  without account linking or live security changes.
+- The security reviewer returned an unsupported-provider notice, not findings.
+  Independent LLM security approval is unavailable; the cutover still requires
+  owner review of the exact generated bindings, datasource scope and rollout.
 
 ### Review-first implementation evidence (2026-11-10)
 

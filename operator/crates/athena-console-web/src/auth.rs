@@ -1,8 +1,8 @@
 //! Browser-side OIDC Authorization Code + PKCE for the console frontend.
 //!
-//! The console's Keycloak client is a *public* client for browser use: this
-//! bundle carries a PKCE verifier and nothing secret. The confidential client
-//! secret stays in the `console-server` binary and is never shipped to wasm.
+//! The Keycloak client is public: the browser uses PKCE, not a client secret.
+//! The backend validates access tokens as a resource server; it does not hold
+//! a confidential browser-client credential.
 //!
 //! Everything that carries a security property — verifier generation, the S256
 //! challenge, percent-encoding, URL and form-body construction, token parsing,
@@ -11,8 +11,21 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(target_arch = "wasm32")]
+use dioxus::prelude::{Readable, Writable};
+
+#[cfg(target_arch = "wasm32")]
+static SESSION_REVISION: dioxus::prelude::GlobalSignal<u64> = dioxus::prelude::Signal::global(|| 0);
+
+/// Reactive invalidation after an API rejects the session.
+pub(crate) fn session_revision() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    { *SESSION_REVISION.read() }
+    #[cfg(not(target_arch = "wasm32"))]
+    { 0 }
+}
 
 /// Public OIDC parameters served by the backend at `GET /api/auth/config`.
 ///
@@ -32,21 +45,22 @@ pub(crate) struct AuthConfig {
 }
 
 impl AuthConfig {
-    /// Usable when auth is on and both endpoints are present. Anything else
-    /// means "local dev / auth disabled": sign-in must be a no-op rather than a
-    /// broken redirect.
+    /// Only an enabled, usable public-client configuration may start sign-in.
+    /// Missing production configuration is rejected by the backend at startup.
     fn usable(&self) -> bool {
         self.enabled && !self.issuer.is_empty() && !self.client_id.is_empty()
     }
 }
 
-/// localStorage key holding the PKCE verifier between the authorize redirect
-/// and the callback. Single-use and short-lived; an abandoned flow is simply
-/// overwritten by the next attempt.
-const VERIFIER_KEY: &str = "athena_console_pkce_verifier";
-/// localStorage key holding the `state` echoed back on the callback, checked
-/// to reject a forged callback. Single-use.
-const STATE_KEY: &str = "athena_console_pkce_state";
+/// One single-use login record; redirect URI includes the original app context.
+const PENDING_KEY: &str = "athena_console_pending_login";
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PendingLogin<T = String> {
+    pub verifier: T,
+    pub state: T,
+    pub redirect_uri: T,
+}
 /// localStorage keys for the persisted token: the value and its epoch expiry.
 const TOKEN_KEY: &str = "athena_console_access_token";
 const TOKEN_EXPIRY_KEY: &str = "athena_console_access_token_expires_at";
@@ -255,13 +269,6 @@ fn write(key: &str, value: &str) {
     }
 }
 
-/// Take the single-use PKCE verifier for a token exchange. Removed on read, so
-/// a replayed callback cannot reuse it.
-pub(crate) fn take_verifier() -> Option<String> {
-    let verifier = read(VERIFIER_KEY);
-    drop_key(VERIFIER_KEY);
-    verifier
-}
 
 fn drop_key(key: &str) {
     if let Some(s) = storage() {
@@ -269,26 +276,24 @@ fn drop_key(key: &str) {
     }
 }
 
-pub(crate) fn save_pending(pkce: &Pkce, state: &str) {
-    write(VERIFIER_KEY, &pkce.verifier);
-    write(STATE_KEY, state);
+pub(crate) fn save_pending(pkce: &Pkce, state: &str, redirect_uri: &str) {
+    let pending = PendingLogin { verifier: pkce.verifier.as_str(), state, redirect_uri };
+    if let Ok(value) = serde_json::to_string(&pending) {
+        write(PENDING_KEY, &value);
+    }
 }
 
-/// The verifier is single-use: read removes it, so a replayed callback cannot
-/// reuse it. `state` likewise, after a successful match.
-pub(crate) fn take_pending() -> Option<(String, String)> {
-    let verifier = read(VERIFIER_KEY)?;
-    let state = read(STATE_KEY)?;
-    drop_key(VERIFIER_KEY);
-    drop_key(STATE_KEY);
-    Some((verifier, state))
+/// Consume the record before validation or exchange, including corrupt data.
+pub(crate) fn take_pending() -> Option<PendingLogin> {
+    let value = read(PENDING_KEY);
+    drop_key(PENDING_KEY);
+    serde_json::from_str(&value?).ok()
 }
 
 /// Discard a pending flow without completing it (mismatched `state`, or an
 /// IdP-reported error).
 pub(crate) fn discard_pending() {
-    drop_key(VERIFIER_KEY);
-    drop_key(STATE_KEY);
+    drop_key(PENDING_KEY);
 }
 
 /// The current page URL, which doubles as the registered redirect target.
@@ -302,14 +307,24 @@ pub(crate) fn current_url() -> Option<String> {
     None
 }
 
-/// Strip the `?code=…&state=…` callback query so a reload does not replay the
-/// code. `replaceState` leaves the console's own routing untouched.
+/// Remove only OAuth callback parameters; retain application context.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn clear_callback_query() {
     if let Some(w) = web_sys::window()
+        && let Ok(href) = w.location().href()
+        && let Ok(mut url) = reqwest::Url::parse(&href)
+        && url.query_pairs().any(|(key, _)| matches!(key.as_ref(), "code" | "error"))
         && let Ok(history) = w.history()
     {
-        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some("/"));
+        let retained: Vec<(String, String)> = url.query_pairs()
+            .filter(|(key, _)| !matches!(key.as_ref(),
+                "code" | "state" | "session_state" | "iss" | "error" | "error_description" | "error_uri"))
+            .map(|(key, value)| (key.into_owned(), value.into_owned())).collect();
+        url.set_query(None);
+        if !retained.is_empty() {
+            url.query_pairs_mut().extend_pairs(retained);
+        }
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(url.as_str()));
     }
 }
 
@@ -360,6 +375,8 @@ pub(crate) fn store_token(token: &Token) {
     write(TOKEN_KEY, &token.access_token);
     if let Some(exp) = token.expires_at {
         write(TOKEN_EXPIRY_KEY, &exp.to_string());
+    } else {
+        drop_key(TOKEN_EXPIRY_KEY);
     }
 }
 
@@ -368,17 +385,18 @@ pub(crate) fn clear_token() {
     drop_key(TOKEN_EXPIRY_KEY);
 }
 
-/// The bearer token to attach to a write request, or `None` when absent or
+pub(crate) fn stored_token() -> Option<Token> {
+    Some(Token {
+        access_token: read(TOKEN_KEY)?,
+        expires_at: read(TOKEN_EXPIRY_KEY).and_then(|value| value.parse().ok()),
+    })
+}
+
+/// The bearer token to attach to a business request, or `None` when absent or
 /// within the expiry skew. A token we cannot date is trusted and left to the
 /// backend's 401 to reject.
 pub(crate) fn bearer_token(now: u64) -> Option<String> {
-    let token = read(TOKEN_KEY)?;
-    if let Some(exp) = read(TOKEN_EXPIRY_KEY).and_then(|v| v.parse::<u64>().ok())
-        && !token_is_fresh(&Token { access_token: String::new(), expires_at: Some(exp) }, now)
-    {
-        return None;
-    }
-    Some(token)
+    stored_token().filter(|token| token_is_fresh(token, now)).map(|token| token.access_token)
 }
 
 /// Record that the backend rejected our token (401). The next auth resolve
@@ -386,6 +404,8 @@ pub(crate) fn bearer_token(now: u64) -> Option<String> {
 /// token is not retried and the user is told what to do.
 pub(crate) fn mark_rejected() {
     write(REJECTED_KEY, "1");
+    #[cfg(target_arch = "wasm32")]
+    { *SESSION_REVISION.write() += 1; }
 }
 
 /// Whether a token has been rejected since the last check.

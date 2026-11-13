@@ -14,6 +14,7 @@
 //! Existing research, metric, manifest, report and operator tools remain
 //! supporting destinations; the console never owns execution status.
 
+pub mod access;
 mod activity;
 mod api;
 mod auth;
@@ -358,6 +359,14 @@ a { color:var(--color-secondary); }
   height:auto; min-height:36px; flex:0 0 auto; border-bottom:1px solid var(--color-divider); }
 .topbar h1 { font-size:1rem; color:var(--color-secondary); margin:0; flex-shrink:0; }
 .topbar .hint { color:var(--color-text-muted); font-size:.72rem; }
+.access-shell { min-height:100dvh; background:var(--color-background); color:var(--color-text); }
+.access-shell .topbar { flex-wrap:wrap; }
+.access-wall { max-width:70ch; padding:clamp(1.5rem,5vw,4rem); margin-inline:auto; }
+.access-wall h2 { font-size:clamp(1.35rem,3vw,2rem); text-wrap:balance; margin:1rem 0; }
+.access-wall p { line-height:1.6; overflow-wrap:anywhere; }
+.access-wall .btn { margin-top:1rem; }
+.access-shell :focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:2px; }
+.metrics-access { flex:0 0 auto; line-height:1.5; margin:.5rem .75rem; font-size:.8rem; }
 .views { display:flex; align-items:center; gap:.3rem; flex:1; min-width:0; flex-wrap:wrap; }
 .view-tab { display:inline-flex; }
 .view-btn.active-view { background:var(--color-background); color:var(--color-secondary); border-color:var(--color-secondary); }
@@ -542,16 +551,27 @@ pub fn App() -> Element {
     let ws_emit = workspace_event_handler(&ws);
     let admin_emit = workspace_event_handler(&admin_ws);
 
-    // Admin page toggle — a separate panel set (GPU/Kueue/inference). Researchers
-    // stay on the default page; access itself is gated at the ingress (Zero Trust).
     let mut admin = use_signal(|| false);
+    let mut auth_state = use_resource(|| async {
+        let _revision = auth::session_revision();
+        resolve_auth_phase().await
+    });
+    // A verified session precedes business data; protected reads never fall
+    // back to anonymous traffic while access is being checked.
+    let mut snapshot = use_resource(move || async move {
+        if !read_phase(&auth_state.read()).can_read() {
+            return Err("sign in to load research resources".into());
+        }
+        fetch_snapshot().await
+    });
+    let sched = use_resource(move || async move {
+        if !read_phase(&auth_state.read()).can_read_infrastructure() {
+            return Err("infrastructure access is not assigned to this session".into());
+        }
+        fetch_scheduling().await
+    });
 
-    // Snapshot fetched once from the backend; views read it reactively.
-    let mut snapshot = use_resource(move || async move { fetch_snapshot().await });
-    // Scheduling/inference stack snapshot for the admin page.
-    let sched = use_resource(move || async move { fetch_scheduling().await });
-
-    let pending = use_hook(|| Rc::new(RefCell::new(review::restore_pending())));
+    let pending = use_hook(|| Rc::new(RefCell::new(review::restore_pending("athena.review.pending.v1"))));
     // External selection state for the data-less ExperimentDetail panel.
     let selected = use_signal({
         let pending = pending.clone();
@@ -562,7 +582,16 @@ pub fn App() -> Element {
     let template_doc = use_signal(|| "# Load a template to view its YAML.\n".to_string());
 
     // Report Curator state (draft, loaded report, tab, save outcome).
-    let curator_state = use_signal(curator::CuratorState::default);
+    let curator_state = use_signal(|| {
+        let pending = review::restore_pending("athena.curator.pending.v1");
+        curator::CuratorState {
+            loaded: pending.loaded,
+            pinned_campaign: pending.pinned_campaign,
+            base: pending.base,
+            draft: pending.draft,
+            ..Default::default()
+        }
+    });
     let review_feedback = use_signal({
         let pending = pending.clone();
         move || {
@@ -582,13 +611,28 @@ pub fn App() -> Element {
     });
     let review_reference = use_signal(move || pending.borrow_mut().reference.take());
     use_effect(move || review::preserve_pending(
+        "athena.review.pending.v1",
         &review_feedback.read(),
         selected.read().as_ref(),
         review_reference.read().as_ref(),
         review_feedback_subject.read().as_deref(),
         snapshot.read().as_ref().and_then(|value| value.as_ref().ok()),
     ));
-    review::use_pending_flush(review_feedback, selected, review_reference, review_feedback_subject, snapshot);
+    use_effect(move || review::preserve_pending(
+        "athena.curator.pending.v1", &curator_state.read(), None, None, None, None,
+    ));
+    review::use_pending_flush(move || {
+        let snapshot = snapshot.peek();
+        review::preserve_pending(
+            "athena.review.pending.v1", &review_feedback.peek(),
+            selected.peek().as_ref(), review_reference.peek().as_ref(),
+            review_feedback_subject.peek().as_deref(),
+            snapshot.as_ref().and_then(|value| value.as_ref().ok()),
+        );
+        review::preserve_pending(
+            "athena.curator.pending.v1", &curator_state.peek(), None, None, None, None,
+        );
+    });
     // Pin the initial presentation selection once. A later refresh must not
     // silently move the comparison to a newly-created run.
     use_effect(move || {
@@ -613,10 +657,6 @@ pub fn App() -> Element {
     // ExperimentDetail. The breadcrumb bar is the rendered form of this signal.
     let research_nav = use_signal(|| ResearchNav::Global);
 
-    // Sign-in state. Drives the top-bar control and gates the Curator's save
-    // button: reads stay open, so a signed-out visitor browses normally and
-    // only hits auth when it tries to write a ResearchReport.
-    let auth_state = use_resource(|| async { resolve_auth_phase().await });
 
     let review_ws = ws.clone();
     let body = move |kind: Panel, _maximized: bool| -> Element {
@@ -742,11 +782,40 @@ pub fn App() -> Element {
     let admin_pointer_cancel_workspace = admin_ws.clone();
     let admin_key_workspace = admin_ws.clone();
     let admin_wheel_workspace = admin_ws.clone();
+    let phase = read_phase(&auth_state.read());
 
     rsx! {
         style { {panel_kit::CSS} }
         style { {APP_CSS} }
-        if admin() {
+        if !phase.can_read() {
+            div { class: "access-shell",
+                header { class: "topbar",
+                    h1 { "Athena Console" }
+                    {auth_bar(&phase)}
+                }
+                main { class: "access-wall", role: "status",
+                    h2 {
+                        match &phase {
+                            auth_flow::Phase::Loading => "Checking access…",
+                            auth_flow::Phase::Denied { .. } => "Athena access is not assigned",
+                            auth_flow::Phase::Expired { .. } => "Sign in again to continue",
+                            auth_flow::Phase::Failed { .. } => "Sign-in could not finish",
+                            _ => "Sign in to your research workspace",
+                        }
+                    }
+                    match &phase {
+                        auth_flow::Phase::Denied { message, .. }
+                        | auth_flow::Phase::Expired { message, .. }
+                        | auth_flow::Phase::Failed { message, .. } => rsx! { p { "{message}" } },
+                        _ => rsx! { p { "Research resources require an authorized Athena account." } },
+                    }
+                    p { class: "muted", "Signing in does not submit feedback or change research execution." }
+                    if !matches!(phase, auth_flow::Phase::Loading) {
+                        button { class: "btn", onclick: move |_| auth_state.restart(), "Check session" }
+                    }
+                }
+            }
+        } else if admin() && phase.can_read_infrastructure() {
             div {
                 class: "{admin_root_class}",
                 tabindex: "0",
@@ -761,7 +830,7 @@ pub fn App() -> Element {
                 },
                 onkeydown: move |event| handle_key(&admin_key_workspace, &event),
                 header { class: "topbar",
-                    h1 { "Athena Console · Admin" }
+                    h1 { "Athena Console · Infrastructure" }
                     span { class: "hint", "GPU scheduling · Kueue · inference · Hephaestus — read-only" }
                     {auth_bar(&read_phase(&auth_state.read()))}
                     button { class: "btn admin-toggle", onclick: move |_| admin.set(false), "← Research" }
@@ -796,9 +865,11 @@ pub fn App() -> Element {
                 header { class: "topbar",
                     h1 { "Athena Console" }
                     {view_bar(&ws, view_draft, view_err)}
-                    button { class: "btn", title: "Reload controller-owned resource snapshots", onclick: move |_| snapshot.restart(), "Refresh" }
-                    {auth_bar(&read_phase(&auth_state.read()))}
-                    button { class: "btn admin-toggle", onclick: move |_| admin.set(true), "Admin" }
+                    button { class: "btn", title: "Recheck access and reload controller-owned snapshots", onclick: move |_| auth_state.restart(), "Refresh" }
+                    {auth_bar(&phase)}
+                    if phase.can_read_infrastructure() {
+                        button { class: "btn admin-toggle", onclick: move |_| admin.set(true), "Infrastructure" }
+                    }
                 }
                 div {
                     class: "{workspace_class}",
@@ -864,10 +935,14 @@ async fn resolve_auth_phase() -> Result<auth_flow::Phase, String> {
         return Ok(expired_phase(&config, "your session is no longer valid"));
     }
 
-    if auth::bearer_token(auth::now_seconds()).is_some() {
-        return Ok(auth_flow::Phase::SignedIn);
+    match auth_flow::stored_session(auth::stored_token().as_ref(), auth::now_seconds()) {
+        auth_flow::StoredSession::Verify => verified_session_phase(&config).await,
+        auth_flow::StoredSession::Expired => {
+            auth::clear_token();
+            Ok(expired_phase(&config, "your access token expired; sign in again to continue"))
+        }
+        auth_flow::StoredSession::Missing => Ok(signed_out_phase(&config)),
     }
-    Ok(signed_out_phase(&config))
 }
 
 /// Exchange the callback code, then report the resulting phase.
@@ -876,28 +951,33 @@ async fn finish_callback(
     code: &str,
     returned_state: Option<&str>,
 ) -> Result<auth_flow::Phase, String> {
-    if let Err(message) = auth_flow::check_state(returned_state.unwrap_or_default()) {
-        return Ok(failed_phase(config, message));
-    }
-    let Some(verifier) = auth::take_verifier() else {
-        return Ok(failed_phase(
-            config,
-            "PKCE verifier was lost; sign in again".into(),
-        ));
+    let login = match auth_flow::check_state(returned_state.unwrap_or_default()) {
+        Ok(login) => login,
+        Err(message) => return Ok(failed_phase(config, message)),
     };
-    let Some(redirect_uri) = auth::current_url() else {
-        return Ok(failed_phase(
-            config,
-            "cannot determine the redirect URI".into(),
-        ));
-    };
-    let body = auth::token_request_body(code, &verifier, &redirect_uri, &config.client_id);
+    let body = auth::token_request_body(code, &login.verifier, &login.redirect_uri, &config.client_id);
     match exchange_token(config, &body).await {
         Ok(token) => {
             auth::store_token(&token);
-            Ok(auth_flow::Phase::SignedIn)
+            verified_session_phase(config).await
         }
         Err(message) => Ok(failed_phase(config, message)),
+    }
+}
+
+async fn verified_session_phase(config: &auth::AuthConfig) -> Result<auth_flow::Phase, String> {
+    let url = format!("{}/api/auth/session", api_base());
+    match api::send_json(reqwest::Client::new().get(url)).await {
+        Ok(session) => Ok(auth_flow::Phase::SignedIn { session }),
+        Err(api::ApiError::Unauthorized { message, .. }) => {
+            auth::clear_token();
+            Ok(expired_phase(config, &message))
+        }
+        Err(api::ApiError::Forbidden(message)) => Ok(auth_flow::Phase::Denied {
+            message,
+            sign_in: auth_flow::begin(config, &auth::current_url().unwrap_or_default()),
+        }),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -958,28 +1038,28 @@ fn expired_phase(config: &auth::AuthConfig, message: &str) -> auth_flow::Phase {
     }
 }
 
-/// Top-bar sign-in control: shows session state, and when a flow can start,
-/// navigates to the identity provider. Silent when auth is off or a session is
-/// live, so a working console carries no extra chrome.
+/// Session state and recovery remain visible without taking over the workspace.
 fn auth_bar(phase: &auth_flow::Phase) -> Element {
-    if let Some((label, title)) = phase.notice() {
-        return rsx! {
-            span { class: "hint", title: "{title}",
-                {metadata_chip("Session", label)}
+    let notice = phase.notice();
+    let sign_in = auth_flow::sign_in_url(phase);
+    rsx! {
+        if let auth_flow::Phase::SignedIn { session } = phase {
+            span { class: "hint", title: "{session.profile} · {session.namespaces.join(\", \")}",
+                {metadata_chip("Access", if session.permissions.write_reports { "reports enabled" } else { "read only" })}
             }
-        };
-    }
-    if let Some(url) = auth_flow::sign_in_url(phase) {
-        return rsx! {
+        }
+        if let Some((label, title)) = notice {
+            span { class: "hint", title: "{title}", {metadata_chip("Session", label)} }
+        }
+        if let Some(url) = sign_in {
             button {
                 class: "btn",
-                title: "sign in through the identity provider to save reports",
+                title: "Sign in through the identity provider; no research action is submitted",
                 onclick: move |_| auth::navigate_to(&url),
                 "Sign in"
             }
-        };
+        }
     }
-    rsx! {}
 }
 
 fn restore_detail_panels(emit: EventHandler<WorkspaceEvent<Panel>>) {
@@ -1149,6 +1229,11 @@ fn experiment_metrics_view(selected: Signal<Option<ResourceSummary>>) -> Element
 
     rsx! {
         div { class: "embed-block",
+            p { class: "metrics-access",
+                "Metrics use your separate Grafana session. "
+                a { href: "{GRAFANA_BASE}/login", target: "_blank", rel: "noopener noreferrer", "Sign in to Grafana" }
+                " if the embedded dashboard asks for access, then reopen this panel. The console does not pass its token to Grafana."
+            }
             GrafanaDashboard {
                 base_url: GRAFANA_BASE,
                 dashboard_uid: GRAFANA_DASHBOARD_UID,
@@ -1717,45 +1802,25 @@ pub(crate) fn api_base() -> String {
 /// `GET /api/snapshot` → the full [`ClusterSnapshot`].
 async fn fetch_snapshot() -> Result<ClusterSnapshot, String> {
     let url = format!("{}/api/snapshot", api_base());
-    reqwest::get(&url)
-        .await
-        .map_err(|e| e.to_string())?
-        .json::<ClusterSnapshot>()
-        .await
-        .map_err(|e| e.to_string())
+    api::send_json(reqwest::Client::new().get(url)).await.map_err(|e| e.to_string())
 }
 
 /// `GET /api/scheduling` → the [`SchedulingSnapshot`] for the admin page.
 async fn fetch_scheduling() -> Result<SchedulingSnapshot, String> {
     let url = format!("{}/api/scheduling", api_base());
-    reqwest::get(&url)
-        .await
-        .map_err(|e| e.to_string())?
-        .json::<SchedulingSnapshot>()
-        .await
-        .map_err(|e| e.to_string())
+    api::send_json(reqwest::Client::new().get(url)).await.map_err(|e| e.to_string())
 }
 
 /// `GET /api/manifest/{ns}/{kind}/{name}` → resource manifest YAML.
 async fn fetch_manifest(namespace: &str, kind: &str, name: &str) -> Result<String, String> {
     let url = format!("{}/api/manifest/{namespace}/{kind}/{name}", api_base());
-    reqwest::get(&url)
-        .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
-        .map_err(|e| e.to_string())
+    api::send_text(reqwest::Client::new().get(url)).await.map_err(|e| e.to_string())
 }
 
 /// `GET /api/template/{ns}/{name}` → ExperimentTemplate YAML.
 async fn fetch_template_yaml(namespace: &str, name: &str) -> Result<String, String> {
     let url = format!("{}/api/template/{namespace}/{name}", api_base());
-    reqwest::get(&url)
-        .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
-        .map_err(|e| e.to_string())
+    api::send_text(reqwest::Client::new().get(url)).await.map_err(|e| e.to_string())
 }
 
 /// `POST /api/reports` — persist a ResearchReport spec, returns the summary row.
@@ -1782,18 +1847,11 @@ pub(crate) async fn preview_report(dto: ReportSpecDto) -> Result<String, String>
         .map_err(|e| e.to_string())
 }
 
-/// `GET /api/reports/{ns}/{name}` — one report's detail. Reads stay open, so
-/// this needs no token; it is here so the curator shares the data layer's URL
-/// construction with the write paths.
+/// `GET /api/reports/{ns}/{name}` — authenticated editable spec and observed status.
 pub(crate) async fn fetch_report_detail(
     namespace: &str,
     name: &str,
 ) -> Result<ReportDetailDto, String> {
     let url = format!("{}/api/reports/{namespace}/{name}", api_base());
-    reqwest::get(&url)
-        .await
-        .map_err(|e| e.to_string())?
-        .json::<ReportDetailDto>()
-        .await
-        .map_err(|e| e.to_string())
+    api::send_json(reqwest::Client::new().get(url)).await.map_err(|e| e.to_string())
 }
