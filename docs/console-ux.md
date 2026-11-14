@@ -1,6 +1,6 @@
 # Athena Console UX
 
-Last reviewed: 2026-11-13
+Last reviewed: 2026-11-14
 
 This is the canonical story, panel-ownership and component inventory for the
 console. Update it in place when adding or removing a panel. Kubernetes owns
@@ -138,12 +138,21 @@ and supporting panels are retained rather than removed merely to simplify a mock
   standalone context instead of substituting a newer incumbent. A fresh
   Kubernetes snapshot still validates object identity. The backup is cleared
   after confirmed save or explicit reversion/discard, not treated as a review
-  ledger or a successful write. Create/update errors retain the draft and expose
-  Retry. A saved version can be compared after an error;
-  keeping the user's observation against that revision is explicit and preserves
-  unrelated latest sections. Changed subject/evidence blocks that merge; saving
-  as a new named report is an explicit alternative. Existing resourceVersion
-  conflict protection remains in force.
+  ledger or a successful write. Create/update errors retain the typed HTTP
+  failure and draft. The editor leads with the outcome and recovery action,
+  not a Kubernetes exception dump; full diagnostics remain under a closed,
+  bounded Technical details disclosure. Transport/upstream errors say **Save
+  not confirmed**, never inventing whether persistence happened. Retry is
+  explicit; no automatic resubmission runs.
+- A saved observation can be compared after a conflict or uncertain outcome.
+  Keeping it against that revision is explicit and preserves unrelated latest
+  sections. Context/name comparison follows the same boundary-whitespace
+  normalization as report serialization, so an unchanged persisted context is
+  not mistaken for changed evidence. Actual subject/reference/context changes
+  still block the merge. **Keep draft as a new report** retains content and
+  evidence but clears the old name/version; creating it is a separate action.
+  Explicit reversion clears stale error/comparison/preview state as well as
+  restoring the base draft. Existing resourceVersion protection remains.
 - ResearchReport supplies durable research memory, not a feedback-consumption
   receipt. Nothing here asserts that the research agent read, accepted or acted
   on an observation.
@@ -598,6 +607,28 @@ Catalog/Infrastructure, named-view persistence, and a constrained viewport. Save
 and text captures outside the repository; distinguish fixture rendering proof
 from live OIDC/Grafana/Kubernetes integration. No claim about agent traces can
 be made without their missing data contract.
+
+### Report recovery verification (2026-11-14)
+
+- The console package's 68 library and 21 BFF/auth tests pass, including
+  regression coverage for canonicalized persisted review context, preservation
+  of evidence when forking an uncertain save, and stale recovery-state cleanup
+  after explicit reversion. Clippy retains only its three existing warnings.
+- The production `Dockerfile.console` recipe builds. Seventeen browser
+  assertions against that bundle cover uncertain-write copy, no automatic
+  retry, complete collapsed diagnostics, bounded expanded diagnostics at 390px,
+  conflict comparison, explicit latest-version observation merge, preservation
+  of concurrent sections/evidence, safe fork and reversion. The standalone
+  curator uses the same notice and retains its separate draft backup.
+- The first browser pass exposed a real normalization mismatch: the report DTO
+  trims section boundaries but the old merge guard compared raw editor text.
+  The corrected guard accepts that canonical round trip while still refusing
+  changed evidence. Desktop and compact confirmation captures are outside the
+  repository; no visual-identity replacement or dependencies were introduced.
+- All requests in this proof used a synthetic, loopback-only fixture with no
+  Kubernetes client or credentials. Fixture success/failure is not a real save
+  or a controller outcome. Live SSO remains a separate owner-passkey prerequisite;
+  the held auth/GitOps cutover was not merged or deployed by this refinement.
 
 ### Private access verification (2026-11-13)
 

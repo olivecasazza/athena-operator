@@ -401,6 +401,17 @@ a { color:var(--color-secondary); }
 .cur-name { width:18ch; flex:0 0 18ch; }
 .cur-title { flex:1; min-width:12ch; width:auto; }
 .cur-dirty { color:var(--color-warning); font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; }
+.cur-save-feedback { flex:1 0 100%; min-width:0; }
+.cur-failure { color:var(--color-text); padding:.6rem; border:1px solid var(--color-border);
+  background:var(--color-background); min-width:0; }
+.cur-failure p { margin:0 0 .4rem; max-width:72ch; line-height:1.5; overflow-wrap:anywhere; }
+.cur-failure .cur-failure-title { font-weight:600; }
+.cur-failure details { margin-top:.5rem; }
+.cur-failure summary { cursor:pointer; min-height:var(--hit-min); display:list-item;
+  align-content:center; color:var(--color-text-muted); }
+.cur-failure pre { max-height:12rem; overflow:auto; white-space:pre-wrap;
+  overflow-wrap:anywhere; margin:.4rem 0 0; font:inherit; line-height:1.5; }
+.cur-failure .btn { margin:.1rem 0 .25rem; }
 .btn.primary:not(:disabled) { border-color:var(--color-text); color:var(--color-text); }
 .btn:disabled { color:var(--color-text-muted); border-color:var(--color-border); cursor:not-allowed; }
 .ok { color:var(--color-success); font-size:.74rem; }
@@ -1824,19 +1835,15 @@ async fn fetch_template_yaml(namespace: &str, name: &str) -> Result<String, Stri
 }
 
 /// `POST /api/reports` — persist a ResearchReport spec, returns the summary row.
-pub(crate) async fn create_report(dto: ReportSpecDto) -> Result<ReportDetailDto, String> {
+pub(crate) async fn create_report(dto: ReportSpecDto) -> Result<ReportDetailDto, api::ApiError> {
     let url = format!("{}/api/reports", api_base());
-    api::send_json(reqwest::Client::new().post(&url).json(&dto))
-        .await
-        .map_err(|e| e.to_string())
+    api::send_json(reqwest::Client::new().post(&url).json(&dto)).await
 }
 
 /// `PUT /api/reports/{ns}/{name}` — replace against the loaded resourceVersion.
-pub(crate) async fn update_report(dto: ReportSpecDto) -> Result<ReportDetailDto, String> {
+pub(crate) async fn update_report(dto: ReportSpecDto) -> Result<ReportDetailDto, api::ApiError> {
     let url = format!("{}/api/reports/{}/{}", api_base(), dto.namespace, dto.name);
-    api::send_json(reqwest::Client::new().put(&url).json(&dto))
-        .await
-        .map_err(|e| e.to_string())
+    api::send_json(reqwest::Client::new().put(&url).json(&dto)).await
 }
 
 /// `POST /api/reports/preview` — compose the dossier Markdown; nothing persisted.

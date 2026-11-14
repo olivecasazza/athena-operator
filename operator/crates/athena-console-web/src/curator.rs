@@ -174,7 +174,20 @@ pub enum SaveState {
     Idle,
     Busy(&'static str),
     Done(String),
-    Failed(String),
+    Failed(crate::api::ApiError),
+    LoadFailed(String),
+    ContextChanged(&'static str),
+}
+
+impl SaveState {
+    fn offers_saved_recovery(&self) -> bool {
+        matches!(self,
+            Self::Failed(crate::api::ApiError::Status { code: 409 | 500..=599, .. }
+                | crate::api::ApiError::Transport(_))
+            | Self::LoadFailed(_)
+            | Self::ContextChanged(_)
+        )
+    }
 }
 
 /// All curator state, one signal owned by the App.
@@ -218,6 +231,22 @@ impl CuratorState {
         self.save = SaveState::Idle;
         self.latest_saved = None;
     }
+
+    fn revert(&mut self) {
+        self.draft = self.base.clone();
+        self.save = SaveState::Idle;
+        self.latest_saved = None;
+        self.preview = None;
+    }
+
+    fn keep_as_new(&mut self) {
+        self.loaded = None;
+        self.base = Draft::default();
+        self.draft.name.clear();
+        self.latest_saved = None;
+        self.save = SaveState::Idle;
+        self.preview = None;
+    }
 }
 
 /// Load a report into the curator (used by the Reports panel's Open action).
@@ -226,7 +255,7 @@ pub fn open_report(mut state: Signal<CuratorState>, namespace: String, name: Str
     spawn(async move {
         match crate::fetch_report_detail(&namespace, &name).await {
             Ok(detail) => state.write().open(detail),
-            Err(e) => state.write().save = SaveState::Failed(format!("load failed: {e}")),
+            Err(e) => state.write().save = SaveState::LoadFailed(e),
         }
     });
 }
@@ -347,13 +376,14 @@ fn merge_observation(
         .sections
         .iter()
         .find(|(key, _)| key == "Review context")
-        .map(|(_, text)| text);
+        .map(|(_, text)| text.trim());
     if latest.spec.namespace != namespace
         || latest.spec.campaign_ref != campaign
-        || latest.spec.name != ours.name
+        || latest.spec.name != ours.name.trim()
         || latest.spec.about != ours.about
         || latest.spec.references != ours.references
-        || latest.spec.sections.get("Review context") != context
+        // Section boundaries are normalized by `to_dto` before persistence.
+        || latest.spec.sections.get("Review context").map(|text| text.trim()) != context
     {
         return Err(
             "The saved report's subject or evidence changed. Preserve this observation as a separate report instead of overwriting that context.",
@@ -384,17 +414,16 @@ fn observation_recovery(
     namespace: &str,
     campaign: &str,
 ) -> Element {
-    let SaveState::Failed(message) = &st.save else {
+    if !st.save.offers_saved_recovery() {
         return rsx! {};
-    };
+    }
     let namespace = namespace.to_string();
     let compare_namespace = namespace.clone();
     let campaign = campaign.to_string();
     let name = st.draft.name.clone();
-    let original_error = message.clone();
+    let original_error = st.save.clone();
     rsx! {
         div { class: "review-recovery",
-            p { "Your observation is preserved. Compare with the saved report before replacing a concurrent version, or give this draft a new report name." }
             button {
                 class: "btn",
                 onclick: move |_| {
@@ -407,25 +436,13 @@ fn observation_recovery(
                             Ok(detail) => {
                                 let mut st = state.write();
                                 st.latest_saved = Some(detail);
-                                st.save = SaveState::Failed(original_error);
+                                st.save = original_error;
                             }
-                            Err(error) => state.write().save = SaveState::Failed(format!("Saved report could not be loaded: {error}")),
+                            Err(error) => state.write().save = SaveState::LoadFailed(error),
                         }
                     });
                 },
                 "Compare with saved report"
-            }
-            button {
-                class: "btn",
-                onclick: move |_| {
-                    let mut st = state.write();
-                    st.loaded = None;
-                    st.base = Draft::default();
-                    st.draft.name.clear();
-                    st.latest_saved = None;
-                    st.save = SaveState::Idle;
-                },
-                "Save draft as a new report"
             }
             if let Some(latest) = &st.latest_saved {
                 p { "Saved {latest.spec.namespace}/{latest.spec.name} · version {latest.spec.resource_version.as_deref().unwrap_or(\"not reported\")}" }
@@ -438,7 +455,7 @@ fn observation_recovery(
                         let Some(latest) = st.latest_saved.as_ref() else { return; };
                         let merged = match merge_observation(&st.draft, latest, &namespace, &campaign) {
                             Ok(merged) => merged,
-                            Err(reason) => { st.save = SaveState::Failed(reason.into()); return; }
+                            Err(reason) => { st.save = SaveState::ContextChanged(reason); return; }
                         };
                         if let Some(latest) = st.latest_saved.take() {
                             st.open(latest);
@@ -1006,6 +1023,80 @@ fn status_tab(st: &CuratorState) -> Element {
     }
 }
 
+fn save_failure_copy(error: &crate::api::ApiError, is_new: bool) -> (&'static str, &'static str) {
+    use crate::api::ApiError;
+    match error {
+        ApiError::Unauthorized { .. } => (
+            "Sign-in required",
+            "Your draft is still here. Sign in again from the header before saving.",
+        ),
+        ApiError::Forbidden(_) => (
+            "No permission to save this report",
+            "Your draft is still here. Check your account's report-writing access and namespace before retrying.",
+        ),
+        ApiError::Status { code: 409, .. } if is_new => (
+            "This report name already exists",
+            "Your draft is still here. Keep it under a new name, or compare with the saved report before retrying.",
+        ),
+        ApiError::Status { code: 409, .. } => (
+            "The saved report changed",
+            "Your draft is still here. Compare with the saved version before replacing a concurrent edit.",
+        ),
+        ApiError::Status { code: 400 | 422, .. } => (
+            "The report needs attention",
+            "Your draft is still here. Check the report fields; technical details contain the server's reason.",
+        ),
+        ApiError::Status { code: 404, .. } => (
+            "The report could not be found",
+            "Your draft is still here. Check the report and namespace in Reports before retrying.",
+        ),
+        ApiError::Status { code: 429, .. } => (
+            "Report requests are being limited",
+            "Your draft is still here. Wait before choosing Retry save; no automatic retry will run.",
+        ),
+        _ => (
+            "Save not confirmed",
+            "Your draft is still here. The console could not confirm the outcome. Check the saved report before retrying.",
+        ),
+    }
+}
+
+fn failure_notice(mut state: Signal<CuratorState>, st: &CuratorState, is_new: bool) -> Element {
+    use std::borrow::Cow;
+    let (title, advice, diagnostic) = match &st.save {
+        SaveState::Failed(error) => {
+            let (title, advice) = save_failure_copy(error, is_new);
+            (title, advice, Some(Cow::Owned(error.to_string())))
+        }
+        SaveState::LoadFailed(error) => (
+            "Report unavailable",
+            "Your current draft is unchanged. Try opening the report again from Reports.",
+            Some(Cow::Borrowed(error.as_str())),
+        ),
+        SaveState::ContextChanged(reason) => ("Saved context changed", *reason, None),
+        _ => return rsx! {},
+    };
+    rsx! {
+        div { class: "cur-failure", role: "alert", aria_label: title,
+            p { class: "cur-failure-title", "{title}" }
+            p { "{advice}" }
+            if st.dirty() && st.save.offers_saved_recovery() {
+                button {
+                    class: "btn",
+                    onclick: move |_| state.write().keep_as_new(),
+                    "Keep draft as a new report"
+                }
+            }
+            if let Some(diagnostic) = diagnostic {
+                details {
+                    summary { "Technical details" }
+                    pre { "{diagnostic}" }
+                }
+            }
+        }
+    }
+}
+
 fn footer(
     mut state: Signal<CuratorState>,
     st: &CuratorState,
@@ -1085,8 +1176,7 @@ fn footer(
                 class: "btn",
                 disabled: !dirty || busy,
                 onclick: move |_| {
-                    let mut s = state.write();
-                    s.draft = s.base.clone();
+                    state.write().revert();
                 },
                 "revert"
             }
@@ -1097,12 +1187,14 @@ fn footer(
                 onclick: save,
                 if matches!(st.save, SaveState::Failed(_)) { "Retry save" } else if is_new { "create" } else { "save" }
             }
-            match (&st.save, &problem) {
-                (_, Some(p)) if dirty => rsx! { span { class: "err", "{p}" } },
-                (SaveState::Busy(m), _) => rsx! { span { class: "muted", "{m}" } },
-                (SaveState::Done(m), _) if !dirty => rsx! { span { class: "ok", "{m}" } },
-                (SaveState::Failed(m), _) => rsx! { span { class: "err", "{m}" } },
-                _ => rsx! {},
+            div { class: "cur-save-feedback",
+                match (&st.save, &problem) {
+                    (_, Some(p)) if dirty => rsx! { p { role: "status", "{p}" } },
+                    (SaveState::Busy(m), _) => rsx! { p { role: "status", class: "muted", "{m}" } },
+                    (SaveState::Done(m), _) if !dirty => rsx! { p { role: "status", class: "ok", "{m}" } },
+                    _ => rsx! {},
+                }
+                {failure_notice(state, st, is_new)}
             }
         }
     }
@@ -1156,6 +1248,66 @@ mod tests {
         assert!(!st.dirty());
         st.draft.excluded.insert("e1".into());
         assert!(st.dirty());
+    }
+
+    #[test]
+    fn reverting_a_failed_edit_clears_stale_recovery_without_changing_saved_revision() {
+        let mut state = CuratorState::default();
+        state.open(detail());
+        state.draft.sections.push(("Observation".into(), "unsaved".into()));
+        state.save = SaveState::Failed(crate::api::ApiError::Status {
+            code: 502, body: "upstream diagnostic".into(),
+        });
+        state.latest_saved = Some(detail());
+        state.preview = Some(Ok("old draft preview".into()));
+        state.revert();
+        assert!(state.draft == state.base);
+        assert_eq!(state.loaded.unwrap().spec.resource_version.as_deref(), Some("7"));
+        assert!(matches!(state.save, SaveState::Idle));
+        assert!(state.latest_saved.is_none());
+        assert!(state.preview.is_none());
+    }
+
+    #[test]
+    fn keeping_uncertain_save_as_new_preserves_content_and_drops_old_revision() {
+        let mut state = CuratorState::default();
+        state.open(detail());
+        state.draft.sections.push(("Observation".into(), "keep this observation".into()));
+        state.draft.excluded.insert("excluded-run".into());
+        let expected = state.draft.clone();
+        state.save = SaveState::Failed(crate::api::ApiError::Transport("connection lost".into()));
+        state.keep_as_new();
+        assert!(state.loaded.is_none());
+        assert!(state.draft.name.is_empty());
+        assert_eq!(state.draft.sections, expected.sections);
+        assert_eq!(state.draft.references, expected.references);
+        assert_eq!(state.draft.about, expected.about);
+        assert_eq!(state.draft.excluded, expected.excluded);
+        assert!(state.draft.to_dto("ns", "camp", None).resource_version.is_none());
+        assert!(state.dirty());
+    }
+
+    #[test]
+    fn persisted_observation_context_matches_serialization_but_rejects_changed_evidence() {
+        let candidate = ResourceSummary {
+            namespace: "apps".into(), name: "fixture-run".into(),
+            uid: Some("fixture-run-uid".into()), campaign: Some("fixture-campaign".into()),
+            ..Default::default()
+        };
+        let mut ours = observation_draft(&candidate, None).unwrap();
+        ours.name = " fixture-observation ".into();
+        ours.sections.iter_mut().find(|(key, _)| key == "Observation").unwrap().1 =
+            "Keep my observation".into();
+        let mut latest = ReportDetailDto {
+            spec: ours.to_dto("apps", "fixture-campaign", Some("8".into())),
+            ..Default::default()
+        };
+        latest.spec.sections.insert("Method".into(), "Concurrent method".into());
+        let merged = merge_observation(&ours, &latest, "apps", "fixture-campaign").unwrap();
+        assert!(merged.sections.iter().any(|(key, text)| key == "Method" && text == "Concurrent method"));
+        assert!(merged.sections.iter().any(|(key, text)| key == "Observation" && text == "Keep my observation"));
+        latest.spec.sections.get_mut("Review context").unwrap().push_str("Different evidence");
+        assert!(merge_observation(&ours, &latest, "apps", "fixture-campaign").is_err());
     }
 }
 
