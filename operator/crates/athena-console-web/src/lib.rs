@@ -412,6 +412,13 @@ a { color:var(--color-secondary); }
 .cur-failure pre { max-height:12rem; overflow:auto; white-space:pre-wrap;
   overflow-wrap:anywhere; margin:.4rem 0 0; font:inherit; line-height:1.5; }
 .cur-failure .btn { margin:.1rem 0 .25rem; }
+.cur-navigation { color:var(--color-text); padding:.6rem; border:1px solid var(--color-border);
+  background:var(--color-background); min-width:0; }
+.cur-navigation-copy { display:flex; flex-direction:column; align-items:flex-start; gap:.35rem; }
+.cur-navigation p { margin:0; max-width:72ch; line-height:1.5; overflow-wrap:anywhere; }
+.cur-navigation code { max-width:100%; white-space:normal; overflow-wrap:anywhere; }
+.cur-navigation-actions { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.6rem; }
+.cur-navigation-actions .btn { min-height:44px; min-width:44px; max-width:100%; white-space:normal; text-align:left; }
 .btn.primary:not(:disabled) { border-color:var(--color-text); color:var(--color-text); }
 .btn:disabled { color:var(--color-text-muted); border-color:var(--color-border); cursor:not-allowed; }
 .ok { color:var(--color-success); font-size:.74rem; }

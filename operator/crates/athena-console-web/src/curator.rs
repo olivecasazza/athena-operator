@@ -23,7 +23,10 @@
 //! 6. **Know it worked.** Save is enabled only for a valid, changed draft;
 //!    the outcome and the refreshed status show in place.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 use dioxus::prelude::*;
 use panel_kit::widgets::DataColumnSpec;
@@ -190,6 +193,13 @@ impl SaveState {
     }
 }
 
+/// A local navigation intent, not a persisted report or write request.
+#[derive(Clone, PartialEq)]
+pub(crate) struct ReportTarget {
+    namespace: String,
+    name: String,
+}
+
 /// All curator state, one signal owned by the App.
 #[derive(Clone, PartialEq, Default)]
 pub struct CuratorState {
@@ -205,6 +215,9 @@ pub struct CuratorState {
     pub save: SaveState,
     /// Read-only conflict comparison; never replaces an unsaved draft itself.
     pub latest_saved: Option<ReportDetailDto>,
+    pub(crate) pending_report: Option<Rc<ReportTarget>>,
+    pub(crate) loading_report: Option<Rc<ReportTarget>>,
+    pub(crate) load_generation: u64,
 }
 
 impl CuratorState {
@@ -213,6 +226,8 @@ impl CuratorState {
     }
 
     fn start_new(&mut self) {
+        self.cancel_report_load();
+        self.pending_report = None;
         self.loaded = None;
         self.base = Draft::default();
         self.draft = Draft::default();
@@ -223,6 +238,7 @@ impl CuratorState {
     }
 
     fn open(&mut self, detail: ReportDetailDto) {
+        self.cancel_report_load();
         self.pinned_campaign = Some(detail.spec.campaign_ref.clone());
         self.base = Draft::from_detail(&detail);
         self.draft = self.base.clone();
@@ -233,6 +249,8 @@ impl CuratorState {
     }
 
     fn revert(&mut self) {
+        self.cancel_report_load();
+        self.pending_report = None;
         self.draft = self.base.clone();
         self.save = SaveState::Idle;
         self.latest_saved = None;
@@ -240,6 +258,8 @@ impl CuratorState {
     }
 
     fn keep_as_new(&mut self) {
+        self.cancel_report_load();
+        self.pending_report = None;
         self.loaded = None;
         self.base = Draft::default();
         self.draft.name.clear();
@@ -247,17 +267,124 @@ impl CuratorState {
         self.save = SaveState::Idle;
         self.preview = None;
     }
+
+    fn cancel_report_load(&mut self) {
+        self.load_generation = self.load_generation.wrapping_add(1);
+        self.loading_report = None;
+    }
+
+    fn begin_report_load(&mut self, target: Rc<ReportTarget>) -> Option<u64> {
+        let loading = self.loading_report.is_some();
+        if self.dirty() || (matches!(self.save, SaveState::Busy(_)) && !loading) {
+            if loading {
+                self.cancel_report_load();
+                self.save = SaveState::Idle;
+            }
+            self.pending_report = Some(target);
+            return None;
+        }
+        self.cancel_report_load();
+        self.pending_report = None;
+        self.loading_report = Some(target);
+        self.picking = false;
+        self.save = SaveState::Busy("loading report…");
+        Some(self.load_generation)
+    }
+
+    fn finish_report_load(&mut self, generation: u64, result: Result<ReportDetailDto, String>) {
+        if generation != self.load_generation {
+            return;
+        }
+        let Some(target) = self.loading_report.take() else {
+            return;
+        };
+        if self.dirty() {
+            self.pending_report = Some(target);
+            self.save = match result {
+                Ok(_) => SaveState::Idle,
+                Err(error) => SaveState::LoadFailed(error),
+            };
+            return;
+        }
+        match result {
+            Ok(detail) => self.open(detail),
+            Err(error) => self.save = SaveState::LoadFailed(error),
+        }
+    }
 }
 
-/// Load a report into the curator (used by the Reports panel's Open action).
-pub fn open_report(mut state: Signal<CuratorState>, namespace: String, name: String) {
-    state.write().save = SaveState::Busy("loading…");
+/// Request a report without replacing a dirty draft or accepting stale loads.
+pub fn open_report(state: Signal<CuratorState>, namespace: String, name: String) {
+    load_report_target(state, Rc::new(ReportTarget { namespace, name }));
+}
+
+fn load_report_target(mut state: Signal<CuratorState>, target: Rc<ReportTarget>) {
+    let Some(generation) = state.write().begin_report_load(target.clone()) else {
+        return;
+    };
     spawn(async move {
-        match crate::fetch_report_detail(&namespace, &name).await {
-            Ok(detail) => state.write().open(detail),
-            Err(e) => state.write().save = SaveState::LoadFailed(e),
-        }
+        let result = crate::fetch_report_detail(&target.namespace, &target.name).await;
+        state.write().finish_report_load(generation, result);
     });
+}
+
+fn report_navigation(mut state: Signal<CuratorState>, st: &CuratorState) -> Element {
+    let Some(target) = &st.pending_report else {
+        return match &st.loading_report {
+            Some(target) => rsx! {
+                section { class: "cur-navigation", role: "status",
+                    div { class: "cur-navigation-copy",
+                        strong { "Loading report" }
+                        code { "{target.namespace}/{target.name}" }
+                        p { "Your current document stays visible until the load is accepted." }
+                    }
+                }
+            },
+            None => rsx! {},
+        };
+    };
+    let target = target.clone();
+    let dirty = st.dirty();
+    let busy = matches!(st.save, SaveState::Busy(_));
+    rsx! {
+        section { class: "cur-navigation", role: "alert",
+            div { class: "cur-navigation-copy",
+                strong {
+                    if dirty { "Unsaved draft kept" } else { "Report switch waiting" }
+                }
+                code { "{target.namespace}/{target.name}" }
+                p {
+                    if busy {
+                        "A report request is still running. Switching will not cancel it or save your draft."
+                    } else if dirty {
+                        "Opening this report would replace your unsaved draft. Keep editing, or explicitly discard those edits."
+                    } else {
+                        "A report switch is waiting. No switch has happened yet."
+                    }
+                }
+            }
+            div { class: "cur-navigation-actions",
+                button {
+                    class: "btn",
+                    onclick: move |_| state.write().pending_report = None,
+                    "Keep editing"
+                }
+                button {
+                    class: "btn",
+                    disabled: busy,
+                    onclick: move |_| {
+                        // Only the action that explicitly promised discard may
+                        // discard. A newly dirty draft goes through the guard.
+                        if dirty {
+                            state.write().revert();
+                        }
+                        load_report_target(state, target.clone());
+                    },
+                    if dirty { "Discard draft and open report" } else { "Open requested report" }
+                }
+            }
+        }
+    }
 }
 
 /// Campaign the curator is working on: the loaded report's campaign, else an
@@ -579,6 +706,15 @@ pub fn curator_view(
         .cloned();
     let following = st.loaded.is_none() && st.pinned_campaign.is_none();
     let dirty = st.dirty();
+    let write_busy = matches!(st.save, SaveState::Busy(_)) && st.loading_report.is_none();
+    let navigation = report_navigation(state, &st);
+    let campaign_action_title = if dirty {
+        "save or revert first"
+    } else if write_busy {
+        "wait for the current report request"
+    } else {
+        "pick a campaign"
+    };
 
     // --- subject bar -------------------------------------------------------
     let subject = rsx! {
@@ -596,8 +732,8 @@ pub fn curator_view(
             }
             button {
                 class: "btn",
-                disabled: dirty,
-                title: if dirty { "save or revert first" } else { "pick a campaign" },
+                disabled: dirty || write_busy,
+                title: campaign_action_title,
                 onclick: move |_| {
                     let mut s = state.write();
                     s.picking = !s.picking;
@@ -607,6 +743,7 @@ pub fn curator_view(
             if !following && !dirty {
                 button {
                     class: "btn",
+                    disabled: write_busy,
                     title: "follow the campaign selected elsewhere",
                     onclick: move |_| {
                         let mut s = state.write();
@@ -646,6 +783,7 @@ pub fn curator_view(
             })
             .collect();
         return rsx! {
+            {navigation}
             {subject}
             ConsoleTable {
                 id: "athena-curator-campaigns",
@@ -660,6 +798,7 @@ pub fn curator_view(
 
     let Some(campaign) = campaign else {
         return rsx! {
+            {navigation}
             {subject}
             p { class: "muted", "Select a campaign in Research, or use change." }
         };
@@ -687,7 +826,6 @@ pub fn curator_view(
                             key: "{r.name}",
                             class: if active { "btn cur-report active" } else { "btn cur-report" },
                             title: "{r.name} · {r.phase}",
-                            disabled: dirty && !active,
                             onclick: move |_| open_report(state, ns.clone(), name.clone()),
                             "{label}"
                         }
@@ -696,7 +834,7 @@ pub fn curator_view(
             }
             button {
                 class: if loaded_name.is_none() { "btn cur-report active" } else { "btn cur-report" },
-                disabled: dirty && loaded_name.is_some(),
+                disabled: dirty || write_busy,
                 onclick: move |_| state.write().start_new(),
                 "+ new"
             }
@@ -738,6 +876,7 @@ pub fn curator_view(
 
     rsx! {
         div { class: "cur",
+            {navigation}
             {subject}
             {chooser}
             {tabs}
@@ -1190,7 +1329,7 @@ fn footer(
             div { class: "cur-save-feedback",
                 match (&st.save, &problem) {
                     (_, Some(p)) if dirty => rsx! { p { role: "status", "{p}" } },
-                    (SaveState::Busy(m), _) => rsx! { p { role: "status", class: "muted", "{m}" } },
+                    (SaveState::Busy(m), _) if st.loading_report.is_none() => rsx! { p { role: "status", class: "muted", "{m}" } },
                     (SaveState::Done(m), _) if !dirty => rsx! { p { role: "status", class: "ok", "{m}" } },
                     _ => rsx! {},
                 }
@@ -1248,6 +1387,94 @@ mod tests {
         assert!(!st.dirty());
         st.draft.excluded.insert("e1".into());
         assert!(st.dirty());
+    }
+
+    fn target(name: &str) -> Rc<ReportTarget> {
+        Rc::new(ReportTarget { namespace: "apps".into(), name: name.into() })
+    }
+
+    #[test]
+    fn dirty_report_switch_keeps_document_and_queues_exact_target() {
+        let mut state = CuratorState::default();
+        state.open(detail());
+        state.draft.sections.push(("Observation".into(), "unsaved evidence".into()));
+        let expected = state.draft.clone();
+        assert!(state.begin_report_load(target("other-report")).is_none());
+        assert!(state.draft == expected);
+        assert_eq!(state.loaded.as_ref().unwrap().spec.name, "r");
+        let pending = state.pending_report.as_ref().unwrap();
+        assert_eq!((&*pending.namespace, &*pending.name), ("apps", "other-report"));
+        assert!(state.loading_report.is_none());
+        assert!(!matches!(state.save, SaveState::Busy(_)));
+    }
+
+    #[test]
+    fn latest_report_selection_wins_over_out_of_order_responses() {
+        let mut state = CuratorState::default();
+        state.open(detail());
+        let first = state.begin_report_load(target("first-report")).unwrap();
+        let second = state.begin_report_load(target("second-report")).unwrap();
+        let mut latest = detail();
+        latest.spec.name = "second-report".into();
+        latest.spec.campaign_ref = "second-campaign".into();
+        state.finish_report_load(second, Ok(latest));
+        state.finish_report_load(first, Ok(detail()));
+        assert_eq!(state.loaded.as_ref().unwrap().spec.name, "second-report");
+        assert_eq!(state.pinned_campaign.as_deref(), Some("second-campaign"));
+        assert!(!state.dirty());
+        assert!(state.pending_report.is_none());
+    }
+
+    #[test]
+    fn editing_during_report_load_preserves_original_document() {
+        let mut state = CuratorState::default();
+        state.open(detail());
+        let generation = state.begin_report_load(target("other-report")).unwrap();
+        state.draft.sections.push(("Observation".into(), "typed during load".into()));
+        let expected = state.draft.clone();
+        let mut other = detail();
+        other.spec.name = "other-report".into();
+        state.finish_report_load(generation, Ok(other));
+        assert!(state.draft == expected);
+        assert_eq!(state.loaded.as_ref().unwrap().spec.name, "r");
+        assert_eq!(state.pending_report.as_ref().unwrap().name, "other-report");
+        assert!(matches!(state.save, SaveState::Idle));
+    }
+
+    #[test]
+    fn explicit_document_resets_invalidate_in_flight_loads() {
+        for reset in [
+            CuratorState::start_new as fn(&mut CuratorState),
+            CuratorState::revert,
+            CuratorState::keep_as_new,
+        ] {
+            let mut state = CuratorState::default();
+            state.open(detail());
+            let generation = state.begin_report_load(target("other-report")).unwrap();
+            reset(&mut state);
+            let expected_draft = state.draft.clone();
+            let expected_report = state.loaded.clone();
+            state.finish_report_load(generation, Err("late read failure".into()));
+            assert!(state.draft == expected_draft);
+            assert!(state.loaded == expected_report);
+            assert!(state.pending_report.is_none());
+            assert!(matches!(state.save, SaveState::Idle));
+        }
+    }
+
+    #[test]
+    fn report_switch_waits_for_save_without_losing_intent() {
+        let mut state = CuratorState::default();
+        state.open(detail());
+        state.draft.sections.push(("Observation".into(), "saving this".into()));
+        state.save = SaveState::Busy("saving…");
+        assert!(state.begin_report_load(target("next-report")).is_none());
+        assert!(matches!(state.save, SaveState::Busy("saving…")));
+        assert!(state.loading_report.is_none());
+        state.open(detail());
+        assert_eq!(state.pending_report.as_ref().unwrap().name, "next-report");
+        assert!(!state.dirty());
+        assert_eq!(state.loaded.as_ref().unwrap().spec.name, "r");
     }
 
     #[test]

@@ -153,6 +153,14 @@ and supporting panels are retained rather than removed merely to simplify a mock
   evidence but clears the old name/version; creating it is a separate action.
   Explicit reversion clears stale error/comparison/preview state as well as
   restoring the base draft. Existing resourceVersion protection remains.
+- Opening a saved report from Reports, campaign links or the curator chooser
+  never implicitly discards a dirty draft. The exact namespace/name stays in an
+  inline switch notice; **Keep editing** cancels only that navigation intent.
+  **Discard draft and open report** is an explicit local discard, not a save.
+  A running save finishes before switching can proceed. Late report reads
+  cannot replace a newer selection, an explicitly reset document, or edits
+  typed while the request was pending. Starting another new report is disabled
+  while the current draft is dirty, including an unsaved new report.
 - ResearchReport supplies durable research memory, not a feedback-consumption
   receipt. Nothing here asserts that the research agent read, accepted or acted
   on an observation.
@@ -607,6 +615,28 @@ Catalog/Infrastructure, named-view persistence, and a constrained viewport. Save
 and text captures outside the repository; distinguish fixture rendering proof
 from live OIDC/Grafana/Kubernetes integration. No claim about agent traces can
 be made without their missing data contract.
+
+### Draft-safe report navigation verification (2026-11-14)
+
+- The console package's 73 library and 21 BFF/auth tests pass. Five additional
+  regressions cover dirty report switches, out-of-order responses, edits made
+  during a read, explicit document resets and navigation requested during a
+  save. Clippy retains only its three existing warnings.
+- The production `Dockerfile.console` recipe builds. Eighteen browser
+  assertions against its actual bundle and `console-server` cover both Reports
+  and chooser entry points, explicit keep/discard, delayed response ordering,
+  edits during loading and a new document created before an earlier read returns.
+  Navigation submits no report write; six report reads use intercepted synthetic
+  fixtures. The loopback-only server runs non-root/read-only with a credential-free
+  fixture kubeconfig, not a live cluster connection.
+- The inspection found the dense theme's 24px hit token was too small for the
+  new recovery actions. The corrected controls measure at least 44px in the
+  390px confirmation viewport. Long Kubernetes names wrap without page or notice
+  overflow; copy contrast measures 16.91:1 and the safe action has a 2px solid,
+  2px-offset focus ring. Desktop and compact captures remain outside the repo.
+- This refinement changes no auth policy, panel-kit pin, CRD, dependencies or
+  controller status. It does not establish live SSO/Grafana access or deploy
+  the held private-access cutover.
 
 ### Report recovery verification (2026-11-14)
 
